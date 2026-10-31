@@ -44,6 +44,8 @@ const CATEGORIES = [
 const CATEGORY_FILTERS = [...CATEGORIES, ['favorites', '收藏', 'heart'], ['recent', '最近使用', 'clock']];
 const CATEGORY_LABELS = new Map(CATEGORY_FILTERS.map(([id, label]) => [id, label]));
 const GARMENT_CATEGORIES = new Set(CATEGORIES.slice(1).map(([id]) => id));
+// 排序时复用中文比较器，避免为每一次名称比较重复创建格式化对象。
+const GARMENT_NAME_COLLATOR = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 // 使用酒馆原生图片目录，存档只保留路径，避免每次保存服装时重复序列化整张原图。
 const IMAGE_FOLDER = 'tavern_wardrobe';
@@ -99,6 +101,7 @@ const DEFAULT_TEMPLATES = {
  * @property {string} image 酒馆图片路径或尚未迁移的数据地址，无图片时为空字符串。
  * @property {string} groupId 标签标识，空字符串表示未分组。
  * @property {boolean} favorite 是否已收藏，旧存档默认未收藏。
+ * @property {number} lastUsedAt 最近一次成功应用的毫秒时间戳，0 表示尚无使用记录。
  */
 
 /**
@@ -147,12 +150,14 @@ const PANEL_HTML = `
                 ${icon('hanger')}
                 <div><h1 id="tw-panel-title">衣柜</h1><span class="tw-brand-subtitle">Wardrobe</span></div>
             </div>
-            <label class="tw-search">${icon('search')}<input type="search" placeholder="搜索服装…" aria-label="搜索服装" disabled></label>
+            <label class="tw-search">${icon('search')}<input type="search" placeholder="搜索服装…" aria-label="搜索服装"></label>
             <div class="tw-view-modes" role="group" aria-label="服装显示方式">
                 <button type="button" class="tw-icon-button" data-view="grid" aria-label="网格视图" aria-pressed="true">${icon('grid')}</button>
                 <button type="button" class="tw-icon-button" data-view="list" aria-label="列表视图" aria-pressed="false">${icon('list')}</button>
             </div>
-            <button type="button" class="tw-icon-button tw-sort" aria-label="服装排序" disabled>${icon('sliders')}</button>
+            <label class="tw-sort">${icon('sliders')}<select aria-label="服装排序">
+                <option value="default">导入顺序</option><option value="name-asc">名称升序</option><option value="name-desc">名称降序</option><option value="recent">最近使用</option>
+            </select></label>
             <button type="button" class="tw-icon-button tw-settings-button" data-action="open-settings" aria-label="衣柜设置" aria-haspopup="dialog" aria-controls="tw-settings">${icon('settings')}</button>
             <button type="button" class="tw-icon-button tw-close" data-action="close" aria-label="关闭衣柜">${icon('close')}</button>
         </header>
@@ -217,7 +222,6 @@ const PANEL_HTML = `
                     <button type="button" data-detail="info" aria-pressed="true">${icon('info')}<span>信息</span></button>
                     <button type="button" data-detail="description" aria-pressed="false">${icon('file')}<span>描述</span></button>
                     <button type="button" data-detail="tags" aria-pressed="false">${icon('tag')}<span>标签</span></button>
-                    <button type="button" data-detail="preferences" aria-pressed="false">${icon('settings')}<span>设置</span></button>
                 </nav>
                 <div class="tw-detail-content">
                     <section data-detail-page="info" aria-label="服装信息">
@@ -237,7 +241,6 @@ const PANEL_HTML = `
                     <section data-detail-page="tags" aria-label="服装标签" hidden>
                         <label class="tw-garment-tag"><span>标签</span><select name="garment_group" aria-label="服装标签" disabled></select></label>
                     </section>
-                    <section data-detail-page="preferences" aria-label="服装设置" hidden><span class="tw-detail-placeholder">—</span></section>
                 </div>
                 <div class="tw-detail-actions">
                     <div class="tw-action-row">
@@ -595,6 +598,29 @@ const PANEL_CSS = `
 #tw-panel .tw-search input::placeholder {
     color: var(--tw-muted);
     opacity: 0.75;
+}
+
+/* 使用原生排序菜单，键盘和触屏共用同一入口，无需额外管理弹层及焦点。 */
+#tw-panel .tw-sort {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 36px;
+    padding: 0 8px;
+    border: 1px solid var(--tw-line);
+    border-radius: 10px;
+    background: var(--tw-bg-input);
+    color: var(--tw-muted);
+}
+
+#tw-panel .tw-sort select {
+    width: auto;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    font-size: 12px;
 }
 
 #tw-panel .tw-view-modes {
@@ -1470,10 +1496,10 @@ const PANEL_CSS = `
     color: var(--tw-danger);
 }
 
-/* 详情页分段标签 */
+/* 详情只保留信息、描述和标签三页，等宽填满导航。 */
 #tw-panel .tw-detail-tabs {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 4px;
     flex: 0 0 auto;
     padding: 4px;
@@ -1528,12 +1554,6 @@ const PANEL_CSS = `
     align-items: center;
     justify-content: space-between;
     gap: 10px;
-}
-
-#tw-panel .tw-detail-placeholder {
-    display: block;
-    padding: 12px 0;
-    color: var(--tw-muted);
 }
 
 /* 详情底部操作按钮组 */
@@ -2187,12 +2207,12 @@ const PANEL_CSS = `
 @media (max-width: 600px) {
     #tw-panel .tw-header {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) 38px 38px;
+        grid-template-columns: minmax(0, 1fr) 68px 38px 38px;
         gap: 8px;
         padding: 10px 12px;
     }
     #tw-panel .tw-brand {
-        grid-column: 1;
+        grid-column: 1 / 3;
         grid-row: 1;
         gap: 10px;
         margin-right: 0;
@@ -2213,15 +2233,26 @@ const PANEL_CSS = `
         height: 38px;
     }
     #tw-panel .tw-settings-button {
-        grid-column: 2;
-        grid-row: 1;
-    }
-    #tw-panel .tw-close {
         grid-column: 3;
         grid-row: 1;
     }
+    #tw-panel .tw-close {
+        grid-column: 4;
+        grid-row: 1;
+    }
     #tw-panel .tw-sort {
+        grid-column: 3 / 5;
+        grid-row: 2;
+        height: 38px;
+        padding: 0 4px;
+        gap: 2px;
+    }
+    #tw-panel .tw-sort .tw-icon {
         display: none;
+    }
+    #tw-panel .tw-sort select {
+        width: 100%;
+        font-size: 11px;
     }
     #tw-panel .tw-search {
         grid-column: 1;
@@ -2231,7 +2262,7 @@ const PANEL_CSS = `
         height: 38px;
     }
     #tw-panel .tw-view-modes {
-        grid-column: 2 / 4;
+        grid-column: 2;
         grid-row: 2;
         width: 100%;
         height: 38px;
@@ -2286,6 +2317,9 @@ const checkedGarmentIds = new Set();
 let visibleGarmentIds = new Set();
 let selectedGarmentId = null;
 let currentCategory = 'all';
+let garmentSearch = '';
+let garmentSort = 'default';
+let garmentSearchTimer;
 let wardrobeTemplates = { user: { ...DEFAULT_TEMPLATES.user }, char: { ...DEFAULT_TEMPLATES.char }, image: { ...DEFAULT_TEMPLATES.image } };
 let descriptionPrompts = { ...DEFAULT_DESCRIPTION_PROMPTS };
 let sendSettings = { content_type: 'text', position: 'user_end' };
@@ -2382,6 +2416,8 @@ function initializeWardrobe() {
     panel.querySelector('.tw-mobile-filter select').addEventListener('change', selectCategoryOption);
     panel.querySelector('[data-action="toggle-details"]').addEventListener('click', toggleMobileDetails);
     panel.querySelector('.tw-view-modes').addEventListener('click', selectView);
+    panel.querySelector('.tw-search input').addEventListener('input', searchGarments);
+    panel.querySelector('.tw-sort select').addEventListener('change', sortGarments);
     panel.querySelector('.tw-detail-tabs').addEventListener('click', selectDetail);
     panel.addEventListener('close', restoreFocus);
     window.addEventListener('pagehide', destroyWardrobe, { once: true });
@@ -2468,8 +2504,9 @@ function parseWardrobeData(data, allowStoredImages = true) {
             typeof item.description !== 'string' || typeof item.image !== 'string' ||
             items.has(item.id) || (item.image && !DATA_IMAGE_PATTERN.test(item.image) && !STORED_IMAGE_PATTERN.test(item.image)) ||
             (item.groupId !== undefined && typeof item.groupId !== 'string') ||
-            (item.favorite !== undefined && typeof item.favorite !== 'boolean')) {
-            throw new Error('服装数据缺少名称、描述、有效图片，或标识重复、收藏状态无效。');
+            (item.favorite !== undefined && typeof item.favorite !== 'boolean') ||
+            (item.lastUsedAt !== undefined && (!Number.isSafeInteger(item.lastUsedAt) || item.lastUsedAt < 0))) {
+            throw new Error('服装数据缺少名称、描述、有效图片，或标识重复、收藏状态无效、使用时间无效。');
         }
         if (!allowStoredImages && item.image && STORED_IMAGE_PATTERN.test(item.image)) {
             throw new Error(`“${item.name}”的图片只有本机路径，无法跨设备导入。请在原酒馆中重新导出包含图片的 JSON。`);
@@ -2479,6 +2516,7 @@ function parseWardrobeData(data, allowStoredImages = true) {
             category: GARMENT_CATEGORIES.has(item.category) ? item.category : 'other',
             groupId: groups.has(item.groupId) ? item.groupId : '',
             favorite: item.favorite ?? false,
+            lastUsedAt: item.lastUsedAt ?? 0,
         });
     }
     return { items, groups };
@@ -2533,7 +2571,7 @@ async function importGarments(event) {
                 const image = await uploadGarmentImage(await readGarmentImage(file));
                 uploaded.push(image);
                 selectedId = window.parent.crypto.randomUUID();
-                next.set(selectedId, { id: selectedId, name: file.name.replace(/\.[^.]+$/, '') || '未命名服装', category: 'other', description: '', image, groupId: importGroup, favorite: false });
+                next.set(selectedId, { id: selectedId, name: file.name.replace(/\.[^.]+$/, '') || '未命名服装', category: 'other', description: '', image, groupId: importGroup, favorite: false, lastUsedAt: 0 });
             }
         }
         if (!root.isConnected) throw new Error('衣柜已卸载，导入已取消。');
@@ -2991,7 +3029,7 @@ async function handleBulkAction(event) {
 }
 
 /**
- * 批量保存前验证每件服装的发送内容，共用选择不依赖聊天；任一不满足时保持原有选择。
+ * 批量保存前验证发送内容；应用时同步记录最近使用，取消应用保留历史，任一失败不更新内存。
  * @param {Iterable<string>} ids 待处理的服装标识。
  * @param {string} wearer 目标角色 user 或 char。
  * @param {boolean} removing 是否取消应用。
@@ -2999,6 +3037,8 @@ async function handleBulkAction(event) {
  */
 function applyGarments(ids, wearer, removing = false) {
     const selections = readWearerSelections();
+    const next = new Map(garments);
+    const usedAt = Date.now();
     for (const id of ids) {
         if (removing) selections[wearer].delete(id);
         else {
@@ -3006,9 +3046,14 @@ function applyGarments(ids, wearer, removing = false) {
             try { buildWardrobeContent(item, sendSettings); }
             catch (error) { throw new Error(`${item.name}：${error.message}`); }
             selections[wearer].add(id);
+            next.set(id, { ...item, lastUsedAt: usedAt });
         }
     }
-    saveWearerSelections(selections);
+    // 归属与使用时间一次写入，避免归属保存失败却留下虚假的最近使用记录。
+    const saved = { wardrobe_selections: { user: Array.from(selections.user), char: Array.from(selections.char) } };
+    if (!removing) saved.wardrobe_items = Array.from(next.values());
+    insertOrAssignVariables(saved, { type: 'script' });
+    if (!removing) garments = next;
 }
 
 /**
@@ -3124,7 +3169,7 @@ function refreshWardrobe() {
 }
 
 /**
- * 单次遍历生成分类数量、收藏数量及卡片；收藏筛选沿用当前标签，右上角按钮与多选框由模式互斥显示。
+ * 按标签、关键词和分类筛选后排序；数量与搜索同步，最近使用只显示有应用记录的服装。
  * @returns {void} 无返回值。
  */
 function renderGarmentLibrary() {
@@ -3132,13 +3177,23 @@ function renderGarmentLibrary() {
     const selections = readWearerSelections();
     const counts = new Map();
     const cards = hostDocument.createDocumentFragment();
+    const items = [];
     visibleGarmentIds = new Set();
     for (const item of garments.values()) {
         if (currentGroup !== '*' && currentGroup !== item.groupId) continue;
+        if (garmentSearch && !`${item.name}\n${item.description}\n${CATEGORY_LABELS.get(item.category)}\n${garmentGroups.get(item.groupId) ?? '未分组'}`.toLocaleLowerCase().includes(garmentSearch)) continue;
         counts.set('all', (counts.get('all') ?? 0) + 1);
         counts.set(item.category, (counts.get(item.category) ?? 0) + 1);
         if (item.favorite) counts.set('favorites', (counts.get('favorites') ?? 0) + 1);
-        if (currentCategory === 'favorites' ? !item.favorite : currentCategory !== 'all' && currentCategory !== item.category) continue;
+        if (item.lastUsedAt) counts.set('recent', (counts.get('recent') ?? 0) + 1);
+        if (currentCategory === 'favorites' ? !item.favorite : currentCategory === 'recent' ? !item.lastUsedAt : currentCategory !== 'all' && currentCategory !== item.category) continue;
+        items.push(item);
+    }
+    // 只排序筛选结果，不改动存档顺序；最近使用分类默认时间倒序，也允许用户主动选择名称排序。
+    if (garmentSort === 'recent' || (currentCategory === 'recent' && garmentSort === 'default')) items.sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+    else if (garmentSort === 'name-asc') items.sort((a, b) => GARMENT_NAME_COLLATOR.compare(a.name, b.name));
+    else if (garmentSort === 'name-desc') items.sort((a, b) => GARMENT_NAME_COLLATOR.compare(b.name, a.name));
+    for (const item of items) {
         visibleGarmentIds.add(item.id);
         const entry = hostDocument.createElement('div');
         entry.className = 'tw-garment-entry';
@@ -3203,7 +3258,7 @@ function renderGarmentLibrary() {
     for (const button of panel.querySelectorAll('[data-category]')) {
         button.querySelector('.tw-count').textContent = String(counts.get(button.dataset.category) ?? 0);
     }
-    panel.querySelector('#tw-empty-title').textContent = currentCategory === 'all' ? '这里还没有服装' : currentCategory === 'favorites' ? '还没有收藏的服装' : currentCategory === 'recent' ? '还没有最近使用的服装' : `暂无${CATEGORY_LABELS.get(currentCategory)}`;
+    panel.querySelector('#tw-empty-title').textContent = garmentSearch ? '没有匹配的服装' : currentCategory === 'all' ? '这里还没有服装' : currentCategory === 'favorites' ? '还没有收藏的服装' : currentCategory === 'recent' ? '还没有最近使用的服装' : `暂无${CATEGORY_LABELS.get(currentCategory)}`;
     renderBulkState();
 }
 
@@ -4366,6 +4421,31 @@ function selectView(event) {
 }
 
 /**
+ * 接收搜索词并合并连续输入，仅重绘列表，保留详情草稿；清空搜索立即恢复筛选结果。
+ * @param {Event} event 搜索框输入事件。
+ * @returns {void} 无返回值。
+ */
+function searchGarments(event) {
+    window.parent.clearTimeout(garmentSearchTimer);
+    garmentSearch = event.currentTarget.value.trim().toLocaleLowerCase();
+    checkedGarmentIds.clear();
+    // 输入期间延后 150 毫秒重建卡片，避免每敲一个字符都重建图片节点。
+    if (garmentSearch) garmentSearchTimer = window.parent.setTimeout(renderGarmentLibrary, 150);
+    else renderGarmentLibrary();
+}
+
+/**
+ * 将原生菜单的排序选择用于当前列表，保留批量勾选和详情中的未保存内容。
+ * @param {Event} event 排序菜单变化事件。
+ * @returns {void} 无返回值。
+ */
+function sortGarments(event) {
+    garmentSort = event.currentTarget.value;
+    window.parent.clearTimeout(garmentSearchTimer);
+    renderGarmentLibrary();
+}
+
+/**
  * 切换右侧详情分组，保留名称、分类与描述的未保存编辑内容。
  * @param {MouseEvent} event 详情分组中的点击事件。
  * @returns {void} 无返回值。
@@ -4396,6 +4476,7 @@ function restoreFocus() {
  */
 function destroyWardrobe() {
     stopDescriptionRequest();
+    window.parent.clearTimeout(garmentSearchTimer);
     window.parent.clearTimeout(libraryStatusTimer);
     for (const subscription of subscriptions) subscription.stop();
     imageReadController.abort();

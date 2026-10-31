@@ -128,6 +128,7 @@ globalThis.api = { parseWardrobeData, loadGarments, exportGarments, importGarmen
     migrateLegacyImages, loadImageDataUrl, handleGarmentAction, injectWardrobeContent, deleteGarmentImages,
     deleteGarments, addGarmentGroup, deleteGarmentGroup, moveCheckedGarments, selectAllGarments,
     readWearerSelections, selectWearer, renderWearerState, handleBulkAction, toggleMultiSelect, checkGarment, renderBulkState: actualRenderBulkState,
+    searchGarments, sortGarments,
     state: () => ({ garments, garmentGroups, currentGroup, selectedGarmentId, checkedGarmentIds, multiSelectMode }),
     selectGroup: id => { currentGroup = id; },
     showIds: ids => { visibleGarmentIds = new Set(ids); },
@@ -459,12 +460,13 @@ async function main() {
     failImageReads = false;
     assert.equal(await api.loadImageDataUrl(finalImage), blue.image, '失败读取不会污染缓存，恢复后可重试');
     await checkFavorites();
+    await checkLibraryBrowsing();
     console.log('通过多选与操作栏显隐、衣柜导出回读、标签存储、可见范围全选、批量归类与角色应用、删除及失败回滚检查。');
     console.log('通过图片落盘、逐张迁移及重试、读取缓存、多模态注入、自包含备份、原图格式及删除和导入回滚检查。');
 }
 
 /**
- * 为真实卡片渲染提供最小节点，保存子节点和属性以验证收藏 SVG、筛选结果和分类计数。
+ * 为真实卡片渲染及备份下载提供最小节点，保存子节点和属性以验证筛选结果和分类计数。
  * @returns {Object} 支持追加子节点、设置属性和替换内容的节点替身。
  */
 function createLibraryNode() {
@@ -473,6 +475,10 @@ function createLibraryNode() {
         append(...children) { this.children.push(...children); },
         replaceChildren(...children) { this.children = children; },
         setAttribute(name, value) { this.attributes[name] = value; },
+        /** 记录模拟下载链接的地址和文件名；无参数，无返回值。 */
+        click() { downloads.push({ href: this.href, name: this.download }); },
+        /** 模拟下载链接移除；节点替身不持有父节点，无参数，无返回值。 */
+        remove() {},
     };
 }
 
@@ -540,6 +546,111 @@ async function checkFavorites() {
     assert.equal(list.cards.length, 0, '取消收藏后从收藏列表移除');
     assert.equal(control('.tw-empty').hidden, false);
     console.log('通过收藏切换、存档兼容、失败保留、导出回读、爱心渲染、收藏筛选与数量检查。');
+}
+
+/**
+ * 验证搜索组合筛选、原生排序、可见范围全选与最近使用持久化，覆盖失败时不产生虚假记录。
+ * @returns {Promise<void>} 列表交互、存档回读及备份断言全部通过后结束。
+ */
+async function checkLibraryBrowsing() {
+    scriptVariables.wardrobe_items = [
+        { ...blue, name: '外套10', description: 'Blue 丝绸', favorite: true, lastUsedAt: 100 },
+        { ...red, name: '外套2', description: '棉质', lastUsedAt: 200 },
+        { ...red, id: 'unused', name: '长裙', category: 'dresses', description: '丝绸' },
+    ];
+    scriptVariables.wardrobe_groups = [{ id: 'slim', name: '修身' }];
+    scriptVariables.wardrobe_selections = { user: [], char: [] };
+    api.sendType('text');
+    api.selectGroup('*');
+    api.selectCategory('all');
+    api.loadGarments();
+    const list = control('.tw-items');
+    control('[name="garment_description"]').value = '不能被搜索和排序覆盖的草稿';
+    const beforeRefresh = detailRefreshes;
+    api.renderLibrary();
+    assert.equal(api.state().garments.get('unused').lastUsedAt, 0, '旧服装默认没有使用记录');
+    assert.throws(() => api.parseWardrobeData({ groups: [], items: [{ ...blue, lastUsedAt: -1 }] }), /使用时间无效/);
+    assert.equal(control('count-recent').textContent, '2', '最近使用数量来自历史记录');
+
+    api.sortGarments({ currentTarget: { value: 'name-asc' } });
+    api.renderLibrary();
+    assert.deepEqual(list.cards.map(entry => entry.children[2].dataset.garment), ['red', 'blue', 'unused'], '名称按中文和自然数字升序');
+    api.sortGarments({ currentTarget: { value: 'name-desc' } });
+    api.renderLibrary();
+    assert.deepEqual(list.cards.map(entry => entry.children[2].dataset.garment), ['unused', 'blue', 'red']);
+    api.sortGarments({ currentTarget: { value: 'recent' } });
+    api.renderLibrary();
+    assert.deepEqual(list.cards.map(entry => entry.children[2].dataset.garment), ['red', 'blue', 'unused'], '无使用记录的服装排在最后');
+    api.sortGarments({ currentTarget: { value: 'default' } });
+    api.renderLibrary();
+    assert.deepEqual(list.cards.map(entry => entry.children[2].dataset.garment), ['blue', 'red', 'unused'], '切回默认排序恢复导入顺序');
+
+    api.selectAllGarments({ currentTarget: { checked: true } });
+    api.searchGarments({ currentTarget: { value: '不存在' } });
+    const pending = Array.from(statusTimers).find(([, timer]) => timer.delay === 150);
+    assert.ok(pending, '连续输入使用 150 毫秒防抖');
+    api.searchGarments({ currentTarget: { value: '  BLUE  ' } });
+    assert.equal(statusTimers.has(pending[0]), false, '新输入取消旧搜索任务');
+    api.renderLibrary();
+    assert.equal(api.state().checkedGarmentIds.size, 0, '修改搜索清除旧勾选');
+    assert.deepEqual(list.cards.map(entry => entry.children[2].dataset.garment), ['blue'], '描述搜索忽略大小写与首尾空格');
+    assert.equal(control('count-all').textContent, '1', '分类数量跟随搜索结果');
+    api.selectAllGarments({ currentTarget: { checked: true } });
+    assert.deepEqual(Array.from(api.state().checkedGarmentIds), ['blue'], '搜索后全选只包含可见结果');
+    api.searchGarments({ currentTarget: { value: '修身' } });
+    api.renderLibrary();
+    assert.equal(list.cards.length, 1, '可以搜索标签名称');
+    api.selectGroup('');
+    api.renderLibrary();
+    assert.equal(list.cards.length, 0, '搜索与标签筛选同时生效');
+    assert.equal(control('#tw-empty-title').textContent, '没有匹配的服装');
+    api.selectGroup('*');
+    api.searchGarments({ currentTarget: { value: '外套' } });
+    api.renderLibrary();
+    assert.equal(list.cards.length, 2, '可以搜索服装名称和分类');
+    api.selectCategory('favorites');
+    api.renderLibrary();
+    assert.equal(list.cards.length, 1, '搜索与收藏筛选同时生效');
+    api.selectCategory('dresses');
+    api.renderLibrary();
+    assert.equal(list.cards.length, 0, '搜索与服装分类同时生效');
+    api.searchGarments({ currentTarget: { value: '' } });
+    api.renderLibrary();
+    assert.equal(list.cards.length, 1, '清空搜索恢复当前分类结果');
+    assert.ok(!Array.from(statusTimers.values()).some(timer => timer.delay === 150), '清空搜索取消待执行任务');
+
+    api.selectCategory('recent');
+    api.renderLibrary();
+    assert.deepEqual(list.cards.map(entry => entry.children[2].dataset.garment), ['red', 'blue'], '最近使用过滤未使用服装并默认按时间倒序');
+    api.selectGroup('slim');
+    api.renderLibrary();
+    assert.equal(list.cards.length, 1, '最近使用遵循当前标签');
+    assert.equal(control('count-recent').textContent, '1');
+    api.selectGroup('*');
+    const appliedAt = Date.now();
+    api.applyGarments(['unused'], 'user');
+    assert.ok(api.state().garments.get('unused').lastUsedAt >= appliedAt, '成功应用记录时间');
+    api.loadGarments();
+    const usedAt = api.state().garments.get('unused').lastUsedAt;
+    assert.ok(usedAt >= appliedAt, '重载后保留最近使用');
+    api.renderLibrary();
+    assert.equal(list.cards[0].children[2].dataset.garment, 'unused', '新应用的服装排在最前');
+    api.applyGarments(['unused'], 'user', true);
+    assert.equal(api.state().garments.get('unused').lastUsedAt, usedAt, '取消应用保留使用历史');
+    writesFail = true;
+    assert.throws(() => api.applyGarments(['blue'], 'char'), /存储失败/);
+    writesFail = false;
+    assert.equal(api.state().garments.get('blue').lastUsedAt, 100, '保存失败不更新内存使用记录');
+    api.loadGarments();
+    assert.equal(api.state().garments.get('blue').lastUsedAt, 100, '保存失败不更新存档使用记录');
+    assert.equal(api.readWearerSelections().char.has('blue'), false, '保存失败不写入穿着归属');
+    await api.exportGarments(['unused']);
+    const backup = JSON.parse(await blobs.get(downloads.at(-1).href).text());
+    assert.equal(api.parseWardrobeData(backup).items.get('unused').lastUsedAt, usedAt, '备份回读保留使用历史');
+    assert.equal(detailRefreshes, beforeRefresh, '搜索、排序和历史记录不重填详情');
+    assert.equal(control('[name="garment_description"]').value, '不能被搜索和排序覆盖的草稿');
+    assert.doesNotMatch(source, /data-detail(?:-page)?="preferences"|tw-detail-placeholder/, '详情设置页及专属占位样式已移除');
+    console.log('通过搜索防抖及组合筛选、四种排序、搜索后全选、最近使用排序与持久化、失败保留和详情草稿检查。');
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });
