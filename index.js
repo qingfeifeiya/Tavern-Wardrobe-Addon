@@ -186,9 +186,9 @@ const PANEL_HTML = `
             </main>
 
             <aside id="tw-details" class="tw-details" aria-label="服装预览与详情">
-                <div class="tw-wearer-modes" role="group" aria-label="选择服装所属角色">
-                    <button type="button" data-wearer="user" aria-pressed="false">USER<span>0</span></button>
-                    <button type="button" data-wearer="char" aria-pressed="true">Char<span>0</span></button>
+                <div class="tw-wearer-modes" role="group" aria-label="允许穿这件服装的角色">
+                    <label><input type="checkbox" data-wearer="user" disabled>USER</label>
+                    <label><input type="checkbox" data-wearer="char" disabled>Char</label>
                 </div>
                 <div class="tw-preview">${icon('hanger')}<span>未选择服装</span></div>
                 <nav class="tw-detail-tabs" aria-label="详情分组">
@@ -218,7 +218,6 @@ const PANEL_HTML = `
                     <section data-detail-page="preferences" aria-label="服装设置" hidden><span class="tw-detail-placeholder">—</span></section>
                 </div>
                 <div class="tw-detail-actions">
-                    <button type="button" class="tw-apply" data-action="apply" disabled>${icon('hanger')}<span>应用到角色</span></button>
                     <div class="tw-action-row">
                         <button type="button" data-action="save-garment" disabled>${icon('pencil')}<span>保存修改</span></button>
                         <button type="button" data-action="export-one" disabled>${icon('download')}<span>导出</span></button>
@@ -333,303 +332,1862 @@ const PANEL_HTML = `
 
 const PANEL_CSS = `
 /* 样式只作用于衣柜，避免改变酒馆主题或其他脚本界面。 */
-/* 入口位于模态面板外，也要关闭原生点击蒙层，避免开窗后仍残留菜单高亮。 */
-#tw-menu-entry { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
+#tw-menu-entry {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none;
+    user-select: none;
+    touch-action: manipulation;
+}
+
 #tw-panel {
-    --tw-ink: #ececf5;
-    --tw-muted: #9697ad;
-    --tw-line: #2d2f3d;
-    --tw-accent: #cf91f5;
-    --tw-selected: #30283f;
+    --tw-bg-base: #0d0e14;
+    --tw-bg-surface: #13151f;
+    --tw-bg-elevated: #191c28;
+    --tw-bg-card: #171a26;
+    --tw-bg-hover: #212536;
+    --tw-bg-input: #0f1119;
+    --tw-ink: #f2f3f8;
+    --tw-ink-secondary: #c2c5d6;
+    --tw-muted: #7f849c;
+    --tw-line: rgba(255, 255, 255, 0.075);
+    --tw-line-strong: rgba(255, 255, 255, 0.14);
+    --tw-accent: #c084fc;
+    --tw-accent-strong: #9333ea;
+    --tw-accent-glow: rgba(192, 132, 252, 0.22);
+    --tw-selected: rgba(168, 85, 247, 0.16);
+    --tw-selected-border: rgba(192, 132, 252, 0.45);
+    --tw-danger: #fb7185;
+    --tw-danger-bg: rgba(244, 63, 94, 0.12);
+    --tw-danger-border: rgba(244, 63, 94, 0.32);
+
     position: fixed;
     inset: 0;
-    width: auto;
-    height: auto;
+    width: min(1460px, calc(100vw - 48px));
+    height: min(900px, calc(100dvh - 48px));
     min-width: 0;
     min-height: 0;
     max-width: none;
     max-height: none;
-    margin: 0;
+    margin: auto;
     padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
-    border: 1px solid #2b2d3a;
-    border-radius: 18px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 20px;
     overflow: hidden;
-    background: #15171f;
+    background: var(--tw-bg-base);
     color: var(--tw-ink);
     color-scheme: dark;
-    box-shadow: none;
-    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    box-shadow:
+        0 32px 80px -16px rgba(0, 0, 0, 0.78),
+        0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
     text-align: left;
     text-shadow: none;
     -webkit-text-size-adjust: 100%;
-    /* 触摸高亮由控件自身的选中态表达，避免浏览器蓝色点击蒙层遮住深色界面。 */
     -webkit-tap-highlight-color: transparent;
 }
-#tw-panel, #tw-panel *, #tw-panel *::before, #tw-panel *::after { box-sizing: border-box; }
+
+#tw-panel::backdrop {
+    background: rgba(5, 6, 11, 0.68);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+}
+
+#tw-panel, #tw-panel *, #tw-panel *::before, #tw-panel *::after {
+    box-sizing: border-box;
+}
+
 /* 隐藏状态优先于组件的网格布局，确保收起的模型列表和未启用的 API 分组不占位。 */
-#tw-panel [hidden] { display: none !important; }
-#tw-panel :is(h1, h2, h3, button, input, select, textarea, dl, dt, dd) { margin: 0; color: inherit; font: inherit; text-shadow: none; letter-spacing: normal; }
-#tw-panel button { display: inline-flex; align-items: center; justify-content: center; gap: 10px; width: auto; min-width: 0; padding: 0; border: 1px solid transparent; border-radius: 9px; background: transparent; box-shadow: none; cursor: pointer; }
-/* 悬停和选中状态直接生效，不启用滤镜或逐帧颜色动画，减少大面板的绘制成本。 */
-#tw-panel :is(button, input) { transition: none; animation: none; }
-#tw-panel button:disabled { opacity: 1; color: var(--tw-muted); cursor: default; }
-#tw-panel button, #tw-panel .tw-brand { -webkit-user-select: none; user-select: none; }
-#tw-panel :is(button, input, select, textarea):focus-visible { outline: 2px solid var(--tw-accent); outline-offset: 3px; }
-#tw-panel .tw-icon { display: block; width: 24px; height: 24px; flex: 0 0 auto; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
+#tw-panel [hidden] {
+    display: none !important;
+}
+
+#tw-panel :is(h1, h2, h3, button, input, select, textarea, dl, dt, dd) {
+    margin: 0;
+    color: inherit;
+    font: inherit;
+    text-shadow: none;
+    letter-spacing: normal;
+}
+
+#tw-panel button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: auto;
+    min-width: 0;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: transparent;
+    box-shadow: none;
+    cursor: pointer;
+    transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease, transform 0.12s ease, box-shadow 0.16s ease;
+}
+
+#tw-panel button:active:not(:disabled) {
+    transform: scale(0.98);
+}
+
+#tw-panel button:disabled {
+    opacity: 0.42;
+    color: var(--tw-muted);
+    cursor: not-allowed;
+    transform: none;
+}
+
+#tw-panel button, #tw-panel .tw-brand {
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+#tw-panel :is(button, input, select, textarea):focus-visible {
+    outline: 2px solid var(--tw-accent);
+    outline-offset: 2px;
+}
+
+#tw-panel .tw-icon {
+    display: block;
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+    stroke: currentColor;
+    stroke-width: 1.75;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
 /* 顶部工具栏独占一行；分类、列表和详情分别在自己的区域内滚动。 */
-#tw-panel .tw-shell { display: grid; grid-template-rows: 76px minmax(0, 1fr); height: 100%; min-height: 0; }
-#tw-panel .tw-header { display: flex; align-items: center; gap: 14px; min-width: 0; padding: 12px 18px 12px 24px; border-bottom: 1px solid var(--tw-line); background: #181921; }
-#tw-panel .tw-brand { display: flex; align-items: center; gap: 16px; margin-right: auto; }
-#tw-panel .tw-brand > .tw-icon { width: 46px; height: 46px; color: #e493f3; stroke-width: 1.8; }
-#tw-panel h1 { font-size: 24px; font-weight: 600; line-height: 1.2; }
-#tw-panel .tw-brand-subtitle { display: block; color: var(--tw-muted); font-size: 16px; }
-#tw-panel .tw-search { display: flex; align-items: center; gap: 10px; width: clamp(200px, 19vw, 288px); height: 44px; padding: 0 12px; border: 1px solid var(--tw-line); border-radius: 10px; background: #15171f; color: var(--tw-muted); }
-#tw-panel .tw-search .tw-icon { width: 20px; height: 20px; }
-#tw-panel .tw-search input { width: 100%; min-width: 0; padding: 0; border: 0; background: transparent; box-shadow: none; font-size: 16px; }
-#tw-panel .tw-search input::placeholder { color: var(--tw-muted); opacity: 1; }
-#tw-panel .tw-view-modes { display: flex; padding: 0; border: 1px solid #252733; border-radius: 10px; background: #15171e; }
-#tw-panel .tw-icon-button { width: 44px; height: 44px; }
-#tw-panel .tw-icon-button:not(:disabled):hover { background: #242633; }
-#tw-panel .tw-view-modes button[aria-pressed="true"] { background: #282a3a; color: #f4f2fc; }
-#tw-panel .tw-body { display: grid; grid-template-columns: clamp(220px, 19.2vw, 295px) minmax(0, 1fr) clamp(300px, 27.4vw, 420px); min-width: 0; min-height: 0; }
-#tw-panel .tw-sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 12px 18px 20px; font-size: 14px; }
-#tw-panel .tw-mobile-filter, #tw-panel .tw-mobile-actions { display: none; }
-/* 分类行随可用高度收紧，常用屏幕完整展示；极矮窗口仍可滚动，不显示滚动条占位。 */
-#tw-panel .tw-category-list { display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: none; }
-#tw-panel .tw-category-list::-webkit-scrollbar { display: none; }
-#tw-panel .tw-category { display: grid; grid-template-columns: 22px minmax(0, 1fr) 24px; align-items: center; gap: 10px; flex: 0 1 40px; width: 100%; min-height: 32px; padding: 4px 10px; color: #e4e3ed; font-size: 14px; text-align: left; }
-#tw-panel .tw-category > .tw-icon { width: 22px; height: 22px; color: #a6a5bc; }
-#tw-panel .tw-category-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#tw-panel .tw-category:hover { background: #22232e; }
-#tw-panel .tw-category[aria-pressed="true"] { border-color: #3d3055; background: #30283f; }
-#tw-panel .tw-category[aria-pressed="true"] > .tw-icon { color: #d484f3; }
-#tw-panel .tw-count { display: grid; min-width: 22px; height: 24px; place-items: center; border-radius: 6px; background: #232431; color: #ccc9e5; font-size: 12px; font-variant-numeric: tabular-nums; }
-#tw-panel .tw-category[aria-pressed="true"] .tw-count { background: #3b3252; }
-#tw-panel .tw-divider { flex-shrink: 0; width: 100%; margin: 8px 0; border: 0; border-top: 1px solid var(--tw-line); }
-/* 导入与导出共用左对齐和内边距，使两行图标、文字及按钮边界保持一致。 */
-#tw-panel .tw-import-footer { display: grid; grid-template-columns: minmax(0, 1fr); flex: 0 0 auto; padding-top: 12px; }
-#tw-panel .tw-import-footer button { justify-content: flex-start; height: 44px; padding-left: 18px; border: 1px solid #7855b9; border-radius: 10px; background: #623da9; color: #f4eaff; }
-#tw-panel .tw-import-footer .tw-export-all { grid-column: 1 / -1; margin-top: 8px; border-color: var(--tw-line); border-radius: 10px; background: #24232e; }
-/* 列表独立滚动，选中后的操作栏停在列表底部，并为最后一张卡片保留完整空间。 */
-#tw-panel .tw-library { display: flex; flex-direction: column; container-type: inline-size; min-width: 0; min-height: 0; margin-bottom: 24px; padding: 24px; overflow: hidden; border: 1px solid var(--tw-line); border-top: 0; border-radius: 0 0 16px 16px; background: #14171e; }
-#tw-panel .tw-library-content { flex: 1; min-height: 0; overflow: auto; padding: 2px; }
-#tw-panel .tw-group-bar, #tw-panel .tw-group-tabs, #tw-panel .tw-bulk-actions { display: flex; align-items: center; gap: 8px; }
-/* 标签筛选与增删入口共用有边界的容器，明确这一整行属于标签管理。 */
-#tw-panel .tw-group-bar { flex-shrink: 0; margin-bottom: 12px; padding: 6px; border: 1px solid var(--tw-line); border-radius: 12px; background: #1b1d26; font-size: 14px; }
-#tw-panel .tw-group-tabs { flex: 1; min-width: 0; overflow-x: auto; }
-#tw-panel .tw-group-bar button { flex-shrink: 0; min-height: 44px; padding: 8px 12px; border-color: var(--tw-line); }
-#tw-panel .tw-group-tabs button { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#tw-panel .tw-group-tabs [aria-pressed="true"] { border-color: var(--tw-accent); background: var(--tw-selected); }
-#tw-panel [data-action="toggle-multi"][aria-pressed="true"] { border-color: var(--tw-accent); background: var(--tw-selected); color: var(--tw-accent); }
-/* 每个自定义标签自带删除入口，顶部右侧只保留新增与多选开关。 */
-#tw-panel .tw-group-tab { display: inline-flex; align-items: center; flex-shrink: 0; border: 1px solid var(--tw-line); border-radius: 9px; }
-#tw-panel .tw-group-tab[data-active="true"] { border-color: var(--tw-accent); background: var(--tw-selected); }
-#tw-panel .tw-group-tab button { border: 0; }
-#tw-panel .tw-group-tab [data-delete-group] { min-height: 32px; padding: 6px; color: var(--tw-muted); }
-#tw-panel [data-delete-group] .tw-icon { width: 16px; height: 16px; }
-#tw-panel .tw-bulk-actions { flex-shrink: 0; margin-top: 12px; border-radius: 10px; background: #14171e; box-shadow: 0 -8px 20px #0003; font-size: 13px; }
-/* 常用动作收进同一条工具栏，删除单独放在右侧，避免按钮散落成多行。 */
-#tw-panel .tw-bulk-main { display: grid; grid-template-columns: auto minmax(90px, 1fr) minmax(96px, 1fr) auto; align-items: center; gap: 6px; flex: 1; min-width: 0; padding: 6px; border: 1px solid var(--tw-line); border-radius: 10px; background: #1b1d26; }
-#tw-panel .tw-bulk-selection { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 4px; white-space: nowrap; cursor: pointer; }
-#tw-panel .tw-bulk-actions :is(button, select), #tw-panel [data-action="remove-image"] { min-height: 44px; padding: 6px 10px; border: 1px solid var(--tw-line); border-radius: 8px; background: #24232e; }
-#tw-panel .tw-bulk-actions select { width: 100%; min-width: 0; text-overflow: ellipsis; }
-#tw-panel .tw-bulk-actions button { gap: 6px; white-space: nowrap; }
-#tw-panel .tw-bulk-picker { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 0 8px; border: 1px solid var(--tw-line); border-radius: 8px; background: #24232e; }
-#tw-panel .tw-bulk-picker select { padding: 6px 0; border: 0; background: transparent; }
-#tw-panel .tw-bulk-actions .tw-bulk-delete { flex-shrink: 0; gap: 6px; border-color: #45303e; background: #241e26; color: #d77687; }
-#tw-panel .tw-bulk-actions .tw-icon { width: 18px; height: 18px; }
-/* 应用入口用紫色强调，图标放在原生选择器外侧，保留键盘和触屏的系统菜单行为。 */
-#tw-panel .tw-bulk-apply-picker { border-color: #7855b9; background: #392957; color: #eadcff; }
-/* 按列表自身宽度切换为两行，不让桌面窄中栏或手机把按钮挤出容器。 */
+#tw-panel .tw-shell {
+    display: grid;
+    grid-template-rows: 66px minmax(0, 1fr);
+    height: 100%;
+    min-height: 0;
+}
+
+/* 顶部导航栏 */
+#tw-panel .tw-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    padding: 0 20px;
+    border-bottom: 1px solid var(--tw-line);
+    background: linear-gradient(180deg, rgba(28, 31, 46, 0.85) 0%, rgba(19, 21, 31, 0.9) 100%);
+}
+
+#tw-panel .tw-brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-right: auto;
+}
+
+#tw-panel .tw-brand > .tw-icon {
+    width: 36px;
+    height: 36px;
+    padding: 7px;
+    border: 1px solid rgba(192, 132, 252, 0.35);
+    border-radius: 11px;
+    background: linear-gradient(135deg, rgba(168, 85, 247, 0.24), rgba(99, 102, 241, 0.12));
+    color: #e9d5ff;
+    box-shadow: 0 4px 14px -2px rgba(168, 85, 247, 0.25);
+    stroke-width: 1.85;
+}
+
+#tw-panel h1 {
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1.2;
+    letter-spacing: 0.01em;
+    color: #fff;
+}
+
+#tw-panel .tw-brand-subtitle {
+    display: block;
+    margin-top: 2px;
+    color: var(--tw-muted);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+#tw-panel .tw-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: clamp(190px, 18vw, 270px);
+    height: 36px;
+    padding: 0 12px;
+    border: 1px solid var(--tw-line);
+    border-radius: 10px;
+    background: var(--tw-bg-input);
+    color: var(--tw-muted);
+    transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+#tw-panel .tw-search:focus-within {
+    border-color: var(--tw-selected-border);
+    box-shadow: 0 0 0 3px rgba(192, 132, 252, 0.12);
+}
+
+#tw-panel .tw-search .tw-icon {
+    width: 16px;
+    height: 16px;
+}
+
+#tw-panel .tw-search input {
+    width: 100%;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    font-size: 13px;
+}
+
+#tw-panel .tw-search input::placeholder {
+    color: var(--tw-muted);
+    opacity: 0.75;
+}
+
+#tw-panel .tw-view-modes {
+    display: flex;
+    gap: 2px;
+    padding: 3px;
+    border: 1px solid var(--tw-line);
+    border-radius: 10px;
+    background: var(--tw-bg-input);
+}
+
+#tw-panel .tw-icon-button {
+    width: 36px;
+    height: 36px;
+    border-radius: 9px;
+    color: var(--tw-ink-secondary);
+}
+
+#tw-panel .tw-view-modes .tw-icon-button {
+    width: 30px;
+    height: 28px;
+    border-radius: 7px;
+}
+
+#tw-panel .tw-icon-button:not(:disabled):hover {
+    background: var(--tw-bg-hover);
+    color: #fff;
+}
+
+#tw-panel .tw-view-modes button[aria-pressed="true"] {
+    background: var(--tw-bg-elevated);
+    color: var(--tw-accent);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+
+#tw-panel .tw-close:not(:disabled):hover {
+    background: var(--tw-danger-bg);
+    border-color: var(--tw-danger-border);
+    color: var(--tw-danger);
+}
+
+/* 主体三栏工作区 */
+#tw-panel .tw-body {
+    display: grid;
+    grid-template-columns: clamp(205px, 16.5vw, 248px) minmax(0, 1fr) clamp(310px, 26vw, 390px);
+    min-width: 0;
+    min-height: 0;
+    background: var(--tw-bg-base);
+}
+
+/* 左侧分类边栏 */
+#tw-panel .tw-sidebar {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    padding: 14px 12px 16px;
+    border-right: 1px solid var(--tw-line);
+    background: var(--tw-bg-surface);
+    font-size: 13px;
+}
+
+#tw-panel .tw-mobile-filter,
+#tw-panel .tw-mobile-actions {
+    display: none;
+}
+
+#tw-panel .tw-category-list {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: none;
+}
+
+#tw-panel .tw-category-list::-webkit-scrollbar {
+    display: none;
+}
+
+#tw-panel .tw-category {
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    flex: 0 0 auto;
+    width: 100%;
+    min-height: 36px;
+    padding: 6px 10px;
+    border-radius: 9px;
+    color: var(--tw-ink-secondary);
+    font-size: 13px;
+    font-weight: 500;
+    text-align: left;
+}
+
+#tw-panel .tw-category > .tw-icon {
+    width: 17px;
+    height: 17px;
+    color: var(--tw-muted);
+    transition: color 0.16s ease;
+}
+
+#tw-panel .tw-category-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#tw-panel .tw-category:hover {
+    background: rgba(255, 255, 255, 0.045);
+    color: #fff;
+}
+
+#tw-panel .tw-category:hover > .tw-icon {
+    color: var(--tw-ink-secondary);
+}
+
+#tw-panel .tw-category[aria-pressed="true"] {
+    border-color: var(--tw-selected-border);
+    background: linear-gradient(90deg, rgba(168, 85, 247, 0.2) 0%, rgba(168, 85, 247, 0.08) 100%);
+    color: #fff;
+    box-shadow: 0 2px 10px -2px rgba(147, 51, 234, 0.22);
+}
+
+#tw-panel .tw-category[aria-pressed="true"] > .tw-icon {
+    color: var(--tw-accent);
+}
+
+#tw-panel .tw-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 22px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.055);
+    color: var(--tw-muted);
+    font-size: 11px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+#tw-panel .tw-category[aria-pressed="true"] .tw-count {
+    background: rgba(192, 132, 252, 0.24);
+    color: #f3e8ff;
+}
+
+#tw-panel .tw-divider {
+    flex-shrink: 0;
+    width: 100%;
+    margin: 8px 0;
+    border: 0;
+    border-top: 1px solid var(--tw-line);
+}
+
+/* 左下角导入导出区 */
+#tw-panel .tw-import-footer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    flex: 0 0 auto;
+    padding-top: 12px;
+    margin-top: 6px;
+    border-top: 1px solid var(--tw-line);
+}
+
+#tw-panel .tw-import-footer button {
+    justify-content: center;
+    height: 38px;
+    padding: 0 14px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+#tw-panel .tw-import-footer .tw-import {
+    border-color: rgba(192, 132, 252, 0.45);
+    background: linear-gradient(135deg, #9333ea 0%, #6366f1 100%);
+    color: #fff;
+    box-shadow: 0 6px 16px -4px rgba(147, 51, 234, 0.5);
+}
+
+#tw-panel .tw-import-footer .tw-import:not(:disabled):hover {
+    filter: brightness(1.08);
+    box-shadow: 0 8px 20px -4px rgba(147, 51, 234, 0.65);
+}
+
+#tw-panel .tw-import-footer .tw-export-all {
+    margin-top: 0;
+    border-color: var(--tw-line-strong);
+    background: var(--tw-bg-elevated);
+    color: var(--tw-ink-secondary);
+}
+
+#tw-panel .tw-import-footer .tw-export-all:not(:disabled):hover {
+    background: var(--tw-bg-hover);
+    color: #fff;
+}
+
+/* 中栏：服装画廊与标签栏 */
+#tw-panel .tw-library {
+    display: flex;
+    flex-direction: column;
+    container-type: inline-size;
+    min-width: 0;
+    min-height: 0;
+    padding: 16px 20px 18px;
+    overflow: hidden;
+    background: var(--tw-bg-base);
+}
+
+#tw-panel .tw-library-content {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 2px 2px 12px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+}
+
+#tw-panel .tw-group-bar,
+#tw-panel .tw-group-tabs,
+#tw-panel .tw-bulk-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+#tw-panel .tw-group-bar {
+    flex-shrink: 0;
+    margin-bottom: 14px;
+    padding: 5px 6px;
+    border: 1px solid var(--tw-line);
+    border-radius: 12px;
+    background: var(--tw-bg-surface);
+    font-size: 13px;
+}
+
+#tw-panel .tw-group-tabs {
+    flex: 1;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+
+#tw-panel .tw-group-tabs::-webkit-scrollbar {
+    display: none;
+}
+
+#tw-panel .tw-group-bar > button,
+#tw-panel .tw-group-tabs > button {
+    flex-shrink: 0;
+    min-height: 32px;
+    padding: 4px 12px;
+    border-radius: 8px;
+    border-color: transparent;
+    color: var(--tw-ink-secondary);
+    font-size: 12.5px;
+    font-weight: 500;
+}
+
+#tw-panel .tw-group-bar > button {
+    border-color: var(--tw-line);
+    background: var(--tw-bg-elevated);
+}
+
+#tw-panel .tw-group-bar > button:hover,
+#tw-panel .tw-group-tabs > button:hover {
+    background: var(--tw-bg-hover);
+    color: #fff;
+}
+
+#tw-panel .tw-group-tabs button {
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#tw-panel .tw-group-tabs > button[aria-pressed="true"] {
+    border-color: var(--tw-selected-border);
+    background: var(--tw-selected);
+    color: #f3e8ff;
+}
+
+#tw-panel [data-action="toggle-multi"][aria-pressed="true"] {
+    border-color: var(--tw-selected-border);
+    background: var(--tw-selected);
+    color: var(--tw-accent);
+}
+
+/* 自定义标签胶囊 */
+#tw-panel .tw-group-tab {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.03);
+    transition: background-color 0.16s ease, border-color 0.16s ease;
+}
+
+#tw-panel .tw-group-tab:hover {
+    background: var(--tw-bg-hover);
+}
+
+#tw-panel .tw-group-tab[data-active="true"] {
+    border-color: var(--tw-selected-border);
+    background: var(--tw-selected);
+    color: #f3e8ff;
+}
+
+#tw-panel .tw-group-tab button {
+    min-height: 30px;
+    padding: 4px 8px 4px 10px;
+    border: 0;
+    font-size: 12.5px;
+}
+
+#tw-panel .tw-group-tab [data-delete-group] {
+    min-height: 26px;
+    padding: 4px 6px;
+    border-radius: 6px;
+    color: var(--tw-muted);
+}
+
+#tw-panel .tw-group-tab [data-delete-group]:hover {
+    color: var(--tw-danger);
+    background: var(--tw-danger-bg);
+}
+
+#tw-panel [data-delete-group] .tw-icon {
+    width: 14px;
+    height: 14px;
+}
+
+/* 批量操作悬浮底栏 */
+#tw-panel .tw-bulk-actions {
+    flex-shrink: 0;
+    margin-top: 10px;
+    padding: 6px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 14px;
+    background: rgba(25, 28, 40, 0.92);
+    backdrop-filter: blur(12px);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+    font-size: 12.5px;
+}
+
+#tw-panel .tw-bulk-main {
+    display: grid;
+    grid-template-columns: auto minmax(90px, 1fr) minmax(96px, 1fr) auto;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    min-width: 0;
+}
+
+#tw-panel .tw-bulk-selection {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 36px;
+    padding: 0 10px;
+    white-space: nowrap;
+    cursor: pointer;
+    font-weight: 500;
+}
+
+#tw-panel .tw-bulk-actions :is(button, select),
+#tw-panel [data-action="remove-image"] {
+    min-height: 36px;
+    padding: 6px 12px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 9px;
+    background: var(--tw-bg-elevated);
+    font-size: 12.5px;
+}
+
+#tw-panel .tw-bulk-actions button:not(:disabled):hover,
+#tw-panel [data-action="remove-image"]:not(:disabled):hover {
+    background: var(--tw-bg-hover);
+}
+
+#tw-panel .tw-bulk-actions select {
+    width: 100%;
+    min-width: 0;
+    text-overflow: ellipsis;
+}
+
+#tw-panel .tw-bulk-actions button {
+    gap: 6px;
+    white-space: nowrap;
+}
+
+#tw-panel .tw-bulk-picker {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    padding: 0 10px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 9px;
+    background: var(--tw-bg-elevated);
+}
+
+#tw-panel .tw-bulk-picker select {
+    padding: 6px 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+#tw-panel .tw-bulk-actions .tw-bulk-delete {
+    flex-shrink: 0;
+    gap: 6px;
+    border-color: var(--tw-danger-border);
+    background: var(--tw-danger-bg);
+    color: var(--tw-danger);
+}
+
+#tw-panel .tw-bulk-actions .tw-bulk-delete:not(:disabled):hover {
+    background: rgba(244, 63, 94, 0.22);
+}
+
+#tw-panel .tw-bulk-actions .tw-icon {
+    width: 16px;
+    height: 16px;
+}
+
+#tw-panel .tw-bulk-apply-picker {
+    border-color: var(--tw-selected-border);
+    background: var(--tw-selected);
+    color: #f3e8ff;
+}
+
 @container (max-width: 480px) {
-    #tw-panel .tw-bulk-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 6px; padding: 6px; border: 1px solid var(--tw-line); border-radius: 10px; background: #1b1d26; }
-    #tw-panel .tw-bulk-main { display: contents; }
-    #tw-panel .tw-bulk-selection { grid-column: 1; grid-row: 1; }
-    #tw-panel .tw-bulk-apply-picker { grid-column: 2 / 4; grid-row: 1; }
-    #tw-panel .tw-bulk-group-picker { grid-column: 1; grid-row: 2; }
-    #tw-panel [data-bulk="export"] { grid-column: 2; grid-row: 2; }
-    #tw-panel .tw-bulk-delete { grid-column: 3; grid-row: 2; }
+    #tw-panel .tw-bulk-actions {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+        gap: 6px;
+    }
+    #tw-panel .tw-bulk-main {
+        display: contents;
+    }
+    #tw-panel .tw-bulk-selection {
+        grid-column: 1;
+        grid-row: 1;
+    }
+    #tw-panel .tw-bulk-apply-picker {
+        grid-column: 2 / 4;
+        grid-row: 1;
+    }
+    #tw-panel .tw-bulk-group-picker {
+        grid-column: 1;
+        grid-row: 2;
+    }
+    #tw-panel [data-bulk="export"] {
+        grid-column: 2;
+        grid-row: 2;
+    }
+    #tw-panel .tw-bulk-delete {
+        grid-column: 3;
+        grid-row: 2;
+    }
 }
-#tw-panel .tw-library-status { margin: 0 0 12px; overflow-wrap: anywhere; color: var(--tw-accent); font-size: 14px; }
-#tw-panel .tw-library-status:empty { display: none; }
-#tw-panel .tw-library-status[data-error="true"] { color: #ef99a7; }
-#tw-panel .tw-selection-count { color: var(--tw-muted); }
-#tw-panel .tw-garment-entry { position: relative; min-width: 0; }
-#tw-panel .tw-item-check { position: absolute; z-index: 1; top: 4px; right: 4px; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 8px; background: #14171ee6; opacity: 0; pointer-events: none; cursor: pointer; }
-/* 默认隐藏勾选入口；键盘聚焦、多选模式或鼠标悬停时才显示，触屏通过多选开关进入。 */
-#tw-panel .tw-library[data-multi-select="true"] .tw-item-check, #tw-panel .tw-garment-entry:focus-within .tw-item-check { opacity: 1; pointer-events: auto; }
+
+#tw-panel .tw-library-status {
+    margin: 0 0 12px;
+    padding: 8px 12px;
+    border-radius: 9px;
+    border: 1px solid rgba(192, 132, 252, 0.25);
+    background: rgba(168, 85, 247, 0.1);
+    overflow-wrap: anywhere;
+    color: #e9d5ff;
+    font-size: 12.5px;
+}
+
+#tw-panel .tw-library-status:empty {
+    display: none;
+}
+
+#tw-panel .tw-library-status[data-error="true"] {
+    border-color: var(--tw-danger-border);
+    background: var(--tw-danger-bg);
+    color: #fda4af;
+}
+
+#tw-panel .tw-selection-count {
+    color: var(--tw-ink-secondary);
+}
+
+/* 服装卡片与网格 */
+#tw-panel .tw-garment-entry {
+    position: relative;
+    min-width: 0;
+}
+
+#tw-panel .tw-item-check {
+    position: absolute;
+    z-index: 2;
+    top: 8px;
+    right: 8px;
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 9px;
+    background: rgba(13, 14, 20, 0.78);
+    backdrop-filter: blur(6px);
+    opacity: 0;
+    pointer-events: none;
+    cursor: pointer;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+#tw-panel .tw-library[data-multi-select="true"] .tw-item-check,
+#tw-panel .tw-garment-entry:focus-within .tw-item-check {
+    opacity: 1;
+    pointer-events: auto;
+}
+
 @media (hover: hover) {
-    #tw-panel .tw-garment-entry:hover .tw-item-check { opacity: 1; pointer-events: auto; }
+    #tw-panel .tw-garment-entry:hover .tw-item-check {
+        opacity: 1;
+        pointer-events: auto;
+    }
 }
-#tw-panel :is(.tw-item-check, .tw-bulk-actions) input { width: 20px; height: 20px; accent-color: #b184e8; cursor: pointer; }
-#tw-panel .tw-garment-entry[data-checked="true"] .tw-garment-card { outline: 2px solid var(--tw-accent); outline-offset: -2px; }
-#tw-panel .tw-items { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(160px, 100%), 1fr)); gap: 16px; width: 100%; }
-#tw-panel .tw-garment-card { display: grid; grid-template-columns: minmax(0, 1fr); justify-content: stretch; justify-items: stretch; align-content: start; gap: 10px; width: 100%; padding: 10px; overflow: hidden; border-color: var(--tw-line); background: #1c1e28; text-align: left; }
-#tw-panel .tw-garment-card[aria-pressed="true"] { border-color: var(--tw-accent); background: var(--tw-selected); }
-#tw-panel .tw-garment-card img { width: 100%; aspect-ratio: 1; object-fit: contain; border-radius: 6px; background: #13151c; }
-#tw-panel .tw-garment-card > .tw-icon { width: 100%; height: auto; aspect-ratio: 1; padding: 30px; color: var(--tw-muted); }
-#tw-panel .tw-garment-card span { overflow-wrap: anywhere; }
-#tw-panel .tw-garment-card small { color: var(--tw-accent); font-size: 13px; }
-#tw-panel .tw-library[data-layout="list"] .tw-items { grid-template-columns: minmax(0, 1fr); }
-/* 列表模式为右侧复选框留位，避免长服装名称被批量选择入口遮挡。 */
-#tw-panel .tw-library[data-layout="list"] .tw-garment-card { grid-template-columns: 64px minmax(0, 1fr); align-items: center; padding-right: 54px; }
-#tw-panel .tw-library[data-layout="list"] .tw-garment-card :is(img, .tw-icon) { grid-row: 1 / 3; width: 64px; height: 64px; padding: 0; }
-#tw-panel .tw-empty { display: grid; justify-items: center; align-content: center; gap: 18px; padding: 24px 0; color: #a6a7ba; text-align: center; }
-#tw-panel .tw-empty > .tw-icon { width: 100px; height: 100px; color: #5c6072; stroke-width: 1.3; overflow: visible; }
-#tw-panel h2 { font-size: 23px; font-weight: 500; }
-#tw-panel .tw-details { display: flex; flex-direction: column; gap: 14px; min-width: 0; min-height: 0; padding: 20px 18px 36px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #393444 transparent; }
-#tw-panel .tw-wearer-modes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; flex: 0 0 auto; }
-#tw-panel .tw-wearer-modes button { min-height: 44px; padding: 8px 12px; border-color: var(--tw-line); background: #1c1e28; }
-#tw-panel .tw-wearer-modes button[aria-pressed="true"] { border-color: #7855b9; background: var(--tw-selected); color: var(--tw-accent); }
-#tw-panel .tw-wearer-modes span { color: var(--tw-muted); font-size: 13px; }
-#tw-panel .tw-preview { display: flex; flex: 0 0 auto; flex-direction: column; align-items: center; justify-content: center; gap: 20px; height: clamp(220px, 34dvh, 346px); border: 1px solid #574274; border-radius: 11px; background: #1d202b; color: #b7b4cb; }
-#tw-panel .tw-preview > .tw-icon { width: 84px; height: 84px; color: #9290ad; stroke-width: 1.6; }
-#tw-panel .tw-preview img { width: 100%; height: 100%; object-fit: contain; border-radius: inherit; }
-#tw-panel .tw-details :is(input, select, textarea) { width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid #494052; border-radius: 8px; background: #15171f; box-shadow: none; }
-#tw-panel .tw-details textarea { min-height: 200px; resize: vertical; }
-/* 标签归类放在独立的标签页，继续使用同一保存入口和原有标签标识。 */
-#tw-panel .tw-garment-tag { display: grid; gap: 10px; padding: 10px 0; }
-/* 描述类型与生成按钮共享一行，选中的类型决定本次请求使用哪份已保存提示词。 */
-#tw-panel .tw-description-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-bottom: 12px; }
-#tw-panel .tw-describe { min-height: 44px; padding: 8px 14px; border-color: #494052; background: #24232e; }
-#tw-panel .tw-garment-status { margin: 0; overflow-wrap: anywhere; color: var(--tw-accent); font-size: 14px; }
-#tw-panel .tw-garment-status[data-error="true"] { color: #ef99a7; }
-#tw-panel .tw-detail-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); flex: 0 0 auto; border-bottom: 1px solid var(--tw-line); }
-#tw-panel .tw-detail-tabs button { position: relative; gap: 7px; min-height: 48px; border-radius: 9px 9px 0 0; color: #9697ad; font-size: 14px; white-space: nowrap; }
-#tw-panel .tw-detail-tabs .tw-icon { width: 18px; height: 18px; }
-#tw-panel .tw-detail-tabs button[aria-pressed="true"] { background: #282536; color: #d392f5; }
-#tw-panel .tw-detail-tabs button[aria-pressed="true"]::after { content: ''; position: absolute; right: 15px; bottom: -1px; left: 15px; height: 2px; background: #cc88ef; }
-#tw-panel .tw-detail-content { flex: 1 0 auto; min-height: 180px; }
-#tw-panel .tw-properties { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 22px 16px; padding: 10px 0 16px; color: #9e9eb2; }
-#tw-panel .tw-detail-placeholder { display: block; padding: 10px 0; color: var(--tw-muted); }
-#tw-panel .tw-detail-actions { display: grid; gap: 18px; flex: 0 0 auto; padding-top: 12px; }
-#tw-panel .tw-apply { width: 100%; min-height: 64px; border-color: #39304d; background: #292239; color: #d1c7e5; }
-#tw-panel .tw-action-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-#tw-panel .tw-action-row button { min-height: 62px; border-color: var(--tw-line); color: #aaa8bf; }
-#tw-panel .tw-action-row .tw-icon { width: 22px; height: 22px; }
-#tw-panel .tw-action-row .tw-delete { border-color: #45303e; background: #241e26; color: #d77687; }
-/* 设置使用独立原生模态框，浏览器负责焦点限制和 Escape；内容区独立滚动以容纳后续设置。 */
-#tw-panel #tw-settings { inset: 0; width: min(920px, calc(100% - 64px)); height: min(680px, calc(100% - 64px)); max-width: none; max-height: none; margin: auto; padding: 0; overflow: hidden; border: 1px solid #494052; border-radius: 16px; background: #181921; color: var(--tw-ink); font: inherit; text-align: left; }
-#tw-panel #tw-settings[open] { display: grid; grid-template-rows: auto minmax(0, 1fr); }
-#tw-panel #tw-settings::backdrop { background: rgb(0 0 0 / 55%); }
-#tw-panel .tw-settings-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 24px; border-bottom: 1px solid var(--tw-line); }
-#tw-panel .tw-settings-body { display: grid; grid-template-columns: 180px minmax(0, 1fr); min-height: 0; }
-#tw-panel .tw-settings-nav { display: flex; flex-direction: column; gap: 6px; padding: 16px 12px; overflow-y: auto; border-right: 1px solid var(--tw-line); }
-#tw-panel .tw-settings-nav button { flex: 0 0 auto; justify-content: flex-start; min-height: 48px; padding: 10px 14px; color: var(--tw-muted); }
-#tw-panel .tw-settings-nav button[aria-pressed="true"] { background: var(--tw-selected); color: var(--tw-accent); }
-#tw-panel .tw-settings-content { min-width: 0; min-height: 0; padding: 28px; overflow-y: auto; overscroll-behavior: contain; }
-#tw-panel .tw-settings-content h3 { margin-bottom: 24px; font-size: 20px; font-weight: 600; }
-/* 表单使用纵向字段，双列参数在窄屏自动换行，不沿用旧的服装视图与分类行。 */
-#tw-panel .tw-api-form, #tw-panel .tw-api-fields, #tw-panel .tw-api-custom { display: grid; gap: 20px; min-width: 0; margin: 0; padding: 0; border: 0; }
-#tw-panel .tw-api-field { display: grid; gap: 8px; min-width: 0; }
-#tw-panel .tw-api-field > :is(span, label):first-child { color: #c6c3d6; font-size: 14px; }
-#tw-panel .tw-api-field :is(input, select) { width: 100%; min-width: 0; min-height: 44px; padding: 10px 12px; border: 1px solid #494052; border-radius: 9px; background: #15171f; box-shadow: none; color-scheme: dark; }
-#tw-panel .tw-api-field input::placeholder { color: var(--tw-muted); opacity: 1; }
-#tw-panel .tw-api-input-action { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
-#tw-panel .tw-api-input-action input { flex: 1 1 0; }
-#tw-panel .tw-api-form button { flex: 0 0 auto; min-height: 44px; padding: 8px 14px; border-color: #494052; background: #24232e; }
-/* 模型列表放在表单流内，避免被设置内容区裁切；长列表只滚动自身，不遮住后续参数。 */
-#tw-panel .tw-model-picker { display: grid; flex: 1 1 0; align-content: start; gap: 8px; min-width: 0; }
-#tw-panel .tw-model-control { display: flex; align-items: center; min-width: 0; border: 1px solid #494052; border-radius: 9px; background: #15171f; }
-#tw-panel .tw-model-control:focus-within { border-color: var(--tw-accent); }
-#tw-panel .tw-model-control input { border: 0; background: transparent; }
-#tw-panel .tw-model-control input:focus-visible { outline-offset: -3px; }
-#tw-panel .tw-model-control button { width: 40px; min-height: 40px; padding: 8px; border: 0; background: transparent; color: var(--tw-muted); }
-#tw-panel .tw-model-control .tw-icon { width: 18px; height: 18px; }
-#tw-panel .tw-model-options { display: grid; gap: 4px; max-height: 220px; padding: 6px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid #494052; border-radius: 10px; background: #1c1b26; scrollbar-width: thin; scrollbar-color: #51425f transparent; }
-#tw-panel .tw-model-options button { justify-content: flex-start; width: 100%; min-height: 40px; padding: 10px; border: 0; background: transparent; text-align: left; overflow-wrap: anywhere; }
-#tw-panel .tw-model-options button:is(:hover, [aria-selected="true"]) { background: var(--tw-selected); color: var(--tw-accent); }
-#tw-panel .tw-model-empty { padding: 10px; color: var(--tw-muted); font-size: 14px; }
-#tw-panel .tw-model-empty[data-error="true"] { color: #ef99a7; }
-#tw-panel .tw-api-parameters { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 16px; }
-#tw-panel .tw-api-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 12px; }
-#tw-panel .tw-api-actions .tw-api-save { border-color: #7855b9; background: #623da9; color: #f4eaff; }
-#tw-panel .tw-api-status { min-height: 24px; margin: 0; overflow-wrap: anywhere; color: var(--tw-muted); font-size: 14px; }
-#tw-panel .tw-api-status[data-error="true"] { color: #ef99a7; }
-/* 内容类型和注入位置使用原生单选卡，沿用紫色选中态，同时保留键盘切换能力。 */
-#tw-panel .tw-send-form { display: grid; gap: 24px; min-width: 0; }
-#tw-panel .tw-send-group { min-width: 0; margin: 0; padding: 0; border: 0; }
-#tw-panel .tw-send-group legend { margin: 0 0 12px; padding: 0; color: #c6c3d6; font: inherit; font-size: 14px; }
-#tw-panel .tw-send-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); gap: 10px; }
-#tw-panel .tw-send-choice { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 12px; border: 1px solid #494052; border-radius: 9px; background: #15171f; cursor: pointer; }
-#tw-panel .tw-send-choice:has(input:checked) { border-color: #7855b9; background: var(--tw-selected); color: var(--tw-accent); }
-#tw-panel .tw-send-choice input { flex: 0 0 auto; width: 18px; height: 18px; accent-color: var(--tw-accent); }
-#tw-panel .tw-send-actions { display: flex; justify-content: flex-end; }
-#tw-panel .tw-send-actions button { min-height: 44px; padding: 8px 18px; border-color: #7855b9; background: #623da9; color: #f4eaff; }
-#tw-panel .tw-send-status { min-height: 24px; margin: 0; overflow-wrap: anywhere; color: var(--tw-muted); font-size: 14px; }
-#tw-panel .tw-send-status[data-error="true"] { color: #ef99a7; }
-/* 两个角色的模板采用同一编辑布局，较长模板在文本框中编辑，不挤占导航空间。 */
-#tw-panel .tw-template-form, #tw-panel .tw-template-form label { display: grid; gap: 10px; min-width: 0; }
-#tw-panel .tw-template-form { gap: 24px; }
-#tw-panel .tw-template-form small, #tw-panel .tw-template-hint { color: var(--tw-muted); font-size: 13px; }
-#tw-panel .tw-template-form textarea { width: 100%; min-height: 150px; padding: 12px; resize: vertical; border: 1px solid #494052; border-radius: 9px; background: #15171f; color: inherit; font: inherit; line-height: 1.6; box-shadow: none; }
-#tw-panel .tw-template-hint { margin: 0; overflow-wrap: anywhere; line-height: 1.8; }
-#tw-panel .tw-template-status { min-height: 24px; margin: 0; color: var(--tw-muted); font-size: 14px; }
-#tw-panel .tw-template-status[data-error="true"] { color: #ef99a7; }
-/* 手机让列表与详情分别占用内容区，避免预览和表单把列表页拉成长页面。 */
+
+#tw-panel :is(.tw-item-check, .tw-bulk-actions) input {
+    width: 17px;
+    height: 17px;
+    accent-color: var(--tw-accent-strong);
+    cursor: pointer;
+}
+
+#tw-panel .tw-garment-entry[data-checked="true"] .tw-garment-card {
+    border-color: var(--tw-accent);
+    box-shadow: 0 0 0 2px var(--tw-accent-glow);
+}
+
+#tw-panel .tw-items {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(156px, 100%), 1fr));
+    gap: 14px;
+    width: 100%;
+}
+
+#tw-panel .tw-garment-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    justify-content: stretch;
+    justify-items: stretch;
+    align-content: start;
+    gap: 8px;
+    width: 100%;
+    padding: 10px;
+    overflow: hidden;
+    border: 1px solid var(--tw-line);
+    border-radius: 14px;
+    background: var(--tw-bg-card);
+    text-align: left;
+    transition: transform 0.18s ease, border-color 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+#tw-panel .tw-garment-card:hover {
+    transform: translateY(-2px);
+    border-color: rgba(255, 255, 255, 0.16);
+    background: var(--tw-bg-elevated);
+    box-shadow: 0 10px 24px -8px rgba(0, 0, 0, 0.55);
+}
+
+#tw-panel .tw-garment-card[aria-pressed="true"] {
+    border-color: var(--tw-selected-border);
+    background: linear-gradient(180deg, rgba(168, 85, 247, 0.18) 0%, rgba(25, 28, 40, 0.95) 100%);
+    box-shadow: 0 0 0 1px rgba(192, 132, 252, 0.3), 0 10px 24px -6px rgba(147, 51, 234, 0.28);
+}
+
+#tw-panel .tw-garment-card img {
+    width: 100%;
+    aspect-ratio: 1;
+    object-fit: contain;
+    padding: 6px;
+    border-radius: 10px;
+    background: radial-gradient(circle at 50% 42%, #23273a 0%, #10121b 100%);
+}
+
+#tw-panel .tw-garment-card > .tw-icon {
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1;
+    padding: 34px;
+    border-radius: 10px;
+    background: radial-gradient(circle at 50% 42%, #202436 0%, #10121b 100%);
+    color: var(--tw-muted);
+}
+
+#tw-panel .tw-garment-card span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--tw-ink);
+}
+
+#tw-panel .tw-garment-card small {
+     justify-self: start;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: rgba(192, 132, 252, 0.14);
+    border: 1px solid rgba(192, 132, 252, 0.24);
+    color: #e9d5ff;
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1.4;
+}
+
+#tw-panel .tw-library[data-layout="list"] .tw-items {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+}
+
+#tw-panel .tw-library[data-layout="list"] .tw-garment-card {
+    grid-template-columns: 56px minmax(0, 1fr);
+    align-items: center;
+    gap: 4px 12px;
+    padding: 8px 48px 8px 10px;
+}
+
+#tw-panel .tw-library[data-layout="list"] .tw-garment-card :is(img, .tw-icon) {
+    grid-row: 1 / 3;
+    width: 56px;
+    height: 56px;
+    padding: 4px;
+}
+
+#tw-panel .tw-library[data-layout="list"] .tw-item-check {
+    top: 50%;
+    right: 10px;
+    transform: translateY(-50%);
+}
+
+/* 空状态 */
+#tw-panel .tw-empty {
+    display: grid;
+    justify-items: center;
+    align-content: center;
+    gap: 14px;
+    min-height: 280px;
+    padding: 36px 20px;
+    color: var(--tw-muted);
+    text-align: center;
+}
+
+#tw-panel .tw-empty > .tw-icon {
+    width: 76px;
+    height: 76px;
+    padding: 18px;
+    border-radius: 22px;
+    border: 1px dashed var(--tw-line-strong);
+    background: rgba(255, 255, 255, 0.02);
+    color: var(--tw-muted);
+    stroke-width: 1.35;
+    overflow: visible;
+}
+
+#tw-panel h2 {
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--tw-ink-secondary);
+}
+
+/* 右侧详情与预览栏 */
+#tw-panel .tw-details {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-width: 0;
+    min-height: 0;
+    padding: 16px 18px 20px;
+    overflow-y: auto;
+    border-left: 1px solid var(--tw-line);
+    background: var(--tw-bg-surface);
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+}
+
+#tw-panel .tw-wearer-modes {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    flex: 0 0 auto;
+}
+
+#tw-panel .tw-wearer-modes label {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-height: 38px;
+    padding: 6px 12px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 10px;
+    background: var(--tw-bg-elevated);
+    color: var(--tw-ink-secondary);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.16s ease;
+}
+
+#tw-panel .tw-wearer-modes label:hover {
+    background: var(--tw-bg-hover);
+    color: #fff;
+}
+
+#tw-panel .tw-wearer-modes label:has(:checked) {
+    border-color: var(--tw-selected-border);
+    background: linear-gradient(135deg, rgba(168, 85, 247, 0.24), rgba(99, 102, 241, 0.16));
+    color: #f3e8ff;
+    box-shadow: 0 4px 12px -2px rgba(147, 51, 234, 0.25);
+}
+
+#tw-panel .tw-preview {
+    position: relative;
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    height: clamp(200px, 28dvh, 290px);
+    padding: 12px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 14px;
+    background:
+        radial-gradient(circle at 50% 35%, rgba(168, 85, 247, 0.14) 0%, rgba(15, 17, 25, 0.96) 72%),
+        var(--tw-bg-input);
+    color: var(--tw-muted);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+#tw-panel .tw-preview > .tw-icon {
+    width: 56px;
+    height: 56px;
+    color: rgba(192, 132, 252, 0.45);
+    stroke-width: 1.5;
+}
+
+#tw-panel .tw-preview img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    border-radius: 8px;
+    filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.45));
+}
+
+#tw-panel .tw-details :is(input, select, textarea) {
+    width: 100%;
+    min-width: 0;
+    padding: 8px 11px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 9px;
+    background: var(--tw-bg-input);
+    color: var(--tw-ink);
+    font-size: 13px;
+    box-shadow: none;
+    transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+#tw-panel .tw-details :is(input, select, textarea):focus {
+    border-color: var(--tw-selected-border);
+    box-shadow: 0 0 0 3px rgba(192, 132, 252, 0.12);
+}
+
+#tw-panel .tw-wearer-modes input {
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    padding: 0;
+    accent-color: var(--tw-accent-strong);
+    cursor: pointer;
+}
+
+#tw-panel .tw-details textarea {
+    min-height: 170px;
+    line-height: 1.6;
+    resize: vertical;
+}
+
+#tw-panel .tw-garment-tag {
+    display: grid;
+    gap: 8px;
+    padding: 6px 0;
+    color: var(--tw-ink-secondary);
+    font-size: 13px;
+}
+
+#tw-panel .tw-description-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+#tw-panel .tw-describe {
+    min-height: 36px;
+    padding: 6px 14px;
+    border-color: var(--tw-selected-border);
+    background: var(--tw-selected);
+    color: #f3e8ff;
+    font-size: 12.5px;
+    font-weight: 600;
+}
+
+#tw-panel .tw-describe:not(:disabled):hover {
+    background: rgba(168, 85, 247, 0.26);
+}
+
+#tw-panel .tw-garment-status {
+    margin: 0;
+    overflow-wrap: anywhere;
+    color: var(--tw-accent);
+    font-size: 12.5px;
+    text-align: center;
+}
+
+#tw-panel .tw-garment-status:empty {
+    display: none;
+}
+
+#tw-panel .tw-garment-status[data-error="true"] {
+    color: var(--tw-danger);
+}
+
+/* 详情页分段标签 */
+#tw-panel .tw-detail-tabs {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 4px;
+    flex: 0 0 auto;
+    padding: 4px;
+    border: 1px solid var(--tw-line);
+    border-radius: 11px;
+    background: var(--tw-bg-input);
+}
+
+#tw-panel .tw-detail-tabs button {
+    position: relative;
+    gap: 5px;
+    min-height: 34px;
+    border-radius: 8px;
+    color: var(--tw-muted);
+    font-size: 12.5px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+#tw-panel .tw-detail-tabs button:hover {
+    color: var(--tw-ink-secondary);
+}
+
+#tw-panel .tw-detail-tabs .tw-icon {
+    width: 15px;
+    height: 15px;
+}
+
+#tw-panel .tw-detail-tabs button[aria-pressed="true"] {
+    background: var(--tw-bg-elevated);
+    color: #f3e8ff;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+
+#tw-panel .tw-detail-content {
+    flex: 1 0 auto;
+    min-height: 160px;
+}
+
+#tw-panel .tw-properties {
+    display: grid;
+    grid-template-columns: 64px minmax(0, 1fr);
+    align-items: center;
+    gap: 14px 12px;
+    padding: 6px 0 12px;
+    color: var(--tw-ink-secondary);
+    font-size: 13px;
+}
+
+#tw-panel .tw-properties dd {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+#tw-panel .tw-detail-placeholder {
+    display: block;
+    padding: 12px 0;
+    color: var(--tw-muted);
+}
+
+/* 详情底部操作按钮组 */
+#tw-panel .tw-detail-actions {
+    display: grid;
+    gap: 10px;
+    flex: 0 0 auto;
+    padding-top: 12px;
+    border-top: 1px solid var(--tw-line);
+}
+
+#tw-panel .tw-action-row {
+    display: grid;
+    grid-template-columns: 1.35fr 1fr 1fr;
+    gap: 8px;
+}
+
+#tw-panel .tw-action-row button {
+    min-height: 40px;
+    padding: 0 10px;
+    border-color: var(--tw-line-strong);
+    border-radius: 10px;
+    background: var(--tw-bg-elevated);
+    color: var(--tw-ink-secondary);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+#tw-panel .tw-action-row button:not(:disabled):hover {
+    background: var(--tw-bg-hover);
+    color: #fff;
+}
+
+#tw-panel .tw-action-row [data-action="save-garment"]:not(:disabled) {
+    border-color: rgba(192, 132, 252, 0.45);
+    background: linear-gradient(135deg, #9333ea 0%, #6366f1 100%);
+    color: #fff;
+    box-shadow: 0 4px 14px -3px rgba(147, 51, 234, 0.45);
+}
+
+#tw-panel .tw-action-row [data-action="save-garment"]:not(:disabled):hover {
+    filter: brightness(1.08);
+}
+
+#tw-panel .tw-action-row .tw-icon {
+    width: 16px;
+    height: 16px;
+}
+
+#tw-panel .tw-action-row .tw-delete {
+    border-color: var(--tw-danger-border);
+    background: var(--tw-danger-bg);
+    color: var(--tw-danger);
+}
+
+#tw-panel .tw-action-row .tw-delete:not(:disabled):hover {
+    background: rgba(244, 63, 94, 0.22);
+    color: #fda4af;
+}
+
+/* 设置二级模态框 */
+#tw-panel #tw-settings {
+    inset: 0;
+    width: min(880px, calc(100% - 48px));
+    height: min(640px, calc(100% - 48px));
+    max-width: none;
+    max-height: none;
+    margin: auto;
+    padding: 0;
+    overflow: hidden;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 18px;
+    background: var(--tw-bg-surface);
+    color: var(--tw-ink);
+    font: inherit;
+    text-align: left;
+    box-shadow: 0 28px 70px -12px rgba(0, 0, 0, 0.82);
+}
+
+#tw-panel #tw-settings[open] {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+}
+
+#tw-panel #tw-settings::backdrop {
+    background: rgba(4, 5, 10, 0.65);
+    backdrop-filter: blur(6px);
+}
+
+#tw-panel .tw-settings-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 22px;
+    border-bottom: 1px solid var(--tw-line);
+    background: var(--tw-bg-elevated);
+}
+
+#tw-panel .tw-settings-body {
+    display: grid;
+    grid-template-columns: 185px minmax(0, 1fr);
+    min-height: 0;
+}
+
+#tw-panel .tw-settings-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 14px 10px;
+    overflow-y: auto;
+    border-right: 1px solid var(--tw-line);
+    background: var(--tw-bg-base);
+}
+
+#tw-panel .tw-settings-nav button {
+    flex: 0 0 auto;
+    justify-content: flex-start;
+    min-height: 38px;
+    padding: 8px 12px;
+    border-radius: 9px;
+    color: var(--tw-ink-secondary);
+    font-size: 13px;
+    font-weight: 500;
+}
+
+#tw-panel .tw-settings-nav button:hover {
+    background: rgba(255, 255, 255, 0.04);
+    color: #fff;
+}
+
+#tw-panel .tw-settings-nav button[aria-pressed="true"] {
+    border-color: var(--tw-selected-border);
+    background: var(--tw-selected);
+    color: #f3e8ff;
+}
+
+#tw-panel .tw-settings-content {
+    min-width: 0;
+    min-height: 0;
+    padding: 24px 28px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+#tw-panel .tw-settings-content h3 {
+    margin-bottom: 18px;
+    font-size: 17px;
+    font-weight: 600;
+    color: #fff;
+}
+
+#tw-panel .tw-api-form,
+#tw-panel .tw-api-fields,
+#tw-panel .tw-api-custom {
+    display: grid;
+    gap: 16px;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+
+#tw-panel .tw-api-field {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+}
+
+#tw-panel .tw-api-field > :is(span, label):first-child {
+    color: var(--tw-ink-secondary);
+    font-size: 13px;
+    font-weight: 500;
+}
+
+#tw-panel .tw-api-field :is(input, select) {
+    width: 100%;
+    min-width: 0;
+    min-height: 38px;
+    padding: 8px 12px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 9px;
+    background: var(--tw-bg-input);
+    box-shadow: none;
+    color-scheme: dark;
+    font-size: 13px;
+}
+
+#tw-panel .tw-api-field input::placeholder {
+    color: var(--tw-muted);
+    opacity: 0.75;
+}
+
+#tw-panel .tw-api-input-action {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    min-width: 0;
+}
+
+#tw-panel .tw-api-input-action input {
+    flex: 1 1 0;
+}
+
+#tw-panel .tw-api-form button {
+    flex: 0 0 auto;
+    min-height: 38px;
+    padding: 6px 14px;
+    border-color: var(--tw-line-strong);
+    border-radius: 9px;
+    background: var(--tw-bg-elevated);
+    font-size: 13px;
+    font-weight: 500;
+}
+
+#tw-panel .tw-api-form button:not(:disabled):hover {
+    background: var(--tw-bg-hover);
+}
+
+#tw-panel .tw-model-picker {
+    display: grid;
+    flex: 1 1 0;
+    align-content: start;
+    gap: 6px;
+    min-width: 0;
+}
+
+#tw-panel .tw-model-control {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 9px;
+    background: var(--tw-bg-input);
+}
+
+#tw-panel .tw-model-control:focus-within {
+    border-color: var(--tw-selected-border);
+}
+
+#tw-panel .tw-model-control input {
+    border: 0;
+    background: transparent;
+}
+
+#tw-panel .tw-model-control input:focus-visible {
+    outline-offset: -3px;
+}
+
+#tw-panel .tw-model-control button {
+    width: 36px;
+    min-height: 36px;
+    padding: 6px;
+    border: 0;
+    background: transparent;
+    color: var(--tw-muted);
+}
+
+#tw-panel .tw-model-control .tw-icon {
+    width: 16px;
+    height: 16px;
+}
+
+#tw-panel .tw-model-options {
+    display: grid;
+    gap: 3px;
+    max-height: 200px;
+    padding: 6px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 10px;
+    background: var(--tw-bg-elevated);
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+
+#tw-panel .tw-model-options button {
+    justify-content: flex-start;
+    width: 100%;
+    min-height: 34px;
+    padding: 6px 10px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    text-align: left;
+    overflow-wrap: anywhere;
+}
+
+#tw-panel .tw-model-options button:is(:hover, [aria-selected="true"]) {
+    background: var(--tw-selected);
+    color: #f3e8ff;
+}
+
+#tw-panel .tw-model-empty {
+    padding: 8px 10px;
+    color: var(--tw-muted);
+    font-size: 12.5px;
+}
+
+#tw-panel .tw-model-empty[data-error="true"] {
+    color: var(--tw-danger);
+}
+
+#tw-panel .tw-api-parameters {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
+    gap: 14px;
+}
+
+#tw-panel .tw-api-actions {
+    display: flex;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding-top: 4px;
+}
+
+#tw-panel .tw-api-actions .tw-api-save,
+#tw-panel .tw-send-actions button {
+    min-height: 38px;
+    padding: 6px 20px;
+    border-color: rgba(192, 132, 252, 0.45);
+    border-radius: 9px;
+    background: linear-gradient(135deg, #9333ea 0%, #6366f1 100%);
+    color: #fff;
+    font-weight: 600;
+    box-shadow: 0 4px 14px -3px rgba(147, 51, 234, 0.45);
+}
+
+#tw-panel .tw-api-actions .tw-api-save:hover,
+#tw-panel .tw-send-actions button:hover {
+    filter: brightness(1.08);
+}
+
+#tw-panel .tw-api-status,
+#tw-panel .tw-send-status,
+#tw-panel .tw-template-status {
+    min-height: 22px;
+    margin: 0;
+    overflow-wrap: anywhere;
+    color: var(--tw-accent);
+    font-size: 13px;
+}
+
+#tw-panel .tw-api-status[data-error="true"],
+#tw-panel .tw-send-status[data-error="true"],
+#tw-panel .tw-template-status[data-error="true"] {
+    color: var(--tw-danger);
+}
+
+/* 发送设置单选卡 */
+#tw-panel .tw-send-form {
+    display: grid;
+    gap: 20px;
+    min-width: 0;
+}
+
+#tw-panel .tw-send-group {
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+
+#tw-panel .tw-send-group legend {
+    margin: 0 0 10px;
+    padding: 0;
+    color: var(--tw-ink-secondary);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+#tw-panel .tw-send-options {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr));
+    gap: 10px;
+}
+
+#tw-panel .tw-send-choice {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 46px;
+    padding: 10px 14px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 10px;
+    background: var(--tw-bg-input);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.16s ease;
+}
+
+#tw-panel .tw-send-choice:hover {
+    background: var(--tw-bg-elevated);
+}
+
+#tw-panel .tw-send-choice:has(input:checked) {
+    border-color: var(--tw-selected-border);
+    background: var(--tw-selected);
+    color: #f3e8ff;
+    box-shadow: 0 2px 10px -2px rgba(147, 51, 234, 0.25);
+}
+
+#tw-panel .tw-send-choice input {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    accent-color: var(--tw-accent-strong);
+}
+
+#tw-panel .tw-send-actions {
+    display: flex;
+    justify-content: flex-end;
+}
+
+/* 模板编辑表单 */
+#tw-panel .tw-template-form,
+#tw-panel .tw-template-form label {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+}
+
+#tw-panel .tw-template-form {
+    gap: 18px;
+}
+
+#tw-panel .tw-template-form small,
+#tw-panel .tw-template-hint {
+    color: var(--tw-muted);
+    font-size: 12px;
+}
+
+#tw-panel .tw-template-form textarea {
+    width: 100%;
+    min-height: 136px;
+    padding: 10px 12px;
+    resize: vertical;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 10px;
+    background: var(--tw-bg-input);
+    color: inherit;
+    font: inherit;
+    font-size: 13px;
+    line-height: 1.6;
+    box-shadow: none;
+}
+
+#tw-panel .tw-template-form textarea:focus {
+    border-color: var(--tw-selected-border);
+    box-shadow: 0 0 0 3px rgba(192, 132, 252, 0.12);
+}
+
+#tw-panel .tw-template-hint {
+    margin: 0;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.03);
+    overflow-wrap: anywhere;
+    line-height: 1.7;
+}
+
+/* 移动端与紧凑视口响应式布局 */
 @media (max-width: 900px), (max-height: 500px) and (pointer: coarse) {
     #tw-panel {
+        width: 100%;
         height: 100vh;
         height: 100dvh;
         bottom: auto;
         padding-bottom: 0;
         border: 0;
         border-radius: 0;
+        box-shadow: none;
     }
-    #tw-panel .tw-shell { grid-template-rows: auto minmax(0, 1fr) auto; }
-    #tw-panel .tw-header { flex-wrap: wrap; gap: 10px; }
-    #tw-panel .tw-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }
-    #tw-panel .tw-sidebar { display: grid; grid-template-columns: 44px minmax(0, 1fr); align-items: center; gap: 8px; padding: 8px 12px; }
-    /* 原生选择器一次展示全部分类，横向条带则保留快速切换，两者共享选中状态。 */
-    #tw-panel .tw-mobile-filter { position: relative; display: grid; width: 44px; height: 44px; place-items: center; border: 1px solid var(--tw-line); border-radius: 9px; background: #20222d; color: #c6bddb; }
-    #tw-panel .tw-mobile-filter .tw-icon { width: 20px; height: 20px; }
-    #tw-panel .tw-mobile-filter select { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; font-size: 16px; }
-    #tw-panel .tw-mobile-filter:focus-within { outline: 2px solid var(--tw-accent); outline-offset: 2px; }
-    #tw-panel .tw-category-list { flex-direction: row; gap: 6px; min-width: 0; padding: 3px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: none; scroll-behavior: auto; }
-    #tw-panel .tw-category { display: inline-flex; flex: 0 0 auto; gap: 8px; width: auto; min-height: 44px; padding: 8px 12px; font-size: 14px; }
-    #tw-panel .tw-category > .tw-icon { width: 20px; height: 20px; }
-    #tw-panel .tw-count, #tw-panel .tw-divider, #tw-panel .tw-import-footer { display: none; }
-    #tw-panel .tw-library { min-height: 0; margin: 0 12px 12px; padding: 12px; border-top: 1px solid var(--tw-line); border-radius: 12px; overscroll-behavior: contain; }
-    #tw-panel .tw-empty { gap: 12px; padding: 16px 0; }
-    #tw-panel .tw-empty > .tw-icon { width: 72px; height: 72px; }
-    #tw-panel h2 { font-size: 20px; }
-    #tw-panel .tw-details { display: none; grid-column: 1; grid-row: 1 / -1; padding: 12px 12px 20px; overflow-y: auto; overscroll-behavior: contain; }
-    #tw-panel[data-mobile-screen="details"] .tw-sidebar, #tw-panel[data-mobile-screen="details"] .tw-library { display: none; }
-    #tw-panel[data-mobile-screen="details"] .tw-details { display: flex; }
-    #tw-panel .tw-preview { height: 220px; }
-    #tw-panel .tw-properties { grid-template-columns: 80px minmax(0, 1fr); }
-    /* 操作栏占据独立网格行，并预留底部安全区，避免遮住列表或贴住系统手势条。 */
-    #tw-panel .tw-mobile-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(96px, 1.3fr); gap: 6px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--tw-line); background: #181921; }
-    #tw-panel .tw-mobile-actions button { gap: 4px; min-height: 48px; padding: 8px 6px; border-color: #393544; background: #23212e; color: #d3c9e4; font-size: 14px; }
-    #tw-panel .tw-mobile-actions .tw-mobile-import { border-color: #7855b9; background: #623da9; color: #f4eaff; }
-    #tw-panel .tw-mobile-actions .tw-icon { width: 20px; height: 20px; }
-    /* 紧凑屏幕给设置完整可用空间，分组横排，避免侧栏挤压表单。 */
-    #tw-panel #tw-settings { width: 100%; height: 100%; margin: 0; padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px); border: 0; border-radius: 0; }
-    #tw-panel .tw-settings-header { padding: 10px 16px; }
-    #tw-panel .tw-settings-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-    #tw-panel .tw-settings-nav { flex-direction: row; padding: 8px 12px; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--tw-line); }
-    #tw-panel .tw-settings-content { padding: 20px 16px; }
+    #tw-panel .tw-shell {
+        grid-template-rows: auto minmax(0, 1fr) auto;
+    }
+    #tw-panel .tw-header {
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 10px 14px;
+    }
+    #tw-panel .tw-body {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: auto minmax(0, 1fr);
+        overflow: hidden;
+    }
+    #tw-panel .tw-sidebar {
+        display: grid;
+        grid-template-columns: 40px minmax(0, 1fr);
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-right: 0;
+        border-bottom: 1px solid var(--tw-line);
+    }
+    #tw-panel .tw-mobile-filter {
+        position: relative;
+        display: grid;
+        width: 40px;
+        height: 40px;
+        place-items: center;
+        border: 1px solid var(--tw-line-strong);
+        border-radius: 10px;
+        background: var(--tw-bg-elevated);
+        color: #e9d5ff;
+    }
+    #tw-panel .tw-mobile-filter .tw-icon {
+        width: 18px;
+        height: 18px;
+    }
+    #tw-panel .tw-mobile-filter select {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        opacity: 0;
+        font-size: 16px;
+    }
+    #tw-panel .tw-mobile-filter:focus-within {
+        outline: 2px solid var(--tw-accent);
+        outline-offset: 2px;
+    }
+    #tw-panel .tw-category-list {
+        flex-direction: row;
+        gap: 6px;
+        min-width: 0;
+        padding: 2px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        overscroll-behavior-x: contain;
+        scrollbar-width: none;
+        scroll-behavior: auto;
+    }
+    #tw-panel .tw-category {
+        display: inline-flex;
+        flex: 0 0 auto;
+        gap: 6px;
+        width: auto;
+        min-height: 38px;
+        padding: 6px 12px;
+        font-size: 13px;
+    }
+    #tw-panel .tw-category > .tw-icon {
+        width: 16px;
+        height: 16px;
+    }
+    #tw-panel .tw-count,
+    #tw-panel .tw-divider,
+    #tw-panel .tw-import-footer {
+        display: none;
+    }
+    #tw-panel .tw-library {
+        min-height: 0;
+        margin: 0;
+        padding: 12px;
+        overscroll-behavior: contain;
+    }
+    #tw-panel .tw-empty {
+        gap: 10px;
+        min-height: 200px;
+        padding: 16px 0;
+    }
+    #tw-panel .tw-empty > .tw-icon {
+        width: 64px;
+        height: 64px;
+    }
+    #tw-panel h2 {
+        font-size: 15px;
+    }
+    #tw-panel .tw-details {
+        display: none;
+        grid-column: 1;
+        grid-row: 1 / -1;
+        padding: 14px 14px 20px;
+        border-left: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
+    #tw-panel[data-mobile-screen="details"] .tw-sidebar,
+    #tw-panel[data-mobile-screen="details"] .tw-library {
+        display: none;
+    }
+    #tw-panel[data-mobile-screen="details"] .tw-details {
+        display: flex;
+    }
+    #tw-panel .tw-preview {
+        height: 210px;
+    }
+    #tw-panel .tw-properties {
+        grid-template-columns: 64px minmax(0, 1fr);
+    }
+    #tw-panel .tw-mobile-actions {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(104px, 1.25fr);
+        gap: 8px;
+        padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+        border-top: 1px solid var(--tw-line);
+        background: var(--tw-bg-surface);
+    }
+    #tw-panel .tw-mobile-actions button {
+        gap: 6px;
+        min-height: 44px;
+        padding: 8px 10px;
+        border-color: var(--tw-line-strong);
+        border-radius: 10px;
+        background: var(--tw-bg-elevated);
+        color: var(--tw-ink-secondary);
+        font-size: 13px;
+        font-weight: 600;
+    }
+    #tw-panel .tw-mobile-actions .tw-mobile-import {
+        border-color: rgba(192, 132, 252, 0.45);
+        background: linear-gradient(135deg, #9333ea 0%, #6366f1 100%);
+        color: #fff;
+    }
+    #tw-panel .tw-mobile-actions .tw-icon {
+        width: 18px;
+        height: 18px;
+    }
+    #tw-panel #tw-settings {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+        border: 0;
+        border-radius: 0;
+    }
+    #tw-panel .tw-settings-header {
+        padding: 12px 16px;
+    }
+    #tw-panel .tw-settings-body {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: auto minmax(0, 1fr);
+    }
+    #tw-panel .tw-settings-nav {
+        flex-direction: row;
+        padding: 8px 12px;
+        overflow-x: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--tw-line);
+    }
+    #tw-panel .tw-settings-content {
+        padding: 18px 16px;
+    }
 }
+
 @media (max-width: 600px) {
-    #tw-panel .tw-header { display: grid; grid-template-columns: minmax(0, 1fr) 44px 44px; gap: 8px; padding: 8px 12px; }
-    #tw-panel .tw-brand { grid-column: 1; grid-row: 1; gap: 10px; margin-right: 0; }
-    #tw-panel .tw-brand > .tw-icon { width: 34px; height: 34px; }
-    #tw-panel h1 { font-size: 20px; }
-    #tw-panel .tw-brand-subtitle { font-size: 12px; }
-    #tw-panel .tw-header > .tw-icon-button { width: 44px; height: 44px; }
-    #tw-panel .tw-settings-button { grid-column: 2; grid-row: 1; }
-    #tw-panel .tw-close { grid-column: 3; grid-row: 1; }
-    #tw-panel .tw-sort { display: none; }
-    #tw-panel .tw-search { grid-column: 1; grid-row: 2; width: 100%; min-width: 0; }
-    #tw-panel .tw-view-modes { grid-column: 2 / 4; grid-row: 2; width: 100%; }
-    #tw-panel .tw-view-modes .tw-icon-button { flex: 1 1 0; width: 44px; }
+    #tw-panel .tw-header {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 38px 38px;
+        gap: 8px;
+        padding: 10px 12px;
+    }
+    #tw-panel .tw-brand {
+        grid-column: 1;
+        grid-row: 1;
+        gap: 10px;
+        margin-right: 0;
+    }
+    #tw-panel .tw-brand > .tw-icon {
+        width: 32px;
+        height: 32px;
+        padding: 6px;
+    }
+    #tw-panel h1 {
+        font-size: 15px;
+    }
+    #tw-panel .tw-brand-subtitle {
+        font-size: 10px;
+    }
+    #tw-panel .tw-header > .tw-icon-button {
+        width: 38px;
+        height: 38px;
+    }
+    #tw-panel .tw-settings-button {
+        grid-column: 2;
+        grid-row: 1;
+    }
+    #tw-panel .tw-close {
+        grid-column: 3;
+        grid-row: 1;
+    }
+    #tw-panel .tw-sort {
+        display: none;
+    }
+    #tw-panel .tw-search {
+        grid-column: 1;
+        grid-row: 2;
+        width: 100%;
+        min-width: 0;
+        height: 38px;
+    }
+    #tw-panel .tw-view-modes {
+        grid-column: 2 / 4;
+        grid-row: 2;
+        width: 100%;
+        height: 38px;
+    }
+    #tw-panel .tw-view-modes .tw-icon-button {
+        flex: 1 1 0;
+        width: auto;
+        height: 100%;
+    }
 }
+
 @media (pointer: coarse) {
-    #tw-menu-entry { min-height: 44px; padding: 8px 10px; }
-    #tw-panel button, #tw-panel select { touch-action: manipulation; }
+    #tw-menu-entry {
+        min-height: 44px;
+        padding: 8px 10px;
+    }
+    #tw-panel button,
+    #tw-panel select {
+        touch-action: manipulation;
+    }
 }
+
 @media (hover: none) {
-    #tw-panel .tw-category:not([aria-pressed="true"]):hover { background: transparent; }
+    #tw-panel .tw-category:not([aria-pressed="true"]):hover {
+        background: transparent;
+    }
 }
 `;
 
@@ -658,7 +2216,6 @@ const checkedGarmentIds = new Set();
 let visibleGarmentIds = new Set();
 let selectedGarmentId = null;
 let currentCategory = 'all';
-let selectedWearer = 'char';
 let wardrobeTemplates = { user: { ...DEFAULT_TEMPLATES.user }, char: { ...DEFAULT_TEMPLATES.char }, image: { ...DEFAULT_TEMPLATES.image } };
 let descriptionPrompts = { ...DEFAULT_DESCRIPTION_PROMPTS };
 let sendSettings = { content_type: 'text', position: 'user_end' };
@@ -740,9 +2297,8 @@ function initializeWardrobe() {
         button.addEventListener('click', handleGarmentAction);
     }
     panel.querySelector('[data-action="save-garment"]').addEventListener('click', saveSelectedGarment);
-    panel.querySelector('[data-action="apply"]').addEventListener('click', applySelectedGarment);
     panel.querySelector('[data-action="describe"]').addEventListener('click', generateGarmentDescription);
-    panel.querySelector('.tw-wearer-modes').addEventListener('click', selectWearer);
+    panel.querySelector('.tw-wearer-modes').addEventListener('change', selectWearer);
     panel.querySelector('.tw-category-list').addEventListener('click', selectCategory);
     panel.querySelector('.tw-mobile-filter select').addEventListener('change', selectCategoryOption);
     panel.querySelector('[data-action="toggle-details"]').addEventListener('click', toggleMobileDetails);
@@ -1004,7 +2560,7 @@ function handleGarmentAction(event) {
 }
 
 /**
- * 删除指定服装并清理当前聊天的应用选择；其他聊天在读取选择时自动过滤失效标识。
+ * 删除指定服装并清理共用的应用选择，所有聊天读取同一份有效服装标识。
  * @param {Set<string>} ids 待删除的服装标识集合。
  * @returns {void} 无返回值。
  */
@@ -1013,10 +2569,7 @@ function deleteGarments(ids) {
     const next = new Map(garments);
     for (const id of ids) next.delete(id);
     commitGarments(next, next.has(selectedGarmentId) ? selectedGarmentId : next.keys().next().value ?? null);
-    if (SillyTavern.getCurrentChatId()) {
-        const selections = readWearerSelections();
-        insertOrAssignVariables({ wardrobe_selections: { user: Array.from(selections.user), char: Array.from(selections.char) }, wardrobe_active_id: null }, { type: 'chat' });
-    }
+    saveWearerSelections(readWearerSelections());
     setLibraryStatus(`已删除 ${ids.size} 件服装`);
 }
 
@@ -1204,14 +2757,13 @@ function handleBulkAction(event) {
 }
 
 /**
- * 批量保存前验证每件服装的发送内容，任一不满足时保持两个角色原有选择。
+ * 批量保存前验证每件服装的发送内容，共用选择不依赖聊天；任一不满足时保持原有选择。
  * @param {Iterable<string>} ids 待处理的服装标识。
  * @param {string} wearer 目标角色 user 或 char。
  * @param {boolean} removing 是否取消应用。
  * @returns {void} 无返回值。
  */
 function applyGarments(ids, wearer, removing = false) {
-    if (!SillyTavern.getCurrentChatId()) throw new Error('请先打开一个聊天，再应用服装。');
     const selections = readWearerSelections();
     for (const id of ids) {
         if (removing) selections[wearer].delete(id);
@@ -1222,7 +2774,7 @@ function applyGarments(ids, wearer, removing = false) {
             selections[wearer].add(id);
         }
     }
-    insertOrAssignVariables({ wardrobe_selections: { user: Array.from(selections.user), char: Array.from(selections.char) }, wardrobe_active_id: null }, { type: 'chat' });
+    saveWearerSelections(selections);
 }
 
 /**
@@ -1254,13 +2806,15 @@ function setLibraryStatus(message, error = false) {
 }
 
 /**
- * 在聊天变量入口归一化 USER 与 Char 选择；旧版单套应用归入 Char，不改变原有穿着归属。
+ * 在脚本变量入口归一化共用选择；尚无共用存档时，将当前聊天的旧选择迁移一次。
  * @returns {{user: Set<string>, char: Set<string>}} 两个角色的有效服装标识集合。
  */
 function readWearerSelections() {
     const selections = { user: new Set(), char: new Set() };
-    if (!SillyTavern.getCurrentChatId()) return selections;
-    const variables = getVariables({ type: 'chat' });
+    let variables = getVariables({ type: 'script' });
+    // 明确保存的空集合也是用户选择，不能让切换聊天重新激活旧服装。
+    const migrating = variables.wardrobe_selections === undefined && Boolean(SillyTavern.getCurrentChatId());
+    if (migrating) variables = getVariables({ type: 'chat' });
     const saved = variables.wardrobe_selections;
     if (saved && typeof saved === 'object') {
         for (const wearer of WEARERS) {
@@ -1268,34 +2822,53 @@ function readWearerSelections() {
             for (const id of saved[wearer]) if (garments.has(id)) selections[wearer].add(id);
         }
     } else if (garments.has(variables.wardrobe_active_id)) selections.char.add(variables.wardrobe_active_id);
+    if (migrating && (saved !== undefined || variables.wardrobe_active_id != null)) saveWearerSelections(selections);
     return selections;
 }
 
 /**
- * 切换当前编辑的所属角色，不覆盖服装描述中尚未保存的修改。
- * @param {MouseEvent} event 角色按钮组点击事件。
- * @returns {void} 无返回值。
+ * 将两个角色的选择写入脚本变量，使首页应用与跨聊天使用遵循同一存档范围。
+ * @param {{user: Set<string>, char: Set<string>}} selections 已归一化的角色服装选择。
+ * @returns {void} 无返回值；写入失败交由调用方报告。
  */
-function selectWearer(event) {
-    const button = event.target.closest('[data-wearer]');
-    if (!button) return;
-    selectedWearer = button.dataset.wearer;
-    renderGarmentLibrary();
-    renderWearerState();
-    setGarmentStatus('');
+function saveWearerSelections(selections) {
+    insertOrAssignVariables({ wardrobe_selections: { user: Array.from(selections.user), char: Array.from(selections.char) } }, { type: 'script' });
 }
 
 /**
- * 同步角色选择数量和当前服装的加入或取消入口，多套选择不会替换之前选择的服装。
+ * 按当前服装的复选框保存穿着归属，另一角色仅在用户单独勾选后才可使用。
+ * @param {Event} event 归属复选框变化事件。
+ * @returns {void} 无返回值。
+ */
+function selectWearer(event) {
+    const input = event.target.closest('input[data-wearer]');
+    if (!input) return;
+    // 保存详情会刷新复选框，先保留用户本次选择，避免读取到刷新后的旧归属。
+    const wearer = input.dataset.wearer;
+    const removing = !input.checked;
+    try {
+        if (!removing && !saveSelectedGarment()) {
+            renderWearerState();
+            return;
+        }
+        applyGarments([selectedGarmentId], wearer, removing);
+        refreshWardrobe();
+        setGarmentStatus(removing ? '已取消该角色的穿着归属' : '已保存穿着归属');
+    } catch (error) {
+        renderWearerState();
+        setGarmentStatus(String(error), true);
+    }
+}
+
+/**
+ * 从已保存的角色清单同步当前服装的归属，未指定的角色始终保持未勾选。
  * @returns {void} 无返回值。
  */
 function renderWearerState() {
     const selections = readWearerSelections();
-    for (const button of panel.querySelectorAll('[data-wearer]')) {
-        button.setAttribute('aria-pressed', String(button.dataset.wearer === selectedWearer));
-        button.querySelector('span').textContent = String(selections[button.dataset.wearer].size);
+    for (const input of panel.querySelectorAll('input[data-wearer]')) {
+        input.checked = selections[input.dataset.wearer].has(selectedGarmentId);
     }
-    panel.querySelector('.tw-apply span').textContent = selections[selectedWearer].has(selectedGarmentId) ? '取消应用' : `应用到${selectedWearer === 'user' ? 'USER' : 'Char'}`;
 }
 
 /**
@@ -1313,7 +2886,7 @@ function refreshWardrobe() {
  */
 function renderGarmentLibrary() {
     renderGarmentGroups();
-    const selected = readWearerSelections()[selectedWearer];
+    const selections = readWearerSelections();
     const counts = new Map();
     const cards = hostDocument.createDocumentFragment();
     visibleGarmentIds = new Set();
@@ -1348,11 +2921,9 @@ function renderGarmentLibrary() {
         const name = hostDocument.createElement('span');
         name.textContent = item.name;
         card.append(name);
-        if (selected.has(item.id)) {
-            const badge = hostDocument.createElement('small');
-            badge.textContent = '已应用';
-            card.append(badge);
-        }
+        const badge = hostDocument.createElement('small');
+        badge.textContent = selections.user.has(item.id) ? (selections.char.has(item.id) ? 'USER · Char' : 'USER') : (selections.char.has(item.id) ? 'Char' : '未分配');
+        card.append(badge);
         entry.append(label, card);
         cards.append(entry);
     }
@@ -1372,7 +2943,7 @@ function renderGarmentLibrary() {
 }
 
 /**
- * 根据当前选中服装填充可编辑详情，并显示当前聊天的应用或取消应用入口。
+ * 根据当前选中服装填充可编辑详情，并显示共用选择的应用或取消应用入口。
  * @returns {void} 无返回值。
  */
 function renderGarmentDetails() {
@@ -1477,7 +3048,7 @@ async function generateGarmentDescription() {
  */
 function setDescriptionBusy(busy) {
     const item = garments.get(selectedGarmentId);
-    for (const control of panel.querySelectorAll('.tw-details input, .tw-details select, .tw-details textarea, [data-action="save-garment"], [data-action="apply"]')) {
+    for (const control of panel.querySelectorAll('.tw-details input, .tw-details select, .tw-details textarea, [data-action="save-garment"]')) {
         control.disabled = !item || busy;
     }
     const button = panel.querySelector('[data-action="describe"]');
@@ -1529,26 +3100,6 @@ function saveSelectedGarment() {
 }
 
 /**
- * 为当前聊天的 USER 或 Char 切换一套服装选择，保留该角色已选择的其他服装。
- * @returns {void} 无返回值。
- */
-function applySelectedGarment() {
-    try {
-        const removing = readWearerSelections()[selectedWearer].has(selectedGarmentId);
-        if (!removing) {
-            const item = saveSelectedGarment();
-            if (!item) return;
-        }
-        applyGarments([selectedGarmentId], selectedWearer, removing);
-        refreshWardrobe();
-        setGarmentStatus(removing ? '已取消应用' : '已加入选择，下次对话会使用对应角色模板');
-    } catch (error) {
-        showGarmentDescription();
-        setGarmentStatus(String(error), true);
-    }
-}
-
-/**
  * 在详情区域显示保存或应用结果。
  * @param {string} message 状态文字。
  * @param {boolean} error 是否为操作错误。
@@ -1580,7 +3131,7 @@ function buildWardrobeContent(item, settings) {
 }
 
 /**
- * 按角色实际选择数量使用单套或衣柜模板；包含图片时额外附带对应的图片提示词。
+ * 按穿着归属分别构建角色服装内容，固定说明归属后再附加单套、衣柜或图片模板。
  * @param {WardrobeItem[]} items 该角色选择的服装。
  * @param {string} wearer user 或 char。
  * @param {{content_type: string, position: string}} settings 已保存的发送设置。
@@ -1607,7 +3158,8 @@ function buildWearerContent(items, wearer, settings, templates, names, imageTemp
         outfits: outfits.join('\n\n'), count: String(items.length),
     };
     const field = items.length === 1 ? 'single' : 'wardrobe';
-    const texts = [];
+    // 归属说明独立于可编辑模板，文字和图片模式均明确边界；共享只由两边清单同时列出表达。
+    const texts = [`【${wearer === 'user' ? 'USER' : 'Char'}（${names[wearer]}）的服装】以下服装文字及紧随其后的图片仅供该角色使用。另一角色只能使用其自身服装清单中明确列出的服装，不得将本清单中未分配给对方的服装转给对方，也不得根据性别自动共享。`];
     // 一次替换受支持的变量，不再次解释服装描述里原有的双花括号，也不执行模板代码。
     if (settings.content_type !== 'image') texts.push(templates[wearer][field].replace(TEMPLATE_VARIABLES, (_match, name) => values[name]));
     // 图片模式无需预先填写描述，但必须带上图片提示词，避免把图中人物当作角色设定。
@@ -1654,7 +3206,7 @@ function insertWardrobeContent(messages, parts, position) {
 }
 
 /**
- * 注入当前聊天 USER 与 Char 各自选择的服装，按各自套数独立切换模板，不读取未保存表单。
+ * 将共用的 USER 与 Char 服装选择注入当前请求，按各自套数独立切换模板，不读取未保存表单。
  * @param {{chat: Object[], dryRun: boolean}} event 酒馆最终消息与预览标记。
  * @returns {void} 只修改发送载荷，连接测试不携带服装内容。
  */

@@ -7,6 +7,7 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
 const scriptVariables = {};
 const chatVariables = {};
 const controls = new Map();
+const wearerInputs = ['user', 'char'].map(wearer => ({ dataset: { wearer }, checked: false }));
 const downloads = [];
 const blobs = new Map();
 let writesFail = false;
@@ -43,20 +44,20 @@ const sandbox = {
     },
     SillyTavern: { getCurrentChatId: () => chatId },
     toastr: { error() {} },
-    testPanel: { querySelector: control, querySelectorAll: () => [] },
+    testPanel: { querySelector: control, querySelectorAll: selector => selector === 'input[data-wearer]' ? wearerInputs : [] },
 };
 vm.createContext(sandbox);
 const hooks = `
 panel = testPanel;
 root = { isConnected: true };
-refreshWardrobe = () => {};
+refreshWardrobe = () => renderWearerState();
 renderGarmentLibrary = () => {};
 const actualRenderBulkState = renderBulkState;
 renderBulkState = () => {};
 showGarmentDescription = () => {};
 globalThis.api = { parseWardrobeData, loadGarments, exportGarments, importGarments, applyGarments,
     deleteGarments, addGarmentGroup, deleteGarmentGroup, moveCheckedGarments, selectAllGarments,
-    readWearerSelections, handleBulkAction, toggleMultiSelect, checkGarment, renderBulkState: actualRenderBulkState,
+    readWearerSelections, selectWearer, renderWearerState, handleBulkAction, toggleMultiSelect, checkGarment, renderBulkState: actualRenderBulkState,
     state: () => ({ garments, garmentGroups, currentGroup, selectedGarmentId, checkedGarmentIds, multiSelectMode }),
     selectGroup: id => { currentGroup = id; },
     showIds: ids => { visibleGarmentIds = new Set(ids); },
@@ -81,8 +82,36 @@ async function main() {
     assert.throws(() => api.parseWardrobeData({ groups: [], items: [{ ...red, image: 'https://bad.test/a.png' }] }), /有效图片/);
     assert.throws(() => api.parseWardrobeData({ groups: [], items: [red, red] }), /标识重复/);
 
+    chatId = '';
+    control('[name="garment_name"]').value = blue.name;
+    control('[name="garment_category"]').value = blue.category;
+    control('[name="garment_group"]').value = blue.groupId;
+    control('[name="garment_description"]').value = blue.description;
+    api.renderWearerState();
+    assert.ok(wearerInputs.every(input => !input.checked), '未分配的服装不能默认允许任一角色穿');
+    // 通过真实的复选框处理函数验证：保存详情刷新控件后仍应保留本次勾选意图。
+    wearerInputs[1].checked = true;
+    api.selectWearer({ target: { closest: () => wearerInputs[1] } });
+    assert.equal(api.readWearerSelections().char.has('blue'), true, '只勾选 Char 时保存 Char 归属');
+    assert.equal(api.readWearerSelections().user.has('blue'), false, 'Char 服装不得自动分配给 USER');
+    wearerInputs[0].checked = true;
+    api.selectWearer({ target: { closest: () => wearerInputs[0] } });
+    assert.ok(wearerInputs.every(input => input.checked), '手动分别勾选两边才允许共享');
+    wearerInputs[1].checked = false;
+    api.selectWearer({ target: { closest: () => wearerInputs[1] } });
+    assert.equal(api.readWearerSelections().user.has('blue'), true, '取消 Char 归属不影响 USER');
+    writesFail = true;
+    wearerInputs[0].checked = false;
+    api.selectWearer({ target: { closest: () => wearerInputs[0] } });
+    assert.equal(wearerInputs[0].checked, true, '存储失败时恢复已保存的归属勾选');
+    writesFail = false;
+    wearerInputs[0].checked = false;
+    api.selectWearer({ target: { closest: () => wearerInputs[0] } });
+    assert.ok(wearerInputs.every(input => !input.checked), '全部取消后不向任一角色分配');
     api.applyGarments(['blue', 'red'], 'user');
     api.applyGarments(['blue'], 'char');
+    assert.equal(scriptVariables.wardrobe_selections.user.length, 2, '首页应用保存到共用脚本变量');
+    assert.deepEqual(chatVariables, {}, '共用衣柜不写入聊天变量');
     assert.equal(api.readWearerSelections().user.size, 2, 'USER 一次应用多件');
     assert.equal(api.readWearerSelections().char.size, 1, '两个角色选择相互独立');
     api.renderBulkState();
@@ -106,8 +135,14 @@ async function main() {
     assert.equal(api.readWearerSelections().char.size, 1, '退出多选保留角色已应用的服装');
     api.applyGarments(['blue'], 'user', true);
     assert.equal(api.readWearerSelections().user.has('red'), true, '取消所选保留其他应用');
-    chatId = '';
-    assert.throws(() => api.applyGarments(['blue'], 'char'), /打开一个聊天/);
+    api.applyGarments(['blue'], 'char', true);
+    assert.equal(api.readWearerSelections().char.size, 0, '首页可以取消应用');
+    api.applyGarments(['blue'], 'char');
+    chatId = 'chat';
+    assert.equal(api.readWearerSelections().char.has('blue'), true, '进入聊天沿用首页选择');
+    chatVariables.wardrobe_selections = { user: [], char: ['red'] };
+    chatId = 'other-chat';
+    assert.equal(api.readWearerSelections().char.has('blue'), true, '切换聊天不覆盖共用选择');
     chatId = 'chat';
 
     api.exportGarments(api.state().garments.keys(), true);
@@ -166,9 +201,13 @@ async function main() {
 
     scriptVariables.wardrobe_items = [...scriptVariables.wardrobe_items, { ...red, id: 'missing-description', description: '' }];
     api.loadGarments();
-    const beforeApply = JSON.stringify(chatVariables);
+    const beforeApply = JSON.stringify(scriptVariables);
     assert.throws(() => api.applyGarments(['blue', 'missing-description'], 'char'), /红色外套.*描述/);
-    assert.equal(JSON.stringify(chatVariables), beforeApply, '一件无效时整批不写入');
+    assert.equal(JSON.stringify(scriptVariables), beforeApply, '一件无效时整批不写入');
+    writesFail = true;
+    assert.throws(() => api.applyGarments(['red'], 'char'), /存储失败/);
+    assert.equal(JSON.stringify(scriptVariables), beforeApply, '应用保存失败保留共用选择');
+    writesFail = false;
     confirmation = false;
     api.deleteGarments(new Set(['blue', 'red']));
     assert.equal(api.state().garments.has('blue'), true, '取消删除保留原数据');
@@ -177,10 +216,12 @@ async function main() {
     assert.throws(() => api.deleteGarments(new Set(['blue'])), /存储失败/);
     assert.equal(api.state().garments.has('blue'), true, '存储失败不能删除内存数据');
     writesFail = false;
+    chatId = '';
     api.deleteGarments(new Set(['blue', 'red']));
     assert.equal(api.state().garments.has('blue'), false);
     assert.equal(api.readWearerSelections().user.size, 0, '删除同步清理 USER 应用');
     assert.equal(api.readWearerSelections().char.size, 0, '删除同步清理 Char 应用');
+    assert.equal(scriptVariables.wardrobe_selections.char.length, 0, '首页删除也清理已保存的共用选择');
     assert.equal(scriptVariables.wardrobe_items.some(item => item.id === 'blue'), false);
     api.loadGarments();
     assert.equal(api.state().garmentGroups.get(newGroup), '新款', '重载保留标签');

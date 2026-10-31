@@ -8,8 +8,8 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
 const marker = '// 等待宿主文档就绪';
 assert.ok(source.includes(marker), '应能定位宿主启动边界');
 const sandbox = { window: { parent: { document: {}, matchMedia: () => ({ matches: false }) } } };
-vm.runInNewContext(source.replace(marker, 'globalThis.testApi = { buildWardrobeContent, buildWearerContent, insertWardrobeContent, loadGarments, readWearerSelections }; return;\n' + marker), sandbox);
-const { buildWardrobeContent, buildWearerContent, insertWardrobeContent, loadGarments, readWearerSelections } = sandbox.testApi;
+vm.runInNewContext(source.replace(marker, 'globalThis.testApi = { buildWardrobeContent, buildWearerContent, insertWardrobeContent, loadGarments, readWearerSelections, injectWardrobeContent }; return;\n' + marker), sandbox);
+const { buildWardrobeContent, buildWearerContent, insertWardrobeContent, loadGarments, readWearerSelections, injectWardrobeContent } = sandbox.testApi;
 const item = { id: 'blue', name: '蓝色外套', category: 'coats', description: '深蓝色，银色刺绣', image: 'data:image/png;base64,aGVsbG8=' };
 const history = Object.freeze([
     Object.freeze({ role: 'system', content: '系统提示一' }),
@@ -80,6 +80,8 @@ for (const wearer of ['user', 'char']) {
             assert.equal(textParts.length, items.length ? 1 : 0, '有服装时附带对应的文字模板或图片提示词');
             if (textParts.length) {
                 const text = textParts[0].text;
+                assert.ok(text.startsWith(`【${wearer === 'user' ? 'USER' : 'Char'}（${names[wearer]}）的服装】`), '所有发送模式与自定义模板都必须明确穿着归属');
+                assert.ok(text.includes('不得根据性别自动共享'), '不能将性别当成自动共享衣服的依据');
                 assert.ok(text.includes(names[wearer]), '模板应使用对应角色名称');
                 if (content_type === 'image') {
                     assert.ok(!text.includes(item.description), '默认图片提示词不强制附带已保存的文字描述');
@@ -87,7 +89,7 @@ for (const wearer of ['user', 'char']) {
                     assert.ok(text.includes('服装') && (text.includes('忽略') || text.includes('不采用')), '图片模式应附带服饰参考约束');
                     continue;
                 }
-                assert.ok(text.startsWith(`${wearer === 'user' ? 'USER' : 'Char'}${items.length === 1 ? '单套' : '衣柜'}|`), '模板应按角色和套数独立选择');
+                assert.ok(text.includes(`${wearer === 'user' ? 'USER' : 'Char'}${items.length === 1 ? '单套' : '衣柜'}|`), '模板应按角色和套数独立选择');
                 assert.ok(text.includes(item.description), '模板应包含第一套服装');
                 if (items.length > 1) assert.ok(text.includes(second.description) && text.includes('|2|'), '衣柜模板应包含全部服装与数量');
             }
@@ -129,15 +131,45 @@ for (const wearer of ['user', 'char']) {
 const imageWithoutDescription = buildWearerContent([{ ...item, description: '' }], 'char', { content_type: 'image' }, templates, names, imageTemplates);
 assert.equal(imageWithoutDescription.length, 2, '未生成描述的图片也可以附带图片提示词发送');
 
-// 入口兼容旧版 Char 单套状态，新版明确的空集合不会重新激活旧状态。
+// 旧聊天选择只迁移一次；之后首页、切换聊天和重载都以共用存档为准。
 const chatVariables = { wardrobe_active_id: item.id };
-sandbox.SillyTavern = { getCurrentChatId: () => 'chat' };
-sandbox.getVariables = option => option.type === 'script' ? { wardrobe_items: [item, second] } : chatVariables;
+const scriptVariables = { wardrobe_items: [item, second] };
+let chatId = 'chat';
+sandbox.SillyTavern = { getCurrentChatId: () => chatId };
+sandbox.getVariables = option => option.type === 'script' ? scriptVariables : chatVariables;
+sandbox.insertOrAssignVariables = (data, option) => {
+    assert.equal(option.type, 'script', '旧选择迁移只写入共用脚本变量');
+    Object.assign(scriptVariables, structuredClone(data));
+};
 loadGarments();
 assert.equal(readWearerSelections().char.has(item.id), true, '旧版单套服装应保留为 Char 选择');
+assert.deepEqual(scriptVariables.wardrobe_selections.char, [item.id], '旧选择持久迁移到共用存档');
 chatVariables.wardrobe_selections = { user: [item.id, item.id, 'missing'], char: [second.id] };
+assert.equal(readWearerSelections().char.has(item.id), true, '迁移后其他聊天旧值不覆盖共用选择');
+delete scriptVariables.wardrobe_selections;
 assert.equal(readWearerSelections().user.size, 1, '入口应去重并忽略不存在的服装');
 assert.equal(readWearerSelections().char.has(second.id), true, '角色选择应相互独立');
-chatVariables.wardrobe_selections = { user: [], char: [] };
+chatId = '';
+loadGarments();
+assert.equal(readWearerSelections().char.has(second.id), true, '首页重载仍读取共用选择');
+scriptVariables.wardrobe_selections = { user: [], char: [] };
+chatId = 'other-chat';
 assert.equal(readWearerSelections().char.size, 0, '取消全部选择后不得回退到旧版单套状态');
+
+// 验证完整注入入口的两份角色内容，防止清单分开保存但发送时混在一起。
+sandbox.SillyTavern.name1 = '男主';
+sandbox.SillyTavern.name2 = '女主';
+sandbox.toastr = { error(message) { assert.fail(message); } };
+scriptVariables.wardrobe_selections = { user: [item.id], char: [second.id] };
+const request = { chat: [{ role: 'user', content: '继续剧情' }] };
+injectWardrobeContent(request);
+const roleBlocks = request.chat[0].content.filter(part => part.type === 'text' && part.text.startsWith('【'));
+assert.equal(roleBlocks.length, 2, '两个角色分别生成服装清单');
+assert.ok(roleBlocks[0].text.includes('USER（男主）') && roleBlocks[0].text.includes(item.name) && !roleBlocks[0].text.includes(second.name), 'USER 清单不能混入只分配给 Char 的服装');
+assert.ok(roleBlocks[1].text.includes('Char（女主）') && roleBlocks[1].text.includes(second.name) && !roleBlocks[1].text.includes(item.name), 'Char 清单不能混入只分配给 USER 的服装');
+scriptVariables.wardrobe_selections.user = [];
+const charOnly = { chat: [{ role: 'user', content: '继续剧情' }] };
+injectWardrobeContent(charOnly);
+assert.equal(typeof charOnly.chat[0].content, 'string');
+assert.ok(charOnly.chat[0].content.includes('Char（女主）') && !charOnly.chat[0].content.includes('【USER'), '只分配给 Char 时不生成 USER 服装清单');
 console.log(`通过 ${checked} 种发送位置组合、USER/Char 模板切换、多模态保留及旧选择兼容检查。`);
