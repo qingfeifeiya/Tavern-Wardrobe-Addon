@@ -55,10 +55,11 @@ const TEMPLATE_FIELDS = ['single', 'wardrobe'];
 const TEMPLATE_VARIABLES = /\{\{(user|char|wearer|name|description|outfits|count)\}\}/g;
 const DESCRIPTION_VARIABLES = /\{\{(name|category)\}\}/g;
 const DEFAULT_DESCRIPTION_PROMPTS = {
-    outfit: '请只描述图片中可见的服装与配饰，说明款式、颜色、材质、版型、层次、搭配及装饰细节。忽略人物的身份、面容、发型、表情、姿势、身材、皮肤和身体特征，不描述背景，不续写剧情。只写能从图中看出的信息，无法判断的材质和被遮挡的细节不要猜测。仅输出服装描述正文。',
-    item: '请只描述当前服装单品“{{name}}”（分类：{{category}}）在图片中可见的款式、颜色、材质、剪裁、图案、装饰和穿着细节。忽略其他服装和配饰，不描述人物的身份、面容、发型、表情、姿势、身材、皮肤、身体特征及背景。无法辨认目标单品时请明确说明，不编造。仅输出该单品的描述正文。',
+    outfit: '请只描述图片中可见的服装与配饰，说明款式、颜色、材质、版型、层次、搭配及装饰细节。忽略人物的身份、面容、发型、表情、姿势、身材、皮肤和身体特征，不描述背景，不续写剧情。只写能从图中看出的信息，无法判断的材质和被遮挡的细节不要猜测。仅输出包含 name（服装名称）、description（服装描述）和 category（衣柜标签名称）的 JSON 对象。',
+    item: '请只描述当前服装单品“{{name}}”（分类：{{category}}）在图片中可见的款式、颜色、材质、剪裁、图案、装饰和穿着细节。忽略其他服装和配饰，不描述人物的身份、面容、发型、表情、姿势、身材、皮肤、身体特征及背景。无法辨认目标单品时请明确说明，不编造。仅输出包含 name（单品名称）、description（单品描述）和 category（衣柜标签名称）的 JSON 对象。',
 };
-const DEFAULT_TEMPLATES = {
+// 仅识别上一版的原始默认值，更新时替换这些模板，保留用户实际编辑过的内容。
+const PREVIOUS_DEFAULT_TEMPLATES = {
     user: {
         single: '{{user}} 当前穿着：{{name}}\n{{description}}',
         wardrobe: '{{user}} 的衣柜，共 {{count}} 套：\n{{outfits}}\n请根据剧情选择合适的一套，不要同时穿上所有套装。',
@@ -70,6 +71,21 @@ const DEFAULT_TEMPLATES = {
     image: {
         single: '{{wearer}} 的服装参考图：{{name}}。请仅参考图片中的服装、配饰、款式、颜色和穿搭，不采用图中人物的身份、面容、发型、身材、姿势或背景，不据此改变角色原有外貌。不编造看不到的服装细节。',
         wardrobe: '{{wearer}} 的衣柜包含 {{count}} 套服装，名称与图片按相同顺序对应：{{name}}。请根据剧情选择合适的一套，不要同时穿上所有套装。图片仅提供服装与配饰参考，忽略图中人物的身份、面容、发型、身材、姿势和背景，不改变角色原有外貌，不编造看不到的服装细节。',
+    },
+};
+
+const DEFAULT_TEMPLATES = {
+    user: {
+        single: '{{user}} 当前穿着：{{name}}\n{{description}}\n（禁止编造其他服装。严禁集中罗列服装信息，服装细节必须分散融入不同的动作、触感、环境互动中，每次只带出一两个细节。）',
+        wardrobe: '{{user}} 的衣柜，共 {{count}} 套：\n{{outfits}}\n请根据剧情选择合适的一套，不要同时穿上所有套装。\n（禁止编造以上之外的服装。根据场景标签匹配穿搭，若回复中出现场景转换则对应切换穿搭。严禁集中罗列服装信息，服装细节必须分散融入动作、触感、环境互动中，每次只带出一两个细节。）',
+    },
+    char: {
+        single: '{{char}} 当前穿着：{{name}}\n{{description}}\n（禁止编造其他服装。严禁集中罗列服装信息，服装细节必须分散融入不同的动作、触感、环境互动中，每次只带出一两个细节。）',
+        wardrobe: '{{char}} 的衣柜，共 {{count}} 套：\n{{outfits}}\n请根据剧情选择合适的一套，不要同时穿上所有套装。\n（禁止编造以上之外的服装。根据场景标签匹配穿搭，若回复中出现场景转换则对应切换穿搭。严禁集中罗列服装信息，服装细节必须分散融入动作、触感、环境互动中，每次只带出一两个细节。）',
+    },
+    image: {
+        single: '图中为角色当前穿着，禁止编造其他服装，也不编造看不到的服装细节。严禁集中罗列，服装细节必须分散融入动作、触感、环境互动中，每次只带出一两个细节。\n\n{{wearer}} 的服装参考图：{{name}}。请仅参考图片中的服装、配饰、款式、颜色和穿搭，不采用图中人物的身份、面容、发型、身材、姿势或背景，不据此改变角色原有外貌。',
+        wardrobe: '以上图片为可选穿搭，根据场景标签匹配，场景转换则切换穿搭，禁止编造其他服装，也不编造看不到的服装细节。严禁集中罗列，细节分散融入动作和互动中。\n\n{{wearer}} 的衣柜包含 {{count}} 套服装，名称与图片按相同顺序对应：{{name}}。请根据剧情选择合适的一套，不要同时穿上所有套装。图片仅提供服装与配饰参考，忽略图中人物的身份、面容、发型、身材、姿势和背景，不改变角色原有外貌。',
     },
 };
 
@@ -251,6 +267,7 @@ const PANEL_HTML = `
                 <button type="button" data-settings-page="char-template" aria-pressed="false" aria-controls="tw-settings-char-template">${icon('file')}<span>Char模板</span></button>
                 <button type="button" data-settings-page="image-template" aria-pressed="false" aria-controls="tw-settings-image-template">${icon('file')}<span>图片模板</span></button>
                 <button type="button" data-settings-page="description" aria-pressed="false" aria-controls="tw-settings-description">${icon('pencil')}<span>描述生成</span></button>
+                <button type="button" data-settings-page="data" aria-pressed="false" aria-controls="tw-settings-data">${icon('download')}<span>导入／导出数据</span></button>
             </nav>
             <div class="tw-settings-content">
                 <section id="tw-settings-api" data-settings-content="api" aria-labelledby="tw-settings-api-title">
@@ -328,6 +345,18 @@ const PANEL_HTML = `
                         <div class="tw-send-actions"><button type="submit">保存</button></div>
                         <p class="tw-template-status" role="status" aria-live="polite"></p>
                     </form>
+                </section>
+                <section id="tw-settings-data" data-settings-content="data" aria-labelledby="tw-settings-data-title" hidden>
+                    <h3 id="tw-settings-data-title">导入／导出数据</h3>
+                    <div class="tw-template-form">
+                        <p class="tw-template-hint">发送内容、USER／Char／图片模板、描述生成提示词。仅导出已保存的设置；导入会替换这五项设置，不包含或覆盖任何 API 连接信息。</p>
+                        <div class="tw-send-actions">
+                            <button type="button" data-action="import-data">${icon('plus')}导入数据</button>
+                            <button type="button" data-action="export-data">${icon('download')}导出数据</button>
+                        </div>
+                        <p class="tw-template-status tw-data-status" role="status" aria-live="polite"></p>
+                        <input class="tw-data-import" type="file" accept="application/json,.json" hidden>
+                    </div>
                 </section>
             </div>
         </div>
@@ -1904,6 +1933,8 @@ const PANEL_CSS = `
 
 #tw-panel .tw-send-actions {
     display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
     justify-content: flex-end;
 }
 
@@ -2285,6 +2316,9 @@ function initializeWardrobe() {
     panel.querySelector('[data-action="open-settings"]').addEventListener('click', openSettings);
     settingsPanel.querySelector('[data-action="close-settings"]').addEventListener('click', closeSettings);
     settingsPanel.querySelector('.tw-settings-nav').addEventListener('click', selectSettingsPage);
+    settingsPanel.querySelector('[data-action="export-data"]').addEventListener('click', handleWardrobeData);
+    settingsPanel.querySelector('[data-action="import-data"]').addEventListener('click', handleWardrobeData);
+    settingsPanel.querySelector('.tw-data-import').addEventListener('change', handleWardrobeData);
     apiForm.addEventListener('submit', saveApiSettings);
     sendForm.addEventListener('submit', saveSendSettings);
     sendForm.addEventListener('change', clearSendStatus);
@@ -2659,17 +2693,27 @@ async function exportGarments(ids, includeEmptyGroups = false) {
     for (const item of items) item.image = await loadImageDataUrl(item.image);
     if (!root.isConnected) throw new Error('衣柜已卸载，导出已取消。');
     const data = { format: 'tw-wardrobe', version: 1, groups, items };
+    downloadWardrobeJson(data, `${items.length === 1 ? items[0].name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_') : '衣柜'}-${items.length}件.json`);
+    setLibraryStatus(`已导出 ${items.length} 件服装`);
+}
+
+/**
+ * 下载服装或设置备份共用的 JSON 文件，复用最近下载地址的释放流程。
+ * @param {Object} data 调用方已明确选取字段的备份数据。
+ * @param {string} filename 下载时显示的文件名。
+ * @returns {void} 触发浏览器下载，不读取脚本变量或 API 配置。
+ */
+function downloadWardrobeJson(data, filename) {
     const blob = new window.parent.Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
     // 保留最近一次下载地址供浏览器异步读取，下次导出或卸载时释放，不引入延迟定时器。
     if (exportUrl) window.parent.URL.revokeObjectURL(exportUrl);
     exportUrl = window.parent.URL.createObjectURL(blob);
     const link = hostDocument.createElement('a');
     link.href = exportUrl;
-    link.download = `${items.length === 1 ? items[0].name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_') : '衣柜'}-${items.length}件.json`;
+    link.download = filename;
     link.hidden = true;
     hostDocument.body.append(link);
     try { link.click(); } finally { link.remove(); }
-    setLibraryStatus(`已导出 ${items.length} 件服装`);
 }
 
 /**
@@ -3192,7 +3236,7 @@ function showGarmentDescription() {
 }
 
 /**
- * 使用所选类型的已保存提示词识别图片，替换服装名称和分类后发给 API，结果由用户保存或应用。
+ * 使用所选提示词识别图片；JSON 回复填入名称和描述，并按 category 即时归类，纯文本保留名称和标签。
  * @returns {Promise<void>} 识别请求与编辑框更新完成后结束。
  */
 async function generateGarmentDescription() {
@@ -3215,7 +3259,7 @@ async function generateGarmentDescription() {
             generation_id: request.generationId,
             image,
             // 仅替换一次变量，服装名中的模板标记保留为普通文本，不带入聊天历史或角色提示。
-            user_input: prompt.replace(DESCRIPTION_VARIABLES, (_match, name) => values[name]),
+            user_input: `${prompt.replace(DESCRIPTION_VARIABLES, (_match, name) => values[name])}\n\n输出格式：仅返回包含 name、description、category 三个非空字符串字段的 JSON 对象，不要使用代码块。category 是根据图片判断的衣柜标签名称，优先选择合适的已有标签：${JSON.stringify(Array.from(garmentGroups.values()))}；没有合适标签时给出简短的新标签名称。`,
             ordered_prompts: ['user_input'],
             max_chat_history: 0,
             should_stream: false,
@@ -3223,9 +3267,12 @@ async function generateGarmentDescription() {
             ...(mode === 'custom' ? { custom_api: customApi } : {}),
         });
         if (descriptionRequest !== request) return;
-        if (typeof reply !== 'string' || !reply.trim()) throw new Error('接口未返回服装描述。');
-        panel.querySelector('[name="garment_description"]').value = reply.trim();
-        setGarmentStatus('描述已生成，请保存或应用');
+        const result = parseGarmentDescriptionReply(reply);
+        // 先完整校验回复再更新表单，格式错误时保留原来的名称、描述和存档。
+        if (result.category !== undefined) assignGeneratedGarmentGroup(result.category);
+        if (result.name !== undefined) panel.querySelector('[name="garment_name"]').value = result.name;
+        panel.querySelector('[name="garment_description"]').value = result.description;
+        setGarmentStatus(result.category !== undefined ? '标签已保存，名称与描述请保存或应用' : result.name !== undefined ? '名称与描述已生成，请保存或应用' : '描述已生成，请保存或应用');
     } catch (error) {
         if (root.isConnected && (!request || descriptionRequest === request)) setGarmentStatus(describeApiError(error), true);
     } finally {
@@ -3234,6 +3281,52 @@ async function generateGarmentDescription() {
             setDescriptionBusy(false);
         }
     }
+}
+
+/**
+ * 在模型回复入口解析名称、描述和可选标签，兼容完整 JSON 代码块及旧提示词返回的纯文本。
+ * @param {unknown} reply 模型返回的原始文本。
+ * @returns {{name?: string, description: string, category?: string}} 去除首尾空白的字段；纯文本不提供名称或标签。
+ */
+function parseGarmentDescriptionReply(reply) {
+    if (typeof reply !== 'string' || !reply.trim()) throw new Error('接口未返回服装描述。');
+    const text = reply.trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, '$1').trim();
+    if (!text) throw new Error('接口未返回服装描述。');
+    // 只解析完整 JSON，不截取混有额外说明的片段，避免把不完整的内容当成生成成功。
+    if (!text.startsWith('{') && !text.startsWith('[')) return { description: text };
+    let data;
+    try { data = JSON.parse(text); }
+    catch { throw new Error('AI 返回的 JSON 格式错误，请重新生成。'); }
+    if (!data || Array.isArray(data) || typeof data.name !== 'string' || !data.name.trim() ||
+        typeof data.description !== 'string' || !data.description.trim()) {
+        throw new Error('AI 返回的 JSON 需要包含非空字符串 name 和 description，请检查提示词后重新生成。');
+    }
+    if (data.category !== undefined && (typeof data.category !== 'string' || !data.category.trim())) {
+        throw new Error('AI 返回的 category 需要是非空的标签名称，请检查提示词后重新生成。');
+    }
+    return { name: data.name.trim(), description: data.description.trim(), category: data.category?.trim() };
+}
+
+/**
+ * 复用或创建 AI 判断的标签，并与当前服装归属一起保存，沿用手动标签选择即时生效的行为。
+ * @param {string} name 已在回复入口校验的标签名称，不作为上装、外套等内置分类标识使用。
+ * @returns {void} 保存后同步标签选择器，不提交或重填名称与描述草稿。
+ */
+function assignGeneratedGarmentGroup(name) {
+    const groups = new Map(garmentGroups);
+    let groupId;
+    for (const [id, label] of groups) {
+        if (label === name) { groupId = id; break; }
+    }
+    if (!groupId) {
+        groupId = window.parent.crypto.randomUUID();
+        groups.set(groupId, name);
+    }
+    const item = garments.get(selectedGarmentId);
+    const next = new Map(garments);
+    next.set(item.id, { ...item, groupId });
+    commitGarments(next, item.id, groups, false);
+    panel.querySelector('[name="garment_group"]').value = groupId;
 }
 
 /**
@@ -3326,7 +3419,7 @@ function buildWardrobeContent(item, settings) {
 }
 
 /**
- * 按穿着归属分别构建角色服装内容，固定说明归属后再附加单套、衣柜或图片模板。
+ * 按穿着归属分别构建角色服装内容，附带名称与标签对应关系，供文字及图片模板匹配场景。
  * @param {WardrobeItem[]} items 该角色选择的服装。
  * @param {string} wearer user 或 char。
  * @param {{content_type: string, position: string}} settings 已保存的发送设置。
@@ -3341,11 +3434,15 @@ function buildWearerContent(items, wearer, settings, templates, names, imageTemp
     const outfitNames = [];
     const descriptions = [];
     const outfits = [];
+    const taggedOutfits = [];
     for (const item of items) {
         for (const part of buildWardrobeContent(item, settings)) if (part.type === 'image_url') images.push(part);
         outfitNames.push(item.name);
         descriptions.push(item.description);
         outfits.push(`${outfits.length + 1}. ${item.name}\n${item.description}`);
+        // 标签按图片和服装原顺序编号，直接从表中读取；未分组时不猜测场景。
+        const tag = garmentGroups.get(item.groupId);
+        if (tag) taggedOutfits.push(`${outfits.length}. ${item.name}：${tag}`);
     }
     const values = {
         user: names.user, char: names.char, wearer: names[wearer],
@@ -3355,6 +3452,8 @@ function buildWearerContent(items, wearer, settings, templates, names, imageTemp
     const field = items.length === 1 ? 'single' : 'wardrobe';
     // 归属说明独立于可编辑模板，文字和图片模式均明确边界；共享只由两边清单同时列出表达。
     const texts = [`【${wearer === 'user' ? 'USER' : 'Char'}（${names[wearer]}）的服装】以下服装文字及紧随其后的图片仅供该角色使用。另一角色只能使用其自身服装清单中明确列出的服装，不得将本清单中未分配给对方的服装转给对方，也不得根据性别自动共享。`];
+    // 标签不依赖模板占位符，纯图片模式也能拿到实际场景标签，且不混入另一角色的服装。
+    if (taggedOutfits.length) texts.push(`服装标签（用于匹配场景）：\n${taggedOutfits.join('\n')}`);
     // 一次替换受支持的变量，不再次解释服装描述里原有的双花括号，也不执行模板代码。
     if (settings.content_type !== 'image') texts.push(templates[wearer][field].replace(TEMPLATE_VARIABLES, (_match, name) => values[name]));
     // 图片模式无需预先填写描述，但必须带上图片提示词，避免把图中人物当作角色设定。
@@ -3426,7 +3525,7 @@ async function injectWardrobeContent(event) {
 }
 
 /**
- * 在存档入口加载角色及图片模板，旧存档缺少图片模板时补默认值，并填充编辑器。
+ * 加载角色及图片模板，缺失或仍为原版默认值时使用新模板，自定义内容保留并填入编辑器。
  * @returns {void} 无返回值。
  */
 function loadWardrobeTemplates() {
@@ -3435,7 +3534,7 @@ function loadWardrobeTemplates() {
         const form = settingsPanel.querySelector(`[data-template-owner="${wearer}"]`);
         for (const field of TEMPLATE_FIELDS) {
             const value = saved?.[wearer]?.[field];
-            wardrobeTemplates[wearer][field] = typeof value === 'string' && value.trim() ? value : DEFAULT_TEMPLATES[wearer][field];
+            wardrobeTemplates[wearer][field] = typeof value === 'string' && value.trim() && value !== PREVIOUS_DEFAULT_TEMPLATES[wearer][field] ? value : DEFAULT_TEMPLATES[wearer][field];
             form.elements[field].value = wardrobeTemplates[wearer][field];
         }
     }
@@ -3513,6 +3612,102 @@ function saveDescriptionPrompts(event) {
         status.textContent = `保存失败：${String(error)}`;
         status.dataset.error = 'true';
     }
+}
+
+/**
+ * 处理设置备份的选择文件、导出与导入；只传递明确允许的五类设置，始终排除全部 API 参数。
+ * @param {MouseEvent|Event} event 导入／导出按钮点击或设置文件选择事件。
+ * @returns {Promise<void>} 下载触发或设置保存并刷新表单后完成，失败在当前页提示。
+ */
+async function handleWardrobeData(event) {
+    const input = settingsPanel.querySelector('.tw-data-import');
+    if (event.type === 'click' && event.currentTarget.dataset.action === 'import-data') {
+        input.click();
+        return;
+    }
+    const importing = event.type === 'change';
+    if (importing && !input.files.length) return;
+    const status = settingsPanel.querySelector('.tw-data-status');
+    const buttons = settingsPanel.querySelectorAll('[data-action="import-data"], [data-action="export-data"]');
+    for (const button of buttons) button.disabled = true;
+    status.textContent = importing ? '正在导入…' : '正在导出…';
+    status.dataset.error = 'false';
+    try {
+        if (importing) {
+            const settings = parseWardrobeSettingsData(JSON.parse(await input.files[0].text()));
+            if (!root.isConnected) return;
+            // 与手动切换发送类型保持一致，导入配置不能让当前已应用服装变成不可发送的状态。
+            const selections = readWearerSelections();
+            for (const wearer of WEARERS) {
+                for (const id of selections[wearer]) buildWardrobeContent(garments.get(id), settings.send);
+            }
+            // 所有设置校验成功后一次提交；不从文件展开对象，也不读取或写入 wardrobe_api。
+            insertOrAssignVariables({
+                wardrobe_send: settings.send,
+                wardrobe_templates: settings.templates,
+                wardrobe_description_prompts: settings.description_prompts,
+            }, { type: 'script' });
+            loadSendSettings();
+            loadWardrobeTemplates();
+            loadDescriptionPrompts();
+        } else {
+            const templates = {};
+            for (const owner of TEMPLATE_OWNERS) {
+                templates[owner] = { single: wardrobeTemplates[owner].single, wardrobe: wardrobeTemplates[owner].wardrobe };
+            }
+            // 按字段构造备份，不导出脚本变量或设置对象整体，防止带出地址、模型、密钥及新增 API 字段。
+            downloadWardrobeJson({
+                format: 'tw-wardrobe-settings', version: 1,
+                settings: {
+                    send: { content_type: sendSettings.content_type, position: sendSettings.position },
+                    templates,
+                    description_prompts: { outfit: descriptionPrompts.outfit, item: descriptionPrompts.item },
+                },
+            }, '衣柜设置.json');
+        }
+        status.textContent = importing ? '已导入设置' : '已导出设置';
+    } catch (error) {
+        status.textContent = `${importing ? '导入' : '导出'}失败：${String(error)}`;
+        status.dataset.error = 'true';
+    } finally {
+        if (importing) input.value = '';
+        for (const button of buttons) button.disabled = false;
+    }
+}
+
+/**
+ * 在设置文件入口校验完整格式，并只提取允许恢复的字段；未知字段（包括 API）全部丢弃。
+ * @param {unknown} data 从用户选择的 JSON 文件解析的数据。
+ * @returns {{send: Object, templates: Object, description_prompts: Object}} 可直接保存的设置，不含 API 或服装数据。
+ */
+function parseWardrobeSettingsData(data) {
+    if (data?.format !== 'tw-wardrobe-settings' || data.version !== 1 || !data.settings) {
+        throw new Error('请选择“导出数据”生成的衣柜设置 JSON；服装备份请使用“导入服装”。');
+    }
+    const settings = data.settings;
+    if (!['text', 'image', 'text_image'].includes(settings.send?.content_type) ||
+        !['system_end', 'context_end', 'user_end'].includes(settings.send?.position)) {
+        throw new Error('发送内容设置无效。');
+    }
+    const templates = {};
+    for (const owner of TEMPLATE_OWNERS) {
+        templates[owner] = {};
+        for (const field of TEMPLATE_FIELDS) {
+            const value = settings.templates?.[owner]?.[field];
+            if (typeof value !== 'string' || !value.trim()) throw new Error('模板需要包含完整的 USER、Char 和图片模板。');
+            templates[owner][field] = value.trim();
+        }
+    }
+    const prompts = {};
+    for (const field of Object.keys(DEFAULT_DESCRIPTION_PROMPTS)) {
+        const value = settings.description_prompts?.[field];
+        if (typeof value !== 'string' || !value.trim()) throw new Error('描述生成设置需要包含服装和单品提示词。');
+        prompts[field] = value.trim();
+    }
+    return {
+        send: { content_type: settings.send.content_type, position: settings.send.position },
+        templates, description_prompts: prompts,
+    };
 }
 
 /**
@@ -3954,7 +4149,7 @@ function stopApiRequest() {
 }
 
 /**
- * 切换 API、发送内容、模板与描述生成设置，仅更新设置页，保留服装详情的未保存内容。
+ * 切换 API、发送内容、模板、描述生成及数据设置页，保留服装详情的未保存内容。
  * @param {MouseEvent} event 设置导航中的点击事件。
  * @returns {void} 无返回值。
  */

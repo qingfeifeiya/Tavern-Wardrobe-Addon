@@ -27,18 +27,52 @@ function createForm(fields, owner = '') {
 const forms = new Map(['user', 'char', 'image'].map(owner => [`[data-template-owner="${owner}"]`, createForm(['single', 'wardrobe'], owner)]));
 const descriptionForm = createForm(['outfit', 'item']);
 forms.set('.tw-description-form', descriptionForm);
+const sendForm = createForm(['content_type', 'position']);
+sendForm.elements.content_type.value = 'text';
+sendForm.elements.position.value = 'user_end';
+const dataInput = { files: [], value: '', click() { this.opened = true; } };
+const dataStatus = { textContent: '', dataset: {} };
+const dataButtons = ['import-data', 'export-data'].map(action => ({ dataset: { action }, disabled: false }));
+forms.set('.tw-data-import', dataInput);
+forms.set('.tw-data-status', dataStatus);
+const downloads = [];
+const downloadBlobs = new Map();
 const controls = {
     '[name="description_mode"]': { value: 'outfit' },
+    '[name="garment_name"]': { value: '手工填写的名称' },
+    '[name="garment_category"]': { value: 'coats' },
+    '[name="garment_group"]': { value: '' },
     '[name="garment_description"]': { value: '' },
+    '.tw-garment-status': { textContent: '', dataset: {} },
 };
-const saved = { wardrobe_templates: { user: { single: '旧的 USER 单套', wardrobe: '旧的 USER 衣柜' } } };
+const saved = { wardrobe_templates: {
+    user: { single: '旧的 USER 单套', wardrobe: '{{user}} 的衣柜，共 {{count}} 套：\n{{outfits}}\n请根据剧情选择合适的一套，不要同时穿上所有套装。' },
+    char: {
+        single: '{{char}} 当前穿着：{{name}}\n{{description}}',
+        wardrobe: '{{char}} 的衣柜，共 {{count}} 套：\n{{outfits}}\n请根据剧情选择合适的一套，不要同时穿上所有套装。',
+    },
+    image: {
+        single: '{{wearer}} 的服装参考图：{{name}}。请仅参考图片中的服装、配饰、款式、颜色和穿搭，不采用图中人物的身份、面容、发型、身材、姿势或背景，不据此改变角色原有外貌。不编造看不到的服装细节。',
+        wardrobe: '{{wearer}} 的衣柜包含 {{count}} 套服装，名称与图片按相同顺序对应：{{name}}。请根据剧情选择合适的一套，不要同时穿上所有套装。图片仅提供服装与配饰参考，忽略图中人物的身份、面容、发型、身材、姿势和背景，不改变角色原有外貌，不编造看不到的服装细节。',
+    },
+} };
 const requests = [];
 let imageReads = 0;
 let writesFail = false;
+let modelReply = '  生成的服装描述  ';
+let idSequence = 0;
 const sandbox = {
     window: { parent: {
-        document: {}, matchMedia: () => ({ matches: false }), AbortController, Blob,
-        crypto: { randomUUID: () => 'test-request' },
+        document: {
+            body: { append() {} },
+            createElement: () => ({ click() { downloads.push({ name: this.download, href: this.href }); }, remove() {} }),
+        },
+        URL: {
+            createObjectURL: blob => { const url = `blob:${downloads.length}`; downloadBlobs.set(url, blob); return url; },
+            revokeObjectURL: url => downloadBlobs.delete(url),
+        },
+        matchMedia: () => ({ matches: false }), AbortController, Blob,
+        crypto: { randomUUID: () => `test-${++idSequence}` },
         /** 返回文件原图以验证描述生成前的异步读取；无参数，返回图片响应。 */
         fetch: async () => { imageReads++; return { ok: true, blob: async () => new Blob(['hello']) }; },
         /** 为描述生成模拟浏览器图片读取器。 */
@@ -53,24 +87,28 @@ const sandbox = {
             }
         },
     } },
-    testSettingsPanel: { querySelector: selector => forms.get(selector) },
+    testSettingsPanel: { querySelector: selector => forms.get(selector), querySelectorAll: () => dataButtons },
+    testSendForm: sendForm,
     testPanel: { querySelector: selector => controls[selector] },
     getVariables: () => saved,
     insertOrAssignVariables: data => { if (writesFail) throw new Error('存储失败'); Object.assign(saved, structuredClone(data)); },
     SillyTavern: { getCurrentChatId: () => '' },
-    generateRaw: async config => { requests.push(config); return '  生成的服装描述  '; },
+    generateRaw: async config => { requests.push(config); return modelReply; },
 };
 vm.createContext(sandbox);
 const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
 const hooks = `
 settingsPanel = testSettingsPanel;
+sendForm = testSendForm;
 panel = testPanel;
 root = { isConnected: true };
 setDescriptionBusy = () => {};
-setGarmentStatus = () => {};
+refreshWardrobe = () => {};
+renderGarmentLibrary = () => {};
 globalThis.api = { loadWardrobeTemplates, saveWardrobeTemplate, loadDescriptionPrompts, saveDescriptionPrompts,
-    loadGarments, generateGarmentDescription,
-    state: () => ({ wardrobeTemplates, descriptionPrompts }),
+    loadGarments, generateGarmentDescription, saveSelectedGarment, buildWearerContent,
+    handleWardrobeData, parseWardrobeSettingsData, loadSendSettings,
+    state: () => ({ wardrobeTemplates, descriptionPrompts, sendSettings, garments, garmentGroups }),
 };
 return;
 `;
@@ -78,7 +116,7 @@ vm.runInContext(source.replace('// 等待宿主文档就绪', hooks + '\n// 等�
 const api = sandbox.api;
 
 /**
- * 验证旧模板兼容、两类提示词保存与失败保留，以及实际生成请求使用所选提示词。
+ * 验证提示词保存、两种生成模式的 JSON 字段、自动标签、失败保留及保存后的角色模板继承。
  * @returns {Promise<void>} 全部断言完成后结束。
  */
 async function main() {
@@ -86,6 +124,14 @@ async function main() {
     api.loadDescriptionPrompts();
     assert.equal(descriptionForm.elements.namedItem('item').value, api.state().descriptionPrompts.item, '单品提示词填入实际控件');
     assert.equal(api.state().wardrobeTemplates.user.single, '旧的 USER 单套', '新增设置保留旧角色模板');
+    for (const [owner, fields] of [['user', ['wardrobe']], ['char', ['single', 'wardrobe']], ['image', ['single', 'wardrobe']]]) {
+        for (const field of fields) {
+            assert.ok(api.state().wardrobeTemplates[owner][field].includes('严禁集中罗列'), '原版默认模板自动升级到细节分散描写要求');
+        }
+    }
+    assert.ok(api.state().wardrobeTemplates.char.single.startsWith('{{char}} 当前穿着：'), 'Char 默认模板使用受支持的小写变量');
+    assert.ok(api.state().wardrobeTemplates.user.wardrobe.includes('场景转换则对应切换穿搭'), '文字衣柜模板包含场景切换要求');
+    assert.ok(api.state().wardrobeTemplates.image.wardrobe.includes('场景转换则切换穿搭'), '图片衣柜模板包含场景切换要求');
     assert.ok(api.state().wardrobeTemplates.image.single.includes('服装参考图'), '旧存档补默认图片提示词');
     for (const prompt of Object.values(api.state().descriptionPrompts)) {
         assert.ok(prompt.includes('人物') && prompt.includes('背景') && prompt.includes('仅输出'), '默认提示词限制人物和背景，要求只输出描述');
@@ -134,6 +180,7 @@ async function main() {
         assert.equal(request.max_chat_history, 0, '描述生成不携带聊天历史');
         assert.deepEqual(Array.from(request.ordered_prompts), ['user_input'], '只使用服装识别提示词');
         assert.equal(controls['[name="garment_description"]'].value, '生成的服装描述', '生成结果写入编辑框');
+        assert.equal(controls['[name="garment_name"]'].value, '手工填写的名称', '旧纯文本回复保留名称');
         assert.equal(saved.wardrobe_items[0].description, '', '生成结果不自动覆盖已保存服装');
     }
     saved.wardrobe_items[0].image = 'user/images/tavern_wardrobe/coat.png';
@@ -143,11 +190,162 @@ async function main() {
     assert.equal(requests.at(-1).image, 'data:image/png;base64,aGVsbG8=', '文件图片生成描述前恢复原图内容');
     assert.equal(imageReads, 1, '重复生成描述复用文件读取缓存');
     assert.equal(saved.wardrobe_items[0].image, 'user/images/tavern_wardrobe/coat.png', '描述生成不改回内嵌存储');
+
+    saved.wardrobe_groups = [{ id: 'daily', name: '日常' }];
+    api.loadGarments();
+    const roleTemplates = {
+        user: { single: '{{name}}|{{description}}', wardrobe: '{{outfits}}' },
+        char: { single: '{{name}}|{{description}}', wardrobe: '{{outfits}}' },
+    };
+    const names = { user: '玩家', char: '角色' };
+    for (const mode of ['outfit', 'item']) {
+        controls['[name="description_mode"]'].value = mode;
+        const generated = { name: `  ${mode === 'outfit' ? '黑金礼服' : '金边外套'}  `, description: '  黑色衣身，金色滚边。\n配有腰带。  ', category: mode === 'outfit' ? ' 礼服 ' : ' 日常 ' };
+        // 同时覆盖用户要求的裸 JSON 和模型常见的完整代码块，不把包装文字写进描述。
+        modelReply = mode === 'outfit' ? JSON.stringify(generated) : '```json\n' + JSON.stringify(generated) + '\n```';
+        const savedName = saved.wardrobe_items[0].name;
+        await api.generateGarmentDescription();
+        assert.equal(controls['[name="garment_name"]'].value, generated.name.trim(), 'JSON name 填入名称');
+        assert.equal(controls['[name="garment_description"]'].value, generated.description.trim(), 'JSON description 单独填入描述');
+        assert.equal(saved.wardrobe_items[0].name, savedName, '生成名称仍由用户保存');
+        const groupId = controls['[name="garment_group"]'].value;
+        assert.equal(api.state().garmentGroups.get(groupId), generated.category.trim(), 'AI category 作为标签名称');
+        assert.equal(saved.wardrobe_items[0].groupId, groupId, 'AI 标签立即保存到服装归属');
+        assert.equal(saved.wardrobe_items[0].category, 'coats', 'AI 标签不覆盖内置分类');
+        assert.equal(saved.wardrobe_groups.length, 2, '首次创建标签，之后复用已有标签');
+        if (mode === 'item') assert.equal(groupId, 'daily', '同名标签复用原标识');
+        assert.ok(requests.at(-1).user_input.includes('category') && requests.at(-1).user_input.includes('日常'), '请求包含标签输出要求和现有标签');
+        assert.ok(api.saveSelectedGarment(), '生成结果可通过原有保存入口持久化');
+        const item = saved.wardrobe_items[0];
+        assert.equal(item.name, generated.name.trim());
+        assert.equal(item.description, generated.description.trim());
+        for (const wearer of ['user', 'char']) {
+            for (const items of [[item], [item, { ...item, id: 'second', name: '第二件' }]]) {
+                const content = api.buildWearerContent(items, wearer, { content_type: 'text' }, roleTemplates, names);
+                assert.ok(content[0].text.includes(item.name) && content[0].text.includes(item.description), '两种角色的单套和衣柜模板都继承生成字段');
+                assert.ok(!content[0].text.includes('"description"'), '模板发送字段正文，不发送 JSON 包装');
+            }
+        }
+    }
+
+    const originalName = controls['[name="garment_name"]'].value;
+    const originalDescription = controls['[name="garment_description"]'].value;
+    const originalTag = controls['[name="garment_group"]'].value;
+    const originalSaved = JSON.stringify(saved);
+    for (const invalid of ['{"name":', '{"name":"外套","description":42}', '{"name":" ","description":"正文"}', '{"description":"正文"}', '[]', '{"name":"外套","description":"正文","category":[]}', '{"name":"外套","description":"正文","category":" "}']) {
+        modelReply = invalid;
+        await api.generateGarmentDescription();
+        assert.equal(controls['[name="garment_name"]'].value, originalName, '非法回复不覆盖名称');
+        assert.equal(controls['[name="garment_description"]'].value, originalDescription, '非法回复不覆盖描述');
+        assert.equal(controls['[name="garment_group"]'].value, originalTag, '非法回复不覆盖标签');
+        assert.equal(JSON.stringify(saved), originalSaved, '非法回复不改存档或创建标签');
+        assert.equal(controls['.tw-garment-status'].dataset.error, 'true', '格式错误明确提示');
+    }
+    modelReply = JSON.stringify({ name: '新名称', description: '新描述', category: '新标签' });
+    writesFail = true;
+    await api.generateGarmentDescription();
+    writesFail = false;
+    assert.equal(JSON.stringify(saved), originalSaved, '标签保存失败时不留下空标签或部分归属');
+    assert.equal(controls['[name="garment_name"]'].value, originalName);
+    assert.equal(controls['[name="garment_description"]'].value, originalDescription);
+
+    modelReply = '{"name":"兼容名称","description":"兼容描述"}';
+    await api.generateGarmentDescription();
+    assert.equal(controls['[name="garment_name"]'].value, '兼容名称', '兼容没有 category 的旧 JSON');
+    assert.equal(controls['[name="garment_group"]'].value, originalTag, '旧 JSON 保留标签');
+    modelReply = '  兼容纯文本  ';
+    await api.generateGarmentDescription();
+    assert.equal(controls['[name="garment_name"]'].value, '兼容名称', '纯文本不改名');
+    assert.equal(controls['[name="garment_description"]'].value, '兼容纯文本');
+    assert.equal(controls['[name="garment_group"]'].value, originalTag, '纯文本保留标签');
     saved.wardrobe_description_prompts = { outfit: '', item: 123 };
     api.loadDescriptionPrompts();
     assert.ok(api.state().descriptionPrompts.outfit.includes('人物'), '空白存档回退到约束人物的默认提示词');
     assert.ok(api.state().descriptionPrompts.item.includes('单品'), '非法类型在存档入口回退默认值');
+
+    // 设置备份必须按字段挑选，不能因其他对象附加 API 属性而泄露连接信息。
+    api.loadSendSettings();
+    const secret = 'test-secret-must-never-be-exported';
+    saved.wardrobe_api = { mode: 'custom', apiurl: `https://${secret}.test`, key: secret, model: secret, temperature: 0.7, max_tokens: 4000 };
+    saved.other_private_data = secret;
+    api.state().sendSettings.key = secret;
+    api.state().wardrobeTemplates.user.apiurl = secret;
+    api.state().descriptionPrompts.model = secret;
+    await api.handleWardrobeData({ type: 'click', currentTarget: dataButtons[1] });
+    const settingsJson = await downloadBlobs.get(downloads.at(-1).href).text();
+    const backup = JSON.parse(settingsJson);
+    assert.equal(downloads.at(-1).name, '衣柜设置.json');
+    assert.deepEqual(Object.keys(backup).sort(), ['format', 'settings', 'version']);
+    assert.equal(backup.format, 'tw-wardrobe-settings');
+    assert.deepEqual(Object.keys(backup.settings).sort(), ['description_prompts', 'send', 'templates']);
+    assert.deepEqual(Object.keys(backup.settings.send).sort(), ['content_type', 'position']);
+    assert.deepEqual(Object.keys(backup.settings.description_prompts).sort(), ['item', 'outfit']);
+    assert.deepEqual(Object.keys(backup.settings.templates).sort(), ['char', 'image', 'user']);
+    for (const template of Object.values(backup.settings.templates)) assert.deepEqual(Object.keys(template).sort(), ['single', 'wardrobe']);
+    assert.ok(!settingsJson.includes(secret), '真实下载文件中没有任何 API 字段值或私有脚本变量');
+    assert.equal(dataStatus.dataset.error, 'false');
+    assert.ok(dataButtons.every(button => !button.disabled), '导出后恢复按钮');
+    await api.handleWardrobeData({ type: 'click', currentTarget: dataButtons[0] });
+    assert.equal(dataInput.opened, true, '导入按钮打开独立的设置文件选择器');
+
+    const clothesBefore = JSON.stringify(saved.wardrobe_items);
+    const apiBefore = JSON.stringify(saved.wardrobe_api);
+    backup.settings.send.position = 'context_end';
+    backup.settings.templates.user.single = '恢复的 USER 模板 {{name}}';
+    backup.settings.description_prompts.outfit = '恢复的服装提示词';
+    // 即使外部文件夹带 API 字段，导入也只能写入三个允许的脚本变量。
+    backup.wardrobe_api = { key: 'malicious-key' };
+    backup.settings.api = { key: 'malicious-key' };
+    backup.settings.send.model = 'malicious-model';
+    backup.settings.templates.user.key = 'malicious-key';
+    dataInput.files = [{ text: async () => JSON.stringify(backup) }];
+    dataInput.value = 'selected';
+    await api.handleWardrobeData({ type: 'change', currentTarget: dataInput });
+    assert.equal(JSON.stringify(saved.wardrobe_api), apiBefore, '导入不覆盖 API 密钥、地址、模型或其他连接参数');
+    assert.equal(JSON.stringify(saved.wardrobe_items), clothesBefore, '设置导入不改变服装或原图');
+    assert.equal(saved.wardrobe_send.position, 'context_end');
+    assert.equal(saved.wardrobe_templates.user.single, '恢复的 USER 模板 {{name}}');
+    assert.equal(forms.get('[data-template-owner="user"]').elements.single.value, '恢复的 USER 模板 {{name}}', '导入后刷新模板表单');
+    assert.equal(sendForm.elements.position.value, 'context_end', '导入后刷新发送选项');
+    assert.equal(descriptionForm.elements.outfit.value, '恢复的服装提示词', '导入后刷新描述生成提示词');
+    assert.equal(saved.wardrobe_send.model, undefined, '丢弃发送设置中夹带的 API 字段');
+    assert.equal(saved.wardrobe_templates.user.key, undefined, '丢弃模板中夹带的 API 字段');
+    assert.equal(dataInput.value, '', '导入后允许再次选择同一文件');
+    assert.equal(dataStatus.dataset.error, 'false');
+
+    const beforeInvalidImport = JSON.stringify(saved);
+    const incomplete = structuredClone(backup);
+    delete incomplete.settings.templates.char.wardrobe;
+    const invalidSend = structuredClone(backup);
+    invalidSend.settings.send.content_type = 'invalid';
+    const invalidPrompts = structuredClone(backup);
+    invalidPrompts.settings.description_prompts.item = '';
+    for (const invalid of ['{bad', JSON.stringify({ format: 'tw-wardrobe', version: 1, items: [], groups: [] }), JSON.stringify(incomplete), JSON.stringify(invalidSend), JSON.stringify(invalidPrompts)]) {
+        dataInput.files = [{ text: async () => invalid }];
+        await api.handleWardrobeData({ type: 'change', currentTarget: dataInput });
+        assert.equal(JSON.stringify(saved), beforeInvalidImport, '文件校验失败时不提交部分设置');
+        assert.equal(dataStatus.dataset.error, 'true');
+        assert.ok(dataButtons.every(button => !button.disabled), '导入失败后恢复操作按钮');
+    }
+    dataInput.files = [{ text: async () => JSON.stringify(backup) }];
+    writesFail = true;
+    await api.handleWardrobeData({ type: 'change', currentTarget: dataInput });
+    writesFail = false;
+    assert.equal(JSON.stringify(saved), beforeInvalidImport, '保存失败不覆盖设置或 API');
+    assert.match(dataStatus.textContent, /存储失败/);
+    assert.equal(api.state().sendSettings.position, 'context_end', '保存失败保留当前发送缓存');
+
+    saved.wardrobe_items[0].image = '';
+    saved.wardrobe_selections = { user: ['coat'], char: [] };
+    api.loadGarments();
+    const beforeContentFailure = JSON.stringify(saved);
+    backup.settings.send.content_type = 'image';
+    await api.handleWardrobeData({ type: 'change', currentTarget: dataInput });
+    assert.equal(JSON.stringify(saved), beforeContentFailure, '导入新发送类型时仍验证已应用服装是否具备图片');
+    assert.match(dataStatus.textContent, /图片/);
     console.log('通过图片模板保存、旧模板兼容、描述提示词持久化、生成类型切换、实际请求及失败保留检查。');
+    console.log('通过 JSON 名称与描述解析、AI 标签创建及复用、保存失败回滚、纯文本兼容及 USER/Char 模板继承检查。');
+    console.log('通过设置导出字段白名单、API 零导出与零覆盖、设置恢复、错误文件及保存失败检查。');
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });

@@ -176,6 +176,23 @@ const charOnly = { chat: [{ role: 'user', content: '继续剧情' }] };
 await injectWardrobeContent(charOnly);
 assert.equal(typeof charOnly.chat[0].content, 'string');
 assert.ok(charOnly.chat[0].content.includes('Char（女主）') && !charOnly.chat[0].content.includes('【USER'), '只分配给 Char 时不生成 USER 服装清单');
+
+// 场景匹配需要真实标签；文字和图片模式都必须保留服装顺序与标签对应关系。
+scriptVariables.wardrobe_items = [{ ...item, groupId: 'day' }, { ...second, groupId: 'evening' }];
+scriptVariables.wardrobe_groups = [{ id: 'day', name: '日常' }, { id: 'evening', name: '晚宴' }];
+loadGarments();
+for (const wearer of ['user', 'char']) {
+    for (const content_type of ['text', 'image', 'text_image']) {
+        const parts = buildWearerContent(scriptVariables.wardrobe_items, wearer, { content_type }, templates, names, imageTemplates);
+        const text = parts[0].text;
+        assert.ok(text.includes(`1. ${item.name}：日常`), '第一套标签对应第一张图片');
+        assert.ok(text.includes(`2. ${second.name}：晚宴`), '第二套标签对应第二张图片');
+        const untagged = buildWearerContent([item], wearer, { content_type }, templates, names, imageTemplates);
+        assert.ok(!untagged[0].text.includes('服装标签（用于匹配场景）'), '未分组的服装不补造场景标签');
+        const single = buildWearerContent([scriptVariables.wardrobe_items[0]], wearer, { content_type }, templates, names, imageTemplates);
+        assert.ok(single[0].text.includes('日常') && !single[0].text.includes('晚宴'), '角色清单只携带实际选择的标签');
+    }
+}
 console.log(`通过 ${checked} 种发送位置组合、USER/Char 模板切换、多模态保留及旧选择兼容检查。`);
 }
 
