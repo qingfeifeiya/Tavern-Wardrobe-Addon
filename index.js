@@ -98,6 +98,7 @@ const DEFAULT_TEMPLATES = {
  * @property {string} description 发送给 AI 的服装描述。
  * @property {string} image 酒馆图片路径或尚未迁移的数据地址，无图片时为空字符串。
  * @property {string} groupId 标签标识，空字符串表示未分组。
+ * @property {boolean} favorite 是否已收藏，旧存档默认未收藏。
  */
 
 /**
@@ -181,6 +182,7 @@ const PANEL_HTML = `
                     <nav class="tw-group-tabs" aria-label="服装标签"></nav>
                     <button type="button" data-action="add-group" aria-label="新增标签" title="新增标签">${icon('plus')}</button>
                     <button type="button" data-action="toggle-multi" aria-pressed="false" aria-controls="tw-bulk-actions">多选</button>
+                    <button type="button" data-action="describe-all">一键识图</button>
                 </div>
                 <div class="tw-library-content">
                     <p class="tw-library-status" role="status" aria-live="polite"></p>
@@ -1094,12 +1096,12 @@ const PANEL_CSS = `
     min-width: 0;
 }
 
-#tw-panel .tw-item-check {
+#tw-panel .tw-item-check,
+#tw-panel .tw-favorite {
     position: absolute;
     z-index: 2;
     top: 8px;
     right: 8px;
-    display: grid;
     place-items: center;
     width: 32px;
     height: 32px;
@@ -1107,23 +1109,37 @@ const PANEL_CSS = `
     border-radius: 9px;
     background: rgba(13, 14, 20, 0.78);
     backdrop-filter: blur(6px);
-    opacity: 0;
-    pointer-events: none;
     cursor: pointer;
-    transition: opacity 0.15s ease, transform 0.15s ease;
 }
 
-#tw-panel .tw-library[data-multi-select="true"] .tw-item-check,
-#tw-panel .tw-garment-entry:focus-within .tw-item-check {
-    opacity: 1;
-    pointer-events: auto;
+/* 普通模式彻底隐藏勾选框，鼠标悬停和键盘聚焦都不会意外进入多选。 */
+#tw-panel .tw-item-check {
+    display: none;
 }
 
-@media (hover: hover) {
-    #tw-panel .tw-garment-entry:hover .tw-item-check {
-        opacity: 1;
-        pointer-events: auto;
-    }
+#tw-panel .tw-library[data-multi-select="true"] .tw-item-check {
+    display: grid;
+}
+
+#tw-panel .tw-favorite {
+    display: grid;
+    border: 0;
+    border-radius: 50%;
+    padding: 0;
+    color: var(--tw-ink-secondary);
+}
+
+#tw-panel .tw-favorite:hover,
+#tw-panel .tw-favorite[aria-pressed="true"] {
+    color: #f472b6;
+}
+
+#tw-panel .tw-favorite[aria-pressed="true"] .tw-icon {
+    fill: currentColor;
+}
+
+#tw-panel .tw-library[data-multi-select="true"] .tw-favorite {
+    display: none;
 }
 
 #tw-panel :is(.tw-item-check, .tw-bulk-actions) input {
@@ -1255,7 +1271,7 @@ const PANEL_CSS = `
     padding: 4px;
 }
 
-#tw-panel .tw-library[data-layout="list"] .tw-item-check {
+#tw-panel .tw-library[data-layout="list"] :is(.tw-item-check, .tw-favorite) {
     top: 50%;
     right: 10px;
     transform: translateY(-50%);
@@ -2355,6 +2371,7 @@ function initializeWardrobe() {
     panel.querySelector('.tw-group-tabs').addEventListener('click', deleteGarmentGroup);
     panel.querySelector('[data-action="add-group"]').addEventListener('click', addGarmentGroup);
     panel.querySelector('[data-action="toggle-multi"]').addEventListener('click', toggleMultiSelect);
+    panel.querySelector('[data-action="describe-all"]').addEventListener('click', generateMissingGarmentDescriptions);
     for (const button of panel.querySelectorAll('[data-action="export-all"], [data-action="export-one"], [data-action="delete-one"], [data-action="remove-image"]')) {
         button.addEventListener('click', handleGarmentAction);
     }
@@ -2450,8 +2467,9 @@ function parseWardrobeData(data, allowStoredImages = true) {
         if (!item || typeof item.id !== 'string' || !item.id || typeof item.name !== 'string' || !item.name.trim() ||
             typeof item.description !== 'string' || typeof item.image !== 'string' ||
             items.has(item.id) || (item.image && !DATA_IMAGE_PATTERN.test(item.image) && !STORED_IMAGE_PATTERN.test(item.image)) ||
-            (item.groupId !== undefined && typeof item.groupId !== 'string')) {
-            throw new Error('服装数据缺少名称、描述、有效图片，或标识重复。');
+            (item.groupId !== undefined && typeof item.groupId !== 'string') ||
+            (item.favorite !== undefined && typeof item.favorite !== 'boolean')) {
+            throw new Error('服装数据缺少名称、描述、有效图片，或标识重复、收藏状态无效。');
         }
         if (!allowStoredImages && item.image && STORED_IMAGE_PATTERN.test(item.image)) {
             throw new Error(`“${item.name}”的图片只有本机路径，无法跨设备导入。请在原酒馆中重新导出包含图片的 JSON。`);
@@ -2460,6 +2478,7 @@ function parseWardrobeData(data, allowStoredImages = true) {
             id: item.id, name: item.name, description: item.description, image: item.image,
             category: GARMENT_CATEGORIES.has(item.category) ? item.category : 'other',
             groupId: groups.has(item.groupId) ? item.groupId : '',
+            favorite: item.favorite ?? false,
         });
     }
     return { items, groups };
@@ -2514,7 +2533,7 @@ async function importGarments(event) {
                 const image = await uploadGarmentImage(await readGarmentImage(file));
                 uploaded.push(image);
                 selectedId = window.parent.crypto.randomUUID();
-                next.set(selectedId, { id: selectedId, name: file.name.replace(/\.[^.]+$/, '') || '未命名服装', category: 'other', description: '', image, groupId: importGroup });
+                next.set(selectedId, { id: selectedId, name: file.name.replace(/\.[^.]+$/, '') || '未命名服装', category: 'other', description: '', image, groupId: importGroup, favorite: false });
             }
         }
         if (!root.isConnected) throw new Error('衣柜已卸载，导入已取消。');
@@ -3105,7 +3124,7 @@ function refreshWardrobe() {
 }
 
 /**
- * 单次遍历生成分类、数量及卡片，按 ID 读取应用状态和标签，分别显示穿着状态与右侧标签。
+ * 单次遍历生成分类数量、收藏数量及卡片；收藏筛选沿用当前标签，右上角按钮与多选框由模式互斥显示。
  * @returns {void} 无返回值。
  */
 function renderGarmentLibrary() {
@@ -3116,8 +3135,10 @@ function renderGarmentLibrary() {
     visibleGarmentIds = new Set();
     for (const item of garments.values()) {
         if (currentGroup !== '*' && currentGroup !== item.groupId) continue;
+        counts.set('all', (counts.get('all') ?? 0) + 1);
         counts.set(item.category, (counts.get(item.category) ?? 0) + 1);
-        if (currentCategory !== 'all' && currentCategory !== item.category) continue;
+        if (item.favorite) counts.set('favorites', (counts.get('favorites') ?? 0) + 1);
+        if (currentCategory === 'favorites' ? !item.favorite : currentCategory !== 'all' && currentCategory !== item.category) continue;
         visibleGarmentIds.add(item.id);
         const entry = hostDocument.createElement('div');
         entry.className = 'tw-garment-entry';
@@ -3128,6 +3149,14 @@ function renderGarmentLibrary() {
         checkbox.dataset.checkGarment = item.id;
         checkbox.setAttribute('aria-label', `选择${item.name}`);
         label.append(checkbox);
+        const favorite = hostDocument.createElement('button');
+        favorite.type = 'button';
+        favorite.className = 'tw-favorite';
+        favorite.dataset.favorite = item.id;
+        favorite.setAttribute('aria-pressed', String(item.favorite));
+        favorite.setAttribute('aria-label', `${item.favorite ? '取消收藏' : '收藏'}${item.name}`);
+        favorite.title = item.favorite ? '取消收藏' : '收藏';
+        favorite.innerHTML = icon('heart');
         const card = hostDocument.createElement('button');
         card.type = 'button';
         card.className = 'tw-garment-card';
@@ -3160,7 +3189,7 @@ function renderGarmentLibrary() {
         tags.append(tag);
         metadata.append(tags);
         card.append(metadata);
-        entry.append(label, card);
+        entry.append(label, favorite, card);
         cards.append(entry);
     }
     // 删除、移动或切换筛选后移除不可见的勾选，避免用户误操作当前看不到的服装。
@@ -3172,7 +3201,7 @@ function renderGarmentLibrary() {
     panel.querySelector('.tw-library').dataset.hasItems = String(visible !== 0);
     panel.querySelector('.tw-empty').hidden = visible !== 0;
     for (const button of panel.querySelectorAll('[data-category]')) {
-        button.querySelector('.tw-count').textContent = String(button.dataset.category === 'all' ? Array.from(counts.values()).reduce((sum, count) => sum + count, 0) : counts.get(button.dataset.category) ?? 0);
+        button.querySelector('.tw-count').textContent = String(counts.get(button.dataset.category) ?? 0);
     }
     panel.querySelector('#tw-empty-title').textContent = currentCategory === 'all' ? '这里还没有服装' : currentCategory === 'favorites' ? '还没有收藏的服装' : currentCategory === 'recent' ? '还没有最近使用的服装' : `暂无${CATEGORY_LABELS.get(currentCategory)}`;
     renderBulkState();
@@ -3207,11 +3236,16 @@ function renderGarmentDetails() {
 }
 
 /**
- * 普通模式打开详情，多选模式点击卡片即勾选，手机不跳转到详情页。
+ * 收藏按钮独立切换状态；普通模式打开详情，多选模式点击卡片即勾选，手机不跳转到详情页。
  * @param {MouseEvent} event 服装列表点击事件。
  * @returns {void} 无返回值。
  */
 function selectGarment(event) {
+    const favorite = event.target.closest('[data-favorite]');
+    if (favorite) {
+        toggleGarmentFavorite(favorite.dataset.favorite);
+        return;
+    }
     const card = event.target.closest('[data-garment]');
     if (!card) return;
     if (multiSelectMode) {
@@ -3223,6 +3257,22 @@ function selectGarment(event) {
     refreshWardrobe();
     setGarmentStatus('');
     if (compactViewport.matches) setMobileDetails(true);
+}
+
+/**
+ * 即时保存指定服装的收藏状态，只刷新列表，保留预览选择、详情草稿和进行中的识图请求。
+ * @param {string} id 收藏按钮对应的服装标识。
+ * @returns {void} 保存失败时显示错误并保留原收藏状态。
+ */
+function toggleGarmentFavorite(id) {
+    const item = garments.get(id);
+    const next = new Map(garments);
+    next.set(id, { ...item, favorite: !item.favorite });
+    try {
+        commitGarments(next, selectedGarmentId, garmentGroups, false);
+    } catch (error) {
+        setLibraryStatus(String(error), true);
+    }
 }
 
 /**
@@ -3240,6 +3290,7 @@ function showGarmentDescription() {
  * @returns {Promise<void>} 识别请求与编辑框更新完成后结束。
  */
 async function generateGarmentDescription() {
+    if (descriptionRequest) return;
     const item = garments.get(selectedGarmentId);
     let request;
     try {
@@ -3249,27 +3300,10 @@ async function generateGarmentDescription() {
         descriptionRequest = request;
         setDescriptionBusy(true);
         setGarmentStatus('正在生成服装描述…');
-        const { mode, ...customApi } = config;
-        const values = { name: item.name, category: CATEGORY_LABELS.get(item.category) };
-        const prompt = descriptionPrompts[panel.querySelector('[name="description_mode"]').value];
-        const image = await loadImageDataUrl(item.image);
-        // 读取原图期间也允许取消识别，取消后不再启动新的生成请求。
-        if (descriptionRequest !== request) return;
-        const reply = await generateRaw({
-            generation_id: request.generationId,
-            image,
-            // 仅替换一次变量，服装名中的模板标记保留为普通文本，不带入聊天历史或角色提示。
-            user_input: `${prompt.replace(DESCRIPTION_VARIABLES, (_match, name) => values[name])}\n\n输出格式：仅返回包含 name、description、category 三个非空字符串字段的 JSON 对象，不要使用代码块。category 是根据图片判断的衣柜标签名称，优先选择合适的已有标签：${JSON.stringify(Array.from(garmentGroups.values()))}；没有合适标签时给出简短的新标签名称。`,
-            ordered_prompts: ['user_input'],
-            max_chat_history: 0,
-            should_stream: false,
-            should_silence: true,
-            ...(mode === 'custom' ? { custom_api: customApi } : {}),
-        });
-        if (descriptionRequest !== request) return;
-        const result = parseGarmentDescriptionReply(reply);
+        const result = await requestGarmentDescription(item, panel.querySelector('[name="description_mode"]').value, config, request);
+        if (!result) return;
         // 先完整校验回复再更新表单，格式错误时保留原来的名称、描述和存档。
-        if (result.category !== undefined) assignGeneratedGarmentGroup(result.category);
+        if (result.category !== undefined) commitGeneratedGarment(garments.get(item.id), result, false);
         if (result.name !== undefined) panel.querySelector('[name="garment_name"]').value = result.name;
         panel.querySelector('[name="garment_description"]').value = result.description;
         setGarmentStatus(result.category !== undefined ? '标签已保存，名称与描述请保存或应用' : result.name !== undefined ? '名称与描述已生成，请保存或应用' : '描述已生成，请保存或应用');
@@ -3281,6 +3315,89 @@ async function generateGarmentDescription() {
             setDescriptionBusy(false);
         }
     }
+}
+
+/**
+ * 确认后逐张识别整个衣柜中没有描述的图片，每张成功即保存，失败时停止并保留已完成的结果。
+ * @returns {Promise<void>} 批次完成、取消或首个失败后结束；不提交当前编辑框的草稿。
+ */
+async function generateMissingGarmentDescriptions() {
+    if (descriptionRequest) return;
+    const ids = [];
+    for (const item of garments.values()) {
+        // 编辑框里的文字尚未保存也视为已有描述，避免批量识别覆盖用户草稿。
+        if (item.image && !item.description.trim() &&
+            (item.id !== selectedGarmentId || !panel.querySelector('[name="garment_description"]').value.trim())) ids.push(item.id);
+    }
+    if (!ids.length) {
+        setLibraryStatus('没有需要识图的图片，已有描述的图片会自动跳过');
+        return;
+    }
+    if (!window.parent.confirm(`衣柜中有 ${ids.length} 张图片尚未识别，是否一键识图？\n仅识别没有描述的图片，已有描述的图片将跳过。识别结果会自动保存。`)) return;
+    let request;
+    let completed = 0;
+    try {
+        const config = savedApiSettings;
+        if (config.mode === 'custom' && (!config.apiurl || !config.model)) throw new Error('请先在 API 页保存完整的接口地址与模型。');
+        request = { generationId: '', bulk: true, completed: 0 };
+        descriptionRequest = request;
+        setDescriptionBusy(true);
+        // 顺序请求沿用单张识图流程，避免同时请求大量图片；每张独立保存，失败后可只重试剩余图片。
+        for (const id of ids) {
+            const item = garments.get(id);
+            if (!item?.image || item.description.trim()) continue;
+            request.generationId = `wardrobe-description-${window.parent.crypto.randomUUID()}`;
+            const result = await requestGarmentDescription(item, 'outfit', config, request);
+            if (!result) return;
+            // 等待接口时列表仍可删除或更新记录；只补全原图未变且仍无描述的服装。
+            const latest = garments.get(id);
+            if (!latest?.image || latest.image !== item.image || latest.description.trim()) continue;
+            commitGeneratedGarment(latest, result, true);
+            request.completed = ++completed;
+            if (id === selectedGarmentId) {
+                panel.querySelector('[name="garment_name"]').value = result.name ?? latest.name;
+                panel.querySelector('[name="garment_description"]').value = result.description;
+            }
+        }
+        setLibraryStatus(`识图完成，已识别并保存 ${completed} 张图片`);
+    } catch (error) {
+        if (root.isConnected && (!request || descriptionRequest === request)) {
+            setLibraryStatus(`识图已停止，已保存 ${completed} 张图片。${describeApiError(error)}`, true);
+        }
+    } finally {
+        if (request && descriptionRequest === request) {
+            descriptionRequest = null;
+            setDescriptionBusy(false);
+        }
+    }
+}
+
+/**
+ * 单张与批量识图共用图片读取、提示词和回复校验，取消后不再发请求或接收结果。
+ * @param {WardrobeItem} item 待识别的服装。
+ * @param {string} promptMode 已选择的服装或单品提示词类型。
+ * @param {Object} config 本次识图使用的已保存 API 配置。
+ * @param {Object} request 当前可取消的识图请求。
+ * @returns {Promise<Object|null>} 解析后的名称、描述与可选标签；已取消时返回空值。
+ */
+async function requestGarmentDescription(item, promptMode, config, request) {
+    const { mode, ...customApi } = config;
+    const values = { name: item.name, category: CATEGORY_LABELS.get(item.category) };
+    const image = await loadImageDataUrl(item.image);
+    // 读取原图期间也允许取消识别，取消后不再启动新的生成请求。
+    if (descriptionRequest !== request) return null;
+    const reply = await generateRaw({
+        generation_id: request.generationId,
+        image,
+        // 仅替换一次变量，服装名中的模板标记保留为普通文本，不带入聊天历史或角色提示。
+        user_input: `${descriptionPrompts[promptMode].replace(DESCRIPTION_VARIABLES, (_match, name) => values[name])}\n\n输出格式：仅返回包含 name、description、category 三个非空字符串字段的 JSON 对象，不要使用代码块。category 是根据图片判断的衣柜标签名称，优先选择合适的已有标签：${JSON.stringify(Array.from(garmentGroups.values()))}；没有合适标签时给出简短的新标签名称。`,
+        ordered_prompts: ['user_input'],
+        max_chat_history: 0,
+        should_stream: false,
+        should_silence: true,
+        ...(mode === 'custom' ? { custom_api: customApi } : {}),
+    });
+    return descriptionRequest === request ? parseGarmentDescriptionReply(reply) : null;
 }
 
 /**
@@ -3308,25 +3425,29 @@ function parseGarmentDescriptionReply(reply) {
 }
 
 /**
- * 复用或创建 AI 判断的标签，并与当前服装归属一起保存，沿用手动标签选择即时生效的行为。
- * @param {string} name 已在回复入口校验的标签名称，不作为上装、外套等内置分类标识使用。
- * @returns {void} 保存后同步标签选择器，不提交或重填名称与描述草稿。
+ * 复用或创建 AI 判断的标签；批量识图将名称、描述与标签同次保存，避免存储失败留下部分更新。
+ * @param {WardrobeItem} item 识图对应的服装。
+ * @param {Object} result 已在回复入口校验的名称、描述及可选标签。
+ * @param {boolean} saveDescription 是否同时保存名称与描述；单张识图仍保留原有草稿流程。
+ * @returns {void} 保存成功后同步当前服装的标签选择器，不提交其他编辑草稿。
  */
-function assignGeneratedGarmentGroup(name) {
+function commitGeneratedGarment(item, result, saveDescription) {
     const groups = new Map(garmentGroups);
-    let groupId;
-    for (const [id, label] of groups) {
-        if (label === name) { groupId = id; break; }
+    let groupId = item.groupId;
+    if (result.category !== undefined) {
+        groupId = undefined;
+        for (const [id, label] of groups) {
+            if (label === result.category) { groupId = id; break; }
+        }
+        if (!groupId) {
+            groupId = window.parent.crypto.randomUUID();
+            groups.set(groupId, result.category);
+        }
     }
-    if (!groupId) {
-        groupId = window.parent.crypto.randomUUID();
-        groups.set(groupId, name);
-    }
-    const item = garments.get(selectedGarmentId);
     const next = new Map(garments);
-    next.set(item.id, { ...item, groupId });
-    commitGarments(next, item.id, groups, false);
-    panel.querySelector('[name="garment_group"]').value = groupId;
+    next.set(item.id, { ...item, groupId, ...(saveDescription ? { name: result.name ?? item.name, description: result.description } : {}) });
+    commitGarments(next, selectedGarmentId, groups, false);
+    if (item.id === selectedGarmentId) panel.querySelector('[name="garment_group"]').value = groupId;
 }
 
 /**
@@ -3344,10 +3465,13 @@ function setDescriptionBusy(busy) {
     button.textContent = busy ? '正在生成…' : 'AI 生成描述';
     for (const control of panel.querySelectorAll('[data-action="export-one"], [data-action="delete-one"]')) control.disabled = !item || busy;
     panel.querySelector('[data-action="remove-image"]').disabled = !item?.image || busy;
+    const bulkButton = panel.querySelector('[data-action="describe-all"]');
+    bulkButton.disabled = busy;
+    bulkButton.textContent = descriptionRequest?.bulk ? '识图中…' : '一键识图';
 }
 
 /**
- * 切换服装、关闭衣柜或卸载时停止本次识别，防止结果写到另一个服装的编辑框。
+ * 切换服装、关闭衣柜或卸载时停止单张或批量识别，保留批量任务已经保存的结果。
  * @returns {void} 无返回值。
  */
 function stopDescriptionRequest() {
@@ -3356,6 +3480,7 @@ function stopDescriptionRequest() {
     descriptionRequest = null;
     stopGenerationById(request.generationId);
     setDescriptionBusy(false);
+    if (request.bulk) setLibraryStatus(`识图已取消，已保存 ${request.completed} 张图片`);
 }
 
 /**

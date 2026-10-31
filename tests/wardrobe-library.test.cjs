@@ -118,12 +118,13 @@ const hooks = `
 panel = testPanel;
 root = { isConnected: true };
 refreshWardrobe = () => { recordDetailRefresh(); renderWearerState(); };
+const actualRenderGarmentLibrary = renderGarmentLibrary;
 renderGarmentLibrary = () => {};
 const actualRenderBulkState = renderBulkState;
 renderBulkState = () => {};
 showGarmentDescription = () => {};
 globalThis.api = { parseWardrobeData, loadGarments, exportGarments, importGarments, applyGarments,
-    assignGarmentGroup, setLibraryStatus,
+    assignGarmentGroup, setLibraryStatus, toggleGarmentFavorite, selectGarment,
     migrateLegacyImages, loadImageDataUrl, handleGarmentAction, injectWardrobeContent, deleteGarmentImages,
     deleteGarments, addGarmentGroup, deleteGarmentGroup, moveCheckedGarments, selectAllGarments,
     readWearerSelections, selectWearer, renderWearerState, handleBulkAction, toggleMultiSelect, checkGarment, renderBulkState: actualRenderBulkState,
@@ -132,6 +133,8 @@ globalThis.api = { parseWardrobeData, loadGarments, exportGarments, importGarmen
     showIds: ids => { visibleGarmentIds = new Set(ids); },
     selectItem: id => { selectedGarmentId = id; },
     sendType: type => { sendSettings.content_type = type; },
+    selectCategory: id => { currentCategory = id; },
+    renderLibrary: () => { renderGarmentGroups = () => {}; actualRenderGarmentLibrary(); },
 };
 return;
 `;
@@ -455,8 +458,88 @@ async function main() {
     assert.equal(unchanged.chat[0].content, '继续', '读图失败时不注入部分清单');
     failImageReads = false;
     assert.equal(await api.loadImageDataUrl(finalImage), blue.image, '失败读取不会污染缓存，恢复后可重试');
+    await checkFavorites();
     console.log('通过多选与操作栏显隐、衣柜导出回读、标签存储、可见范围全选、批量归类与角色应用、删除及失败回滚检查。');
     console.log('通过图片落盘、逐张迁移及重试、读取缓存、多模态注入、自包含备份、原图格式及删除和导入回滚检查。');
+}
+
+/**
+ * 为真实卡片渲染提供最小节点，保存子节点和属性以验证收藏 SVG、筛选结果和分类计数。
+ * @returns {Object} 支持追加子节点、设置属性和替换内容的节点替身。
+ */
+function createLibraryNode() {
+    return {
+        dataset: {}, attributes: {}, children: [],
+        append(...children) { this.children.push(...children); },
+        replaceChildren(...children) { this.children = children; },
+        setAttribute(name, value) { this.attributes[name] = value; },
+    };
+}
+
+/**
+ * 验证收藏保存、旧数据兼容、失败保留、导入导出，以及真实列表渲染的爱心、数量和标签筛选。
+ * @returns {Promise<void>} 收藏交互和数据断言全部通过后结束。
+ */
+async function checkFavorites() {
+    scriptVariables.wardrobe_items = [blue, red];
+    scriptVariables.wardrobe_groups = [{ id: 'slim', name: '修身' }];
+    scriptVariables.wardrobe_selections = { user: [], char: [] };
+    api.selectGroup('*');
+    api.loadGarments();
+    assert.equal(api.state().garments.get('blue').favorite, false, '旧存档默认未收藏');
+    assert.throws(() => api.parseWardrobeData({ groups: [], items: [{ ...blue, favorite: 'false' }] }), /收藏状态无效/);
+    control('[name="garment_description"]').value = '未保存的描述草稿';
+    const beforeRefresh = detailRefreshes;
+    api.selectGarment({ target: { closest: selector => selector === '[data-favorite]' ? { dataset: { favorite: 'blue' } } : null } });
+    assert.equal(scriptVariables.wardrobe_items[0].favorite, true, '点击爱心立即保存收藏');
+    assert.equal(api.state().selectedGarmentId, 'blue', '收藏不会切换详情');
+    assert.equal(api.state().multiSelectMode, false, '收藏不会开启多选');
+    assert.equal(detailRefreshes, beforeRefresh, '收藏不重填详情');
+    assert.equal(control('[name="garment_description"]').value, '未保存的描述草稿');
+    api.loadGarments();
+    assert.equal(api.state().garments.get('blue').favorite, true, '重新加载后仍保持收藏');
+    writesFail = true;
+    api.toggleGarmentFavorite('blue');
+    writesFail = false;
+    assert.equal(api.state().garments.get('blue').favorite, true, '保存失败不改变内存收藏');
+    assert.equal(scriptVariables.wardrobe_items[0].favorite, true, '保存失败保留存档');
+    await api.exportGarments(['blue']);
+    const backup = JSON.parse(await blobs.get(downloads.at(-1).href).text());
+    assert.equal(api.parseWardrobeData(backup).items.get('blue').favorite, true, '导出回读保留收藏状态');
+
+    // 使用真实渲染函数检查列表和计数，避免只测存档却漏掉左侧收藏仍为空的问题。
+    document.createElement = createLibraryNode;
+    document.createDocumentFragment = createLibraryNode;
+    const categories = ['all', 'coats', 'favorites', 'recent'].map(category => ({
+        dataset: { category }, querySelector: () => control(`count-${category}`),
+    }));
+    sandbox.testPanel.querySelectorAll = selector => selector === '[data-category]' ? categories : [];
+    const list = control('.tw-items');
+    list.replaceChildren = fragment => { list.cards = fragment.children; };
+    api.selectCategory('all');
+    api.renderLibrary();
+    assert.equal(list.cards.length, 2);
+    assert.equal(control('count-all').textContent, '2', '总数不会重复累计收藏数');
+    assert.equal(control('count-favorites').textContent, '1', '左侧显示收藏数量');
+    const heart = list.cards[0].children[1];
+    assert.equal(heart.className, 'tw-favorite');
+    assert.equal(heart.attributes['aria-pressed'], 'true');
+    assert.match(heart.innerHTML, /<svg/);
+    assert.match(heart.attributes['aria-label'], /取消收藏/);
+    api.selectCategory('favorites');
+    api.renderLibrary();
+    assert.equal(list.cards.length, 1, '收藏筛选只显示已收藏服装');
+    assert.equal(list.cards[0].children[1].dataset.favorite, 'blue');
+    api.selectGroup('');
+    api.renderLibrary();
+    assert.equal(list.cards.length, 0, '收藏筛选同时遵循当前标签');
+    assert.equal(control('count-favorites').textContent, '0');
+    api.selectGroup('*');
+    api.toggleGarmentFavorite('blue');
+    api.renderLibrary();
+    assert.equal(list.cards.length, 0, '取消收藏后从收藏列表移除');
+    assert.equal(control('.tw-empty').hidden, false);
+    console.log('通过收藏切换、存档兼容、失败保留、导出回读、爱心渲染、收藏筛选与数量检查。');
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });

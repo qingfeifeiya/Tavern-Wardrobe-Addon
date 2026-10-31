@@ -44,6 +44,10 @@ const controls = {
     '[name="garment_group"]': { value: '' },
     '[name="garment_description"]': { value: '' },
     '.tw-garment-status': { textContent: '', dataset: {} },
+    '.tw-library-status': { textContent: '', dataset: {} },
+    '[data-action="describe"]': { disabled: false, textContent: '' },
+    '[data-action="describe-all"]': { disabled: false, textContent: '一键识图' },
+    '[data-action="remove-image"]': { disabled: false },
 };
 const saved = { wardrobe_templates: {
     user: { single: '旧的 USER 单套', wardrobe: '{{user}} 的衣柜，共 {{count}} 套：\n{{outfits}}\n请根据剧情选择合适的一套，不要同时穿上所有套装。' },
@@ -61,6 +65,10 @@ let imageReads = 0;
 let writesFail = false;
 let modelReply = '  生成的服装描述  ';
 let idSequence = 0;
+let confirmation = true;
+const confirmations = [];
+const stoppedGenerations = [];
+let generationEffect;
 const sandbox = {
     window: { parent: {
         document: {
@@ -73,6 +81,8 @@ const sandbox = {
         },
         matchMedia: () => ({ matches: false }), AbortController, Blob,
         crypto: { randomUUID: () => `test-${++idSequence}` },
+        confirm: message => { confirmations.push(message); return confirmation; },
+        setTimeout: () => 0, clearTimeout() {},
         /** 返回文件原图以验证描述生成前的异步读取；无参数，返回图片响应。 */
         fetch: async () => { imageReads++; return { ok: true, blob: async () => new Blob(['hello']) }; },
         /** 为描述生成模拟浏览器图片读取器。 */
@@ -89,11 +99,12 @@ const sandbox = {
     } },
     testSettingsPanel: { querySelector: selector => forms.get(selector), querySelectorAll: () => dataButtons },
     testSendForm: sendForm,
-    testPanel: { querySelector: selector => controls[selector] },
+    testPanel: { querySelector: selector => controls[selector], querySelectorAll: () => [] },
     getVariables: () => saved,
     insertOrAssignVariables: data => { if (writesFail) throw new Error('存储失败'); Object.assign(saved, structuredClone(data)); },
     SillyTavern: { getCurrentChatId: () => '' },
-    generateRaw: async config => { requests.push(config); return modelReply; },
+    generateRaw: async config => { requests.push(config); return generationEffect ? generationEffect(config) : modelReply; },
+    stopGenerationById: id => stoppedGenerations.push(id),
 };
 vm.createContext(sandbox);
 const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
@@ -102,11 +113,10 @@ settingsPanel = testSettingsPanel;
 sendForm = testSendForm;
 panel = testPanel;
 root = { isConnected: true };
-setDescriptionBusy = () => {};
 refreshWardrobe = () => {};
 renderGarmentLibrary = () => {};
 globalThis.api = { loadWardrobeTemplates, saveWardrobeTemplate, loadDescriptionPrompts, saveDescriptionPrompts,
-    loadGarments, generateGarmentDescription, saveSelectedGarment, buildWearerContent,
+    loadGarments, generateGarmentDescription, generateMissingGarmentDescriptions, stopDescriptionRequest, saveSelectedGarment, buildWearerContent,
     handleWardrobeData, parseWardrobeSettingsData, loadSendSettings,
     state: () => ({ wardrobeTemplates, descriptionPrompts, sendSettings, garments, garmentGroups }),
 };
@@ -346,6 +356,92 @@ async function main() {
     console.log('通过图片模板保存、旧模板兼容、描述提示词持久化、生成类型切换、实际请求及失败保留检查。');
     console.log('通过 JSON 名称与描述解析、AI 标签创建及复用、保存失败回滚、纯文本兼容及 USER/Char 模板继承检查。');
     console.log('通过设置导出字段白名单、API 零导出与零覆盖、设置恢复、错误文件及保存失败检查。');
+    await checkBulkDescriptions();
+}
+
+/**
+ * 验证一键识图的确认、空白判断、自动保存及失败和取消后保留数据，继续复用当前模拟宿主。
+ * @returns {Promise<void>} 所有批量识图断言通过后结束。
+ */
+async function checkBulkDescriptions() {
+    const image = 'data:image/png;base64,aGVsbG8=';
+    saved.wardrobe_selections = { user: [], char: [] };
+    saved.wardrobe_groups = [{ id: 'daily', name: '日常' }];
+    saved.wardrobe_items = [
+        { id: 'draft', name: '草稿', category: 'tops', description: '', image },
+        { id: 'done', name: '已识别', category: 'tops', description: ' 已有描述 ', image },
+        { id: 'empty', name: '未识别', category: 'tops', description: '', image },
+        { id: 'spaces', name: '空白描述', category: 'coats', description: ' \n\t ', image },
+        { id: 'no-image', name: '无图片', category: 'tops', description: '', image: '' },
+    ];
+    controls['[name="garment_description"]'].value = '还未保存的描述';
+    api.loadGarments();
+    const original = JSON.stringify(saved.wardrobe_items);
+    const start = requests.length;
+    confirmation = false;
+    await api.generateMissingGarmentDescriptions();
+    assert.match(confirmations.at(-1), /2 张图片尚未识别/);
+    assert.match(confirmations.at(-1), /仅识别没有描述的图片/);
+    assert.equal(requests.length, start, '取消确认后不发送请求');
+    assert.equal(JSON.stringify(saved.wardrobe_items), original, '取消后不改存档');
+
+    confirmation = true;
+    modelReply = JSON.stringify({ name: '识别名称', description: '识别描述', category: '日常' });
+    controls['[name="description_mode"]'].value = 'item';
+    await api.generateMissingGarmentDescriptions();
+    assert.equal(requests.length - start, 2, '只识别空描述和纯空白描述，不受分类或多选影响');
+    for (const item of saved.wardrobe_items) {
+        if (item.id === 'empty' || item.id === 'spaces') {
+            assert.equal(item.name, '识别名称');
+            assert.equal(item.description, '识别描述', '批量描述自动持久化');
+            assert.equal(item.groupId, 'daily', '复用同名标签');
+        }
+    }
+    assert.equal(saved.wardrobe_items[1].description, ' 已有描述 ', '已有描述完整保留');
+    assert.equal(controls['[name="garment_description"]'].value, '还未保存的描述', '保留当前描述草稿');
+    assert.ok(requests.at(-1).user_input.startsWith(api.state().descriptionPrompts.outfit), '一键识图使用服装提示词');
+    const promptCount = confirmations.length;
+    await api.generateMissingGarmentDescriptions();
+    assert.equal(confirmations.length, promptCount, '没有待识别图片时直接提示，不再确认');
+    assert.match(controls['.tw-library-status'].textContent, /没有需要识图/);
+
+    controls['[name="garment_description"]'].value = '';
+    saved.wardrobe_items = saved.wardrobe_items.slice(2, 4).map(item => ({ ...item, description: '' }));
+    api.loadGarments();
+    let calls = 0;
+    generationEffect = () => ++calls === 1 ? modelReply : '{"name":';
+    await api.generateMissingGarmentDescriptions();
+    assert.equal(saved.wardrobe_items[0].description, '识别描述', '后续失败保留已保存的结果');
+    assert.equal(saved.wardrobe_items[1].description, '', '非法回复不写入描述');
+    assert.match(controls['.tw-library-status'].textContent, /已保存 1 张图片/);
+    assert.equal(controls['.tw-library-status'].dataset.error, 'true');
+
+    generationEffect = undefined;
+    writesFail = true;
+    const beforeFailure = JSON.stringify(saved);
+    await api.generateMissingGarmentDescriptions();
+    writesFail = false;
+    assert.equal(JSON.stringify(saved), beforeFailure, '存储失败不留下部分名称、描述或标签');
+    assert.match(controls['.tw-library-status'].textContent, /存储失败/);
+
+    let resolveGeneration;
+    generationEffect = () => new Promise(resolve => { resolveGeneration = resolve; });
+    const pending = api.generateMissingGarmentDescriptions();
+    while (!resolveGeneration) await Promise.resolve();
+    assert.equal(controls['[data-action="describe-all"]'].disabled, true, '执行期间禁用批量入口');
+    const beforeDuplicate = requests.length;
+    await api.generateMissingGarmentDescriptions();
+    await api.generateGarmentDescription();
+    assert.equal(requests.length, beforeDuplicate, '执行期间不重复启动单张或批量请求');
+    api.stopDescriptionRequest();
+    resolveGeneration(modelReply);
+    await pending;
+    generationEffect = undefined;
+    assert.equal(JSON.stringify(saved), beforeFailure, '取消后忽略迟到回复');
+    assert.ok(stoppedGenerations.at(-1).startsWith('wardrobe-description-'), '取消时停止实际生成');
+    assert.equal(controls['[data-action="describe-all"]'].disabled, false);
+    assert.equal(controls['[data-action="describe-all"]'].textContent, '一键识图');
+    console.log('通过一键识图的数量确认、跳过已有描述及草稿、自动保存、重复点击、失败保留和取消检查。');
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });
