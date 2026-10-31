@@ -33,9 +33,26 @@ const controls = {
 };
 const saved = { wardrobe_templates: { user: { single: '旧的 USER 单套', wardrobe: '旧的 USER 衣柜' } } };
 const requests = [];
+let imageReads = 0;
 let writesFail = false;
 const sandbox = {
-    window: { parent: { document: {}, matchMedia: () => ({ matches: false }), crypto: { randomUUID: () => 'test-request' } } },
+    window: { parent: {
+        document: {}, matchMedia: () => ({ matches: false }), AbortController, Blob,
+        crypto: { randomUUID: () => 'test-request' },
+        /** 返回文件原图以验证描述生成前的异步读取；无参数，返回图片响应。 */
+        fetch: async () => { imageReads++; return { ok: true, blob: async () => new Blob(['hello']) }; },
+        /** 为描述生成模拟浏览器图片读取器。 */
+        FileReader: class {
+            /** 读取图片字节并触发成功事件；参数为图片 Blob，无返回值。 */
+            readAsDataURL(blob) {
+                blob.arrayBuffer().then(bytes => {
+                    this.result = `data:${blob.type};base64,${Buffer.from(bytes).toString('base64')}`;
+                    this.onload();
+                    this.onloadend();
+                });
+            }
+        },
+    } },
     testSettingsPanel: { querySelector: selector => forms.get(selector) },
     testPanel: { querySelector: selector => controls[selector] },
     getVariables: () => saved,
@@ -119,6 +136,13 @@ async function main() {
         assert.equal(controls['[name="garment_description"]'].value, '生成的服装描述', '生成结果写入编辑框');
         assert.equal(saved.wardrobe_items[0].description, '', '生成结果不自动覆盖已保存服装');
     }
+    saved.wardrobe_items[0].image = 'user/images/tavern_wardrobe/coat.png';
+    api.loadGarments();
+    await api.generateGarmentDescription();
+    await api.generateGarmentDescription();
+    assert.equal(requests.at(-1).image, 'data:image/png;base64,aGVsbG8=', '文件图片生成描述前恢复原图内容');
+    assert.equal(imageReads, 1, '重复生成描述复用文件读取缓存');
+    assert.equal(saved.wardrobe_items[0].image, 'user/images/tavern_wardrobe/coat.png', '描述生成不改回内嵌存储');
     saved.wardrobe_description_prompts = { outfit: '', item: 123 };
     api.loadDescriptionPrompts();
     assert.ok(api.state().descriptionPrompts.outfit.includes('人物'), '空白存档回退到约束人物的默认提示词');

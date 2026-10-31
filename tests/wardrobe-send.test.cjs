@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
 const marker = '// 等待宿主文档就绪';
 assert.ok(source.includes(marker), '应能定位宿主启动边界');
-const sandbox = { window: { parent: { document: {}, matchMedia: () => ({ matches: false }) } } };
+const sandbox = { window: { parent: { document: {}, matchMedia: () => ({ matches: false }), AbortController } } };
 vm.runInNewContext(source.replace(marker, 'globalThis.testApi = { buildWardrobeContent, buildWearerContent, insertWardrobeContent, loadGarments, readWearerSelections, injectWardrobeContent }; return;\n' + marker), sandbox);
 const { buildWardrobeContent, buildWearerContent, insertWardrobeContent, loadGarments, readWearerSelections, injectWardrobeContent } = sandbox.testApi;
 const item = { id: 'blue', name: '蓝色外套', category: 'coats', description: '深蓝色，银色刺绣', image: 'data:image/png;base64,aGVsbG8=' };
@@ -156,20 +156,27 @@ scriptVariables.wardrobe_selections = { user: [], char: [] };
 chatId = 'other-chat';
 assert.equal(readWearerSelections().char.size, 0, '取消全部选择后不得回退到旧版单套状态');
 
-// 验证完整注入入口的两份角色内容，防止清单分开保存但发送时混在一起。
+/**
+ * 等待实际异步注入入口，验证两份角色清单与单角色发送，避免混合穿着归属。
+ * @returns {Promise<void>} 两次注入和角色归属断言完成后结束。
+ */
+async function checkInjection() {
 sandbox.SillyTavern.name1 = '男主';
 sandbox.SillyTavern.name2 = '女主';
 sandbox.toastr = { error(message) { assert.fail(message); } };
 scriptVariables.wardrobe_selections = { user: [item.id], char: [second.id] };
 const request = { chat: [{ role: 'user', content: '继续剧情' }] };
-injectWardrobeContent(request);
+await injectWardrobeContent(request);
 const roleBlocks = request.chat[0].content.filter(part => part.type === 'text' && part.text.startsWith('【'));
 assert.equal(roleBlocks.length, 2, '两个角色分别生成服装清单');
 assert.ok(roleBlocks[0].text.includes('USER（男主）') && roleBlocks[0].text.includes(item.name) && !roleBlocks[0].text.includes(second.name), 'USER 清单不能混入只分配给 Char 的服装');
 assert.ok(roleBlocks[1].text.includes('Char（女主）') && roleBlocks[1].text.includes(second.name) && !roleBlocks[1].text.includes(item.name), 'Char 清单不能混入只分配给 USER 的服装');
 scriptVariables.wardrobe_selections.user = [];
 const charOnly = { chat: [{ role: 'user', content: '继续剧情' }] };
-injectWardrobeContent(charOnly);
+await injectWardrobeContent(charOnly);
 assert.equal(typeof charOnly.chat[0].content, 'string');
 assert.ok(charOnly.chat[0].content.includes('Char（女主）') && !charOnly.chat[0].content.includes('【USER'), '只分配给 Char 时不生成 USER 服装清单');
 console.log(`通过 ${checked} 种发送位置组合、USER/Char 模板切换、多模态保留及旧选择兼容检查。`);
+}
+
+checkInjection().catch(error => { console.error(error); process.exitCode = 1; });
