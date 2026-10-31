@@ -63,7 +63,7 @@ assert.equal(multipart[0].tool_call_id, 'original-tool', '工具字段应保留'
 assert.throws(() => buildWardrobeContent({ ...item, description: '' }, { content_type: 'text' }), /描述/, '缺少描述时不能假装发送成功');
 assert.throws(() => buildWardrobeContent({ ...item, image: '' }, { content_type: 'image' }), /图片/, '缺少图片时不能把地址文字充当图片');
 
-// USER 和 Char 各自按实际套数选择模板；图片模式不额外附加文字描述。
+// USER 和 Char 各自按实际套数选择模板；图片模式附带图片提示词，不套用角色文字描述模板。
 const templates = {
     user: { single: 'USER单套|{{user}}|{{name}}|{{description}}', wardrobe: 'USER衣柜|{{wearer}}|{{count}}|{{outfits}}' },
     char: { single: 'Char单套|{{char}}|{{name}}|{{description}}', wardrobe: 'Char衣柜|{{wearer}}|{{count}}|{{outfits}}' },
@@ -77,10 +77,16 @@ for (const wearer of ['user', 'char']) {
             const textParts = parts.filter(part => part.type === 'text');
             const images = parts.filter(part => part.type === 'image_url');
             assert.equal(images.length, content_type === 'text' ? 0 : items.length, '每套图片均应保留');
-            assert.equal(textParts.length, items.length && content_type !== 'image' ? 1 : 0, '没有选择或只发图片时不生成模板文字');
+            assert.equal(textParts.length, items.length ? 1 : 0, '有服装时附带对应的文字模板或图片提示词');
             if (textParts.length) {
                 const text = textParts[0].text;
                 assert.ok(text.includes(names[wearer]), '模板应使用对应角色名称');
+                if (content_type === 'image') {
+                    assert.ok(!text.includes(item.description), '默认图片提示词不强制附带已保存的文字描述');
+                    assert.ok(!text.includes('USER单套|') && !text.includes('Char单套|'), '图片模式不套用角色文字模板');
+                    assert.ok(text.includes('服装') && (text.includes('忽略') || text.includes('不采用')), '图片模式应附带服饰参考约束');
+                    continue;
+                }
                 assert.ok(text.startsWith(`${wearer === 'user' ? 'USER' : 'Char'}${items.length === 1 ? '单套' : '衣柜'}|`), '模板应按角色和套数独立选择');
                 assert.ok(text.includes(item.description), '模板应包含第一套服装');
                 if (items.length > 1) assert.ok(text.includes(second.description) && text.includes('|2|'), '衣柜模板应包含全部服装与数量');
@@ -102,6 +108,26 @@ for (const position of ['system_end', 'context_end', 'user_end']) {
 }
 const literal = buildWearerContent([{ ...item, description: '{{char}} $&' }], 'user', { content_type: 'text' }, templates, names);
 assert.ok(literal[0].text.includes('{{char}} $&'), '服装描述中的占位符和替换符不得被二次解释');
+
+// 单套和衣柜的图片提示词独立生效，保留每张原图，并兼容尚未生成描述的图片。
+const imageTemplates = { single: '单套图片|{{wearer}}|{{name}}', wardrobe: '衣柜图片|{{wearer}}|{{count}}|{{outfits}}' };
+for (const wearer of ['user', 'char']) {
+    for (const items of [[item], [item, second]]) {
+        for (const content_type of ['text', 'image', 'text_image']) {
+            const parts = buildWearerContent(items, wearer, { content_type }, templates, names, imageTemplates);
+            const text = parts[0].text;
+            const imagePrefix = items.length === 1 ? '单套图片|' : '衣柜图片|';
+            assert.equal(text.includes(imagePrefix), content_type !== 'text', '图片提示词只用于含图片的发送方式');
+            if (content_type !== 'text') {
+                assert.ok(text.includes(`${imagePrefix}${names[wearer]}|`), '图片提示词替换对应角色名称');
+                const urls = parts.filter(part => part.type === 'image_url').map(part => part.image_url.url);
+                assert.deepEqual(Array.from(urls), items.map(item => item.image), '原图顺序与服装顺序一致');
+            }
+        }
+    }
+}
+const imageWithoutDescription = buildWearerContent([{ ...item, description: '' }], 'char', { content_type: 'image' }, templates, names, imageTemplates);
+assert.equal(imageWithoutDescription.length, 2, '未生成描述的图片也可以附带图片提示词发送');
 
 // 入口兼容旧版 Char 单套状态，新版明确的空集合不会重新激活旧状态。
 const chatVariables = { wardrobe_active_id: item.id };
