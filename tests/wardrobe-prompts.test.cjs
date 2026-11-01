@@ -48,6 +48,7 @@ const controls = {
     '[data-action="describe"]': { disabled: false, textContent: '' },
     '[data-action="describe-all"]': { disabled: false, textContent: '一键识图' },
     '[data-action="remove-image"]': { disabled: false },
+    '[data-action="replace-image"]': { disabled: false, textContent: '' },
 };
 const saved = { wardrobe_templates: {
     user: { single: '旧的 USER 单套', wardrobe: '{{user}} 的衣柜，共 {{count}} 套：\n{{outfits}}\n请根据剧情选择合适的一套，不要同时穿上所有套装。' },
@@ -118,6 +119,7 @@ renderGarmentLibrary = () => {};
 globalThis.api = { loadWardrobeTemplates, saveWardrobeTemplate, loadDescriptionPrompts, saveDescriptionPrompts,
     loadGarments, generateGarmentDescription, generateMissingGarmentDescriptions, stopDescriptionRequest, saveSelectedGarment, buildWearerContent,
     handleWardrobeData, parseWardrobeSettingsData, loadSendSettings,
+    filterMissing: ids => { currentCategory = 'missing-description'; visibleGarmentIds = new Set(ids); },
     state: () => ({ wardrobeTemplates, descriptionPrompts, sendSettings, garments, garmentGroups }),
 };
 return;
@@ -441,6 +443,21 @@ async function checkBulkDescriptions() {
     assert.ok(stoppedGenerations.at(-1).startsWith('wardrobe-description-'), '取消时停止实际生成');
     assert.equal(controls['[data-action="describe-all"]'].disabled, false);
     assert.equal(controls['[data-action="describe-all"]'].textContent, '一键识图');
+    saved.wardrobe_items = [
+        { id: 'visible', name: '当前标签', category: 'tops', description: '', image },
+        { id: 'hidden', name: '其他标签', category: 'tops', description: '', image },
+        { id: 'no-picture', name: '缺图片', category: 'tops', description: '', image: '' },
+    ];
+    api.loadGarments();
+    api.filterMissing(['visible', 'no-picture']);
+    controls['[name="garment_description"]'].value = '';
+    const beforeFiltered = requests.length;
+    await api.generateMissingGarmentDescriptions();
+    assert.equal(requests.length - beforeFiltered, 1, '缺描述筛选仅识别当前可见且有图片的记录');
+    assert.match(confirmations.at(-1), /当前筛选中有 1 张/);
+    assert.equal(saved.wardrobe_items[0].description, '识别描述');
+    assert.equal(saved.wardrobe_items[1].description, '', '不识别其他标签或搜索隐藏的记录');
+    assert.equal(saved.wardrobe_items[2].description, '', '无图记录留待补图');
     console.log('通过一键识图的数量确认、跳过已有描述及草稿、自动保存、重复点击、失败保留和取消检查。');
 }
 
