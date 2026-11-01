@@ -2523,6 +2523,77 @@ function parseWardrobeData(data, allowStoredImages = true) {
 }
 
 /**
+ * 在文件入口识别本衣柜与 Outfit Manager 备份，转换后复用现有合并、上传和回滚流程。
+ * @param {unknown} data JSON 文件解析结果，支持 User、单角色、全部角色及完整备份。
+ * @returns {{items: Map<string, WardrobeItem>, groups: Map<string, string>}} 已校验的服装与标签。
+ */
+function parseWardrobeFile(data) {
+    if (data?.format === 'tw-wardrobe' && data.version === 1) return parseWardrobeData(data, false);
+    if (!data || typeof data !== 'object' || data.format !== undefined ||
+        (data.type !== undefined && !['user', 'char', 'chars_all'].includes(data.type)) ||
+        (data.type !== 'chars_all' && !Array.isArray(data.outfits))) {
+        throw new Error('请选择本衣柜或 Outfit Manager 导出的服装 JSON 文件。');
+    }
+    const partitions = data.type === 'chars_all' ? [] : [data];
+    if (data.chars !== undefined) {
+        if (!data.chars || typeof data.chars !== 'object' || Array.isArray(data.chars)) throw new Error('Outfit Manager 角色数据格式错误。');
+        partitions.push(...Object.values(data.chars));
+    } else if (data.type === 'chars_all') throw new Error('Outfit Manager 文件缺少角色数据。');
+    if (data._assets !== undefined && (!data._assets || typeof data._assets !== 'object' || Array.isArray(data._assets))) {
+        throw new Error('Outfit Manager 图片资源格式错误。');
+    }
+    const items = [];
+    const groups = new Map();
+    const categoryIds = new Map(CATEGORIES.slice(1).map(([id, label]) => [label, id]));
+    const imagePrefix = '/api/plugins/outfit-manager/images/';
+    for (const [partitionIndex, partition] of partitions.entries()) {
+        if (!partition || !Array.isArray(partition.outfits) ||
+            (partition.accessories !== undefined && !Array.isArray(partition.accessories))) {
+            throw new Error('Outfit Manager 穿搭或单品列表格式错误。');
+        }
+        for (const [kind, records] of [['outfits', partition.outfits], ['accessories', partition.accessories ?? []]]) {
+            for (const item of records) {
+                if (!item || typeof item !== 'object' ||
+                    (item.category !== undefined && typeof item.category !== 'string') ||
+                    (item.subCategory !== undefined && typeof item.subCategory !== 'string') ||
+                    (item.sceneTag !== undefined && typeof item.sceneTag !== 'string') ||
+                    (item.imageData != null && typeof item.imageData !== 'string')) {
+                    throw new Error('Outfit Manager 服装分类、场景或图片格式错误。');
+                }
+                // 对方分类表示风格而非衣物类型；整套统一归入套装，场景优先作为现有标签。
+                const category = item.category?.trim() ?? '';
+                const subCategory = item.subCategory?.trim() ?? '';
+                const label = item.sceneTag?.trim() || [category, subCategory].filter(Boolean).join(' / ');
+                let groupId = '';
+                if (label) {
+                    if (!groups.has(label)) groups.set(label, `om-group-${groups.size}`);
+                    groupId = groups.get(label);
+                }
+                let image = item.imageData ?? '';
+                if (image && !image.startsWith('data:')) {
+                    // 服务端导出通过 _assets 携带原图，不读取另一台酒馆的路径，避免导入缺图记录。
+                    const assetName = image.startsWith(imagePrefix) ? image.slice(imagePrefix.length) : '';
+                    if (!assetName || !Object.hasOwn(data._assets ?? {}, assetName)) {
+                        throw new Error(`“${item.name}”的备份缺少原图，请在 Outfit Manager 中重新导出包含图片的 JSON。`);
+                    }
+                    image = data._assets[assetName];
+                    if (typeof image !== 'string' || !image) throw new Error(`“${item.name}”的图片资源无效。`);
+                }
+                // 角色分区和穿搭／单品可使用相同 ID，增加来源前缀避免误判；最终导入仍生成新 ID。
+                items.push({
+                    id: typeof item.id === 'string' && item.id ? `${partitionIndex}:${kind}:${item.id}` : item.id,
+                    name: item.name, description: item.description ?? '', image, groupId,
+                    category: kind === 'outfits' ? 'outfits' : (categoryIds.get(category) ?? 'accessories'),
+                    favorite: item.favorite,
+                });
+            }
+        }
+    }
+    // 通用字段只在现有入口校验；不迁移对方的应用状态、设置或预设副本，保留当前衣柜行为。
+    return parseWardrobeData({ items, groups: Array.from(groups, ([name, id]) => ({ id, name })) }, false);
+}
+
+/**
  * 打开系统图片选择器，文件校验在真正读取文件时完成。
  * @returns {void} 无返回值。
  */
@@ -2531,7 +2602,7 @@ function openImageImport() {
 }
 
 /**
- * 将图片或导出的衣柜文件批量合并，全部读取成功后一次保存，避免部分失败覆盖已有服装。
+ * 将图片、本衣柜或 Outfit Manager 导出文件批量合并，全部读取成功后一次保存，避免部分失败覆盖已有服装。
  * @param {Event} event 图片选择器变化事件。
  * @returns {Promise<void>} 图片读取和保存结束后完成。
  */
@@ -2547,9 +2618,7 @@ async function importGarments(event) {
         let selectedId;
         for (const file of input.files) {
             if (/\.json$/i.test(file.name) || file.type === 'application/json') {
-                const exported = JSON.parse(await file.text());
-                if (exported?.format !== 'tw-wardrobe' || exported.version !== 1) throw new Error('请选择本衣柜导出的 JSON 文件。');
-                const data = parseWardrobeData(exported, false);
+                const data = parseWardrobeFile(JSON.parse(await file.text()));
                 const groupIds = new Map();
                 // 用名称合并已有标签，服装重建标识，导入备份不会覆盖当前衣柜的同名服装。
                 for (const [oldId, name] of data.groups) {

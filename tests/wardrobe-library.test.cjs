@@ -123,7 +123,7 @@ renderGarmentLibrary = () => {};
 const actualRenderBulkState = renderBulkState;
 renderBulkState = () => {};
 showGarmentDescription = () => {};
-globalThis.api = { parseWardrobeData, loadGarments, exportGarments, importGarments, applyGarments,
+globalThis.api = { parseWardrobeData, parseWardrobeFile, loadGarments, exportGarments, importGarments, applyGarments,
     assignGarmentGroup, setLibraryStatus, toggleGarmentFavorite, selectGarment,
     migrateLegacyImages, loadImageDataUrl, handleGarmentAction, injectWardrobeContent, deleteGarmentImages,
     deleteGarments, addGarmentGroup, deleteGarmentGroup, moveCheckedGarments, selectAllGarments,
@@ -459,10 +459,91 @@ async function main() {
     assert.equal(unchanged.chat[0].content, '继续', '读图失败时不注入部分清单');
     failImageReads = false;
     assert.equal(await api.loadImageDataUrl(finalImage), blue.image, '失败读取不会污染缓存，恢复后可重试');
+    await checkOutfitManager();
     await checkFavorites();
     await checkLibraryBrowsing();
     console.log('通过多选与操作栏显隐、衣柜导出回读、标签存储、可见范围全选、批量归类与角色应用、删除及失败回滚检查。');
     console.log('通过图片落盘、逐张迁移及重试、读取缓存、多模态注入、自包含备份、原图格式及删除和导入回滚检查。');
+}
+
+/**
+ * 验证外部备份的字段转换、图片资源、分区合并及真正导入的失败回滚，防止兼容逻辑影响原衣柜。
+ * @returns {Promise<void>} 外部备份解析、上传、保存与导出回读断言完成后结束。
+ */
+async function checkOutfitManager() {
+    const outfit = { id: 'same', name: '汉服', description: '原始描述', category: '古风', subCategory: '冬装', sceneTag: '外出', imageData: blue.image, favorite: true, kits: [], activeKitId: null };
+    const accessory = { id: 'same', name: '绣鞋', description: '', category: '鞋子', imageData: null };
+    const backup = { type: 'user', outfits: [outfit, { ...outfit, id: 'text', name: '纯文字', imageData: null, sceneTag: '' }], accessories: [accessory], activeIds: ['same'], api: { key: '不得导入' } };
+    const parsed = api.parseWardrobeFile(backup);
+    const records = Array.from(parsed.items.values());
+    assert.equal(records.length, 3);
+    assert.equal(records[0].image, blue.image);
+    assert.equal(records[0].description, outfit.description, '描述保持原文，不把对方配置或套装关系混入正文');
+    assert.equal(records[0].category, 'outfits', '风格分类不误当作衣物类型');
+    assert.equal(records[0].favorite, true);
+    assert.equal(records[0].lastUsedAt, 0, '不把创建时间或对方应用状态当作最近使用');
+    assert.equal(parsed.groups.get(records[0].groupId), '外出');
+    assert.equal(parsed.groups.get(records[1].groupId), '古风 / 冬装', '无场景时保留原分类和子分类为标签');
+    assert.equal(records[1].image, '', '纯文字记录不丢失');
+    assert.equal(records[2].category, 'shoes', '单品匹配本衣柜分类');
+    assert.equal(api.parseWardrobeFile({ ...backup, type: 'char', charName: '角色' }).items.size, 3);
+    const chars = { A: { outfits: [outfit] }, B: { outfits: [outfit] }, __shared__: { outfits: [outfit] } };
+    assert.equal(api.parseWardrobeFile({ type: 'chars_all', chars }).items.size, 3, '不同角色及通用衣柜的相同 ID 均保留');
+    assert.equal(api.parseWardrobeFile({ ...backup, type: undefined, chars, presets: [{ outfits: [outfit] }] }).items.size, 6, '完整备份合并 User 和角色，不重复导入预设副本');
+    const imagePath = '/api/plugins/outfit-manager/images/example.jpg';
+    const packaged = { type: 'user', outfits: [{ ...outfit, imageData: imagePath }], _assets: { 'example.jpg': blue.image } };
+    assert.equal(api.parseWardrobeFile(packaged).items.values().next().value.image, blue.image, '服务端图片从导出资源恢复');
+    assert.throws(() => api.parseWardrobeFile({ ...packaged, _assets: {} }), /缺少原图/);
+    assert.throws(() => api.parseWardrobeFile({ ...packaged, _assets: { 'example.jpg': null } }), /图片资源无效/);
+    for (const changes of [{ imageData: 3 }, { imageData: 'https://example.com/a.jpg' }, { imageData: 'data:image/png;base64,??' }, { favorite: 'true' }, { sceneTag: [] }, { id: '' }, { description: 3 }]) {
+        assert.throws(() => api.parseWardrobeFile({ type: 'user', outfits: [{ ...outfit, ...changes }] }), /格式错误|原图|有效图片/);
+    }
+    assert.throws(() => api.parseWardrobeFile({ type: 'user', outfits: [outfit, outfit] }), /标识重复/);
+    for (const invalid of [{}, { format: 'tw-wardrobe', version: 2, outfits: [] }, { type: 'chars_all' }, { type: 'chars_all', chars: { broken: null } }, { type: 'user', outfits: [], accessories: {} }]) {
+        assert.throws(() => api.parseWardrobeFile(invalid), /JSON|角色数据|列表格式/);
+    }
+
+    scriptVariables.wardrobe_items = [blue];
+    scriptVariables.wardrobe_groups = [{ id: 'outside', name: '外出' }];
+    scriptVariables.wardrobe_selections = { user: ['blue'], char: [] };
+    scriptVariables.api = { key: '原有配置' };
+    api.loadGarments();
+    const oldSelections = JSON.stringify(scriptVariables.wardrobe_selections);
+    const input = { files: [{ name: 'Outfit Manager.json', type: 'application/json', text: async () => JSON.stringify(backup) }], value: 'selected' };
+    await api.importGarments({ currentTarget: input });
+    assert.equal(input.value, '');
+    assert.equal(api.state().garments.size, 4);
+    const imported = Array.from(api.state().garments.values()).filter(item => item.id !== 'blue');
+    assert.equal(imported[0].groupId, 'outside', '场景标签复用已有同名标签');
+    assert.equal(imageFiles.get(imported[0].image).toString(), 'hello', '复用原图上传流程');
+    assert.equal(scriptVariables.api.key, '原有配置');
+    assert.equal(JSON.stringify(scriptVariables.wardrobe_selections), oldSelections, '导入不改变 USER／Char 选择');
+    await api.importGarments({ currentTarget: input });
+    assert.equal(api.state().garments.size, 7, '重复导入新增副本');
+    await api.exportGarments(imported.map(item => item.id));
+    const exported = api.parseWardrobeFile(JSON.parse(await blobs.get(downloads.at(-1).href).text()));
+    assert.equal(exported.items.size, 3, '转换后仍可用本衣柜格式导出和恢复');
+    assert.equal(exported.items.get(imported[0].id).favorite, true);
+
+    const beforeFailure = JSON.stringify(scriptVariables);
+    const beforeFiles = imageFiles.size;
+    writesFail = true;
+    await api.importGarments({ currentTarget: input });
+    writesFail = false;
+    assert.equal(JSON.stringify(scriptVariables), beforeFailure, '保存失败不覆盖服装、设置或应用选择');
+    assert.equal(imageFiles.size, beforeFiles, '保存失败清理本批原图');
+    input.files.push({ name: '缺图.json', type: 'application/json', text: async () => JSON.stringify({ ...packaged, _assets: {} }) });
+    await api.importGarments({ currentTarget: input });
+    assert.equal(JSON.stringify(scriptVariables), beforeFailure, '混选文件中有缺图数据时整批不提交');
+    assert.equal(imageFiles.size, beforeFiles);
+    input.files.pop();
+    input.files.push(input.files[0]);
+    uploadFailureAt = uploads + 2;
+    await api.importGarments({ currentTarget: input });
+    uploadFailureAt = Infinity;
+    assert.equal(JSON.stringify(scriptVariables), beforeFailure, '中途上传失败不提交新增记录');
+    assert.equal(imageFiles.size, beforeFiles, '中途上传失败回收已上传的原图');
+    console.log('通过 Outfit Manager 字段映射、User／角色／完整备份、资源原图、纯文字、收藏、合并导出及失败回滚检查。');
 }
 
 /**
