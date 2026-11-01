@@ -49,6 +49,7 @@ const controls = {
     '[data-action="describe-all"]': { disabled: false, textContent: '一键识图' },
     '[data-action="remove-image"]': { disabled: false },
     '[data-action="replace-image"]': { disabled: false, textContent: '' },
+    '[data-action="edit-combination"]': { disabled: true },
 };
 const saved = { wardrobe_templates: {
     user: { single: '旧的 USER 单套', wardrobe: '{{user}} 的衣柜，共 {{count}} 套：\n{{outfits}}\n请根据剧情选择合适的一套，不要同时穿上所有套装。' },

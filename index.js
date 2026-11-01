@@ -42,6 +42,7 @@ const CATEGORIES = [
     ['outfits', '套装', 'star'], ['other', '其他', 'more'],
 ];
 const QUICK_FILTERS = [
+    ['combinations', '搭配', 'star'],
     ['favorites', '收藏', 'heart'], ['recent', '最近使用', 'clock'],
     ['assigned-user', '已分配 USER', 'hanger'], ['assigned-char', '已分配 Char', 'hanger'],
     ['unassigned', '未分配', 'shirt'], ['missing-description', '缺描述', 'file'], ['missing-image', '无图片', 'info'],
@@ -110,6 +111,8 @@ const DEFAULT_TEMPLATES = {
  * @property {string} groupId 标签标识，空字符串表示未分组。
  * @property {boolean} favorite 是否已收藏，旧存档默认未收藏。
  * @property {number} lastUsedAt 最近一次成功应用的毫秒时间戳，0 表示尚无使用记录。
+ * @property {string[]} [componentIds] 搭配包含的服装 ID；分类不限，成员不可再嵌套搭配，缺省表示普通服装。
+ * @property {boolean} [descriptionOverride] 搭配描述是否已由用户整段编辑；未编辑时继续自动引用成员描述。
  */
 
 /**
@@ -198,6 +201,7 @@ const PANEL_HTML = `
                     <button type="button" data-action="add-group" aria-label="新增标签" title="新增标签">${icon('plus')}</button>
                     <button type="button" data-action="manage-groups" aria-label="管理标签" title="重命名与排序">${icon('pencil')}</button>
                     <button type="button" data-action="toggle-multi" aria-pressed="false" aria-controls="tw-bulk-actions">多选</button>
+                    <button type="button" data-action="create-combination">${icon('plus')}<span>合并搭配</span></button>
                     <button type="button" data-action="describe-all">一键识图</button>
                 </div>
                 <div class="tw-library-content">
@@ -249,6 +253,7 @@ const PANEL_HTML = `
                         </dl>
                     </section>
                     <section data-detail-page="description" aria-label="服装描述" hidden>
+                        <div class="tw-combination-details" hidden><button type="button" data-action="edit-combination">编辑搭配</button></div>
                         <div class="tw-description-actions">
                             <select name="description_mode" aria-label="描述生成类型" disabled><option value="outfit">服装描述</option><option value="item">单品描述</option></select>
                             <button type="button" class="tw-describe" data-action="describe" disabled>AI 生成描述</button>
@@ -290,6 +295,15 @@ const PANEL_HTML = `
         <div class="tw-import-grid" aria-label="待导入文件"></div>
         <p class="tw-import-status" role="status" aria-live="polite"></p>
         <footer><span class="tw-import-count" aria-live="polite">已选 0 / 0 个文件</span><button type="button" data-action="confirm-import" disabled>导入所选</button></footer>
+    </dialog>
+    <dialog id="tw-combination-editor" aria-labelledby="tw-combination-title">
+        <form class="tw-combination-form">
+            <h2 id="tw-combination-title">搭配</h2>
+            <label class="tw-combination-name">名称<input name="combination_name" aria-label="搭配名称" required></label>
+            <div class="tw-combination-items" aria-label="选择搭配成员"></div>
+            <div class="tw-send-actions"><button type="button" data-action="cancel-combination">取消</button><button type="submit">保存搭配</button></div>
+            <p class="tw-combination-status" role="status" aria-live="polite"></p>
+        </form>
     </dialog>
     <dialog id="tw-group-manager" aria-labelledby="tw-group-manager-title">
         <form class="tw-group-form">
@@ -1143,8 +1157,9 @@ const PANEL_CSS = `
     background: var(--tw-bg-elevated);
 }
 
-/* 标签编辑使用原生模态框；名称输入与上下移动均可用键盘操作，保存前不改变存档。 */
-#tw-panel #tw-group-manager {
+/* 标签和搭配编辑复用原生模态框，保存前不改变存档，Escape 保留原数据。 */
+#tw-panel #tw-group-manager,
+#tw-panel #tw-combination-editor {
     width: min(480px, calc(100vw - 24px));
     max-height: calc(100dvh - 40px);
     margin: auto;
@@ -1156,6 +1171,28 @@ const PANEL_CSS = `
     color: var(--tw-ink);
 }
 #tw-panel #tw-group-manager::backdrop { background: rgba(5, 6, 11, 0.68); }
+#tw-panel #tw-combination-editor::backdrop { background: rgba(5, 6, 11, 0.68); }
+/* 搭配复用原服装，不生成拼接图片；可滚动成员列表同时适配手机和键盘选择。 */
+#tw-panel .tw-combination-name { display: grid; gap: 8px; }
+#tw-panel .tw-combination-name input { width: 100%; padding: 8px; background: var(--tw-bg-input); border: 1px solid var(--tw-line-strong); border-radius: 8px; }
+#tw-panel .tw-combination-items { display: grid; gap: 8px; margin: 16px 0; max-height: 50dvh; overflow-y: auto; }
+#tw-panel .tw-combination-item { display: flex; align-items: center; gap: 10px; min-height: 44px; cursor: pointer; }
+#tw-panel .tw-combination-item img { width: 44px; height: 52px; object-fit: contain; }
+#tw-panel .tw-combination-status { color: var(--tw-danger); }
+/* 编辑成员属于描述页的独立操作区，与整套正文编辑框保持清晰间距。 */
+#tw-panel .tw-combination-details {
+    margin-bottom: 12px;
+    padding: 12px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 10px;
+    background: var(--tw-bg-elevated);
+}
+#tw-panel .tw-combination-details button { width: 100%; min-height: 38px; }
+/* 顶部增加合并入口后，窄屏标签独占一行，操作按钮可换行，避免挤出手机视口。 */
+@media (max-width: 540px) {
+    #tw-panel .tw-group-bar { flex-wrap: wrap; }
+    #tw-panel .tw-group-tabs { flex-basis: 100%; }
+}
 #tw-panel .tw-group-rows { display: grid; gap: 8px; margin: 16px 0; }
 #tw-panel .tw-group-row { display: flex; align-items: center; gap: 8px; }
 #tw-panel .tw-group-row input {
@@ -1564,6 +1601,11 @@ const PANEL_CSS = `
     border-radius: 8px;
     filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.45));
 }
+/* 用原图组成预览网格，保留每件成员的名称；发送与备份仍使用独立图片。 */
+#tw-panel .tw-preview[data-combination="true"] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); gap: 8px; }
+#tw-panel .tw-preview-member { display: flex; flex-direction: column; align-items: center; min-height: 0; min-width: 0; gap: 4px; }
+#tw-panel .tw-preview-member img { flex: 1; min-height: 0; }
+#tw-panel .tw-preview-member span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 
 #tw-panel .tw-details :is(input, select, textarea) {
     width: 100%;
@@ -2579,6 +2621,11 @@ function initializeWardrobe() {
     panel.querySelector('.tw-items').addEventListener('change', checkGarment);
     panel.querySelector('.tw-select-all').addEventListener('change', selectAllGarments);
     panel.querySelector('.tw-bulk-actions').addEventListener('click', handleBulkAction);
+    // 新建搭配直接打开成员选择弹窗，不受多选模式及批量操作的勾选门槛限制。
+    panel.querySelector('[data-action="create-combination"]').addEventListener('click', openCombinationEditor);
+    panel.querySelector('[data-action="edit-combination"]').addEventListener('click', openCombinationEditor);
+    panel.querySelector('[data-action="cancel-combination"]').addEventListener('click', closeCombinationEditor);
+    panel.querySelector('.tw-combination-form').addEventListener('submit', saveCombination);
     panel.querySelector('.tw-bulk-apply').addEventListener('change', handleBulkAction);
     panel.querySelector('.tw-bulk-group').addEventListener('change', moveCheckedGarments);
     panel.querySelector('.tw-bulk-category').addEventListener('change', updateCheckedGarments);
@@ -2695,6 +2742,7 @@ function parseWardrobeData(data, allowStoredImages = true) {
             items.has(item.id) || (item.image && !DATA_IMAGE_PATTERN.test(item.image) && !STORED_IMAGE_PATTERN.test(item.image)) ||
             (item.groupId !== undefined && typeof item.groupId !== 'string') ||
             (item.favorite !== undefined && typeof item.favorite !== 'boolean') ||
+            (item.descriptionOverride !== undefined && typeof item.descriptionOverride !== 'boolean') ||
             (item.lastUsedAt !== undefined && (!Number.isSafeInteger(item.lastUsedAt) || item.lastUsedAt < 0))) {
             throw new Error('服装数据缺少名称、描述、有效图片，或标识重复、收藏状态无效、使用时间无效。');
         }
@@ -2707,7 +2755,21 @@ function parseWardrobeData(data, allowStoredImages = true) {
             groupId: groups.has(item.groupId) ? item.groupId : '',
             favorite: item.favorite ?? false,
             lastUsedAt: item.lastUsedAt ?? 0,
+            ...(item.componentIds !== undefined ? { componentIds: item.componentIds } : {}),
+            ...(item.descriptionOverride ? { descriptionOverride: true } : {}),
         });
+    }
+    // 完整读取后一次校验关联，允许成员在文件中排在搭配之后；禁止空搭配、悬空和嵌套关系。
+    for (const item of items.values()) {
+        if (item.componentIds === undefined) continue;
+        if (!Array.isArray(item.componentIds) || !item.componentIds.length || new Set(item.componentIds).size !== item.componentIds.length) {
+            throw new Error('搭配必须包含不重复的服装成员。');
+        }
+        for (const id of item.componentIds) {
+            if (typeof id !== 'string' || !items.has(id) || items.get(id).componentIds !== undefined) {
+                throw new Error('搭配成员必须是文件中存在的普通服装，不能嵌套搭配。');
+            }
+        }
     }
     return { items, groups };
 }
@@ -2985,6 +3047,8 @@ async function importGarmentFiles(files) {
             if (/\.json$/i.test(file.name) || file.type === 'application/json') {
                 const data = parseWardrobeFile(JSON.parse(await file.text()));
                 const groupIds = new Map();
+                // 每份文件先获得独立的临时 ID，防止多文件原 ID 相同；查重后再映射到最终记录。
+                const itemIds = new Map(Array.from(data.items.keys(), id => [id, window.parent.crypto.randomUUID()]));
                 // 标签按名称复用，服装等整批校验后再决定新增或覆盖，跳过项不上传图片。
                 for (const [oldId, name] of data.groups) {
                     let id = groupNames.get(name);
@@ -2996,7 +3060,8 @@ async function importGarmentFiles(files) {
                     groupIds.set(oldId, id);
                 }
                 for (const item of data.items.values()) {
-                    candidates.push({ ...item, groupId: groupIds.get(item.groupId) ?? importGroup });
+                    candidates.push({ ...item, id: itemIds.get(item.id), groupId: groupIds.get(item.groupId) ?? importGroup,
+                        ...(item.componentIds ? { componentIds: item.componentIds.map(id => itemIds.get(id)) } : {}) });
                 }
             } else {
                 const image = await readGarmentImage(file);
@@ -3006,35 +3071,42 @@ async function importGarmentFiles(files) {
         const names = new Set(candidates.map(item => item.name.trim()));
         const fingerprints = new Map();
         const imageHashes = new Map();
+        const candidateItems = new Map(candidates.map(item => [item.id, item]));
         // 只读取本批同名的旧图片，并缓存同图哈希；索引查重避免每件导入都遍历整个衣柜。
         for (const item of garments.values()) {
             if (names.has(item.name.trim())) fingerprints.set(await garmentFingerprint(item, imageHashes), item);
         }
         const next = new Map();
+        const importedIds = new Map();
         let duplicateAction;
         let skipped = 0;
         let overwritten = 0;
         for (const item of candidates) {
-            const key = await garmentFingerprint(item, imageHashes);
+            const key = await garmentFingerprint(item, imageHashes, candidateItems);
             const existing = fingerprints.get(key);
             if (existing) {
                 duplicateAction ??= await chooseImportDuplicate(item.name);
                 if (!duplicateAction) return false;
-                if (duplicateAction === 'skip') { skipped++; continue; }
+                if (duplicateAction === 'skip') { importedIds.set(item.id, existing.id); skipped++; continue; }
             }
             const replacing = existing && duplicateAction === 'overwrite';
             const id = replacing ? existing.id : window.parent.crypto.randomUUID();
+            importedIds.set(item.id, id);
             // 相同原图沿用已有文件，覆盖保留 ID 和最近使用历史，角色选择无需重新绑定。
             const imported = { ...item, id, image: replacing ? existing.image : item.image, lastUsedAt: replacing ? Math.max(item.lastUsedAt, existing.lastUsedAt) : item.lastUsedAt };
             next.set(id, imported);
             fingerprints.set(key, imported);
             if (replacing) overwritten++;
         }
+        // 跳过或覆盖的成员也映射到实际保留项，搭配永远不引用备份里的旧 ID。
+        for (const item of next.values()) {
+            if (item.componentIds) item.componentIds = Array.from(new Set(item.componentIds.map(id => importedIds.get(id))));
+        }
         // 整库备份允许只有空标签；没有新增服装时仍需恢复新标签，不能把有效备份当成空操作。
         if (!next.size && groups.size === garmentGroups.size) { setLibraryStatus(`已跳过 ${skipped} 件重复服装`); return true; }
         for (const item of next.values()) {
             if (!DATA_IMAGE_PATTERN.test(item.image)) continue;
-            item.image = await uploadGarmentImage(item.image);
+            item.image = await uploadGarmentImage(item.image, imageHashes.get(item.image));
             uploaded.push(item.image);
         }
         if (!root.isConnected) throw new Error('衣柜已卸载，导入已取消。');
@@ -3064,24 +3136,40 @@ async function importGarmentFiles(files) {
 }
 
 /**
- * 对原图字节计算 SHA-256，名称相同且图片字节相同才视为重复；纯文字服装用空图标记。
- * @param {Pick<WardrobeItem, 'name'|'image'>} item 已校验的服装名称与图片。
+ * 普通服装按名称与原图 SHA-256 查重，纯文字使用空图标记；搭配再比较成员指纹及顺序。
+ * @param {WardrobeItem} item 已校验的服装或搭配。
  * @param {Map<string, string>} imageHashes 本批共享的图片路径／数据地址哈希缓存。
+ * @param {Map<string, WardrobeItem>} items 关联成员所在的服装表，导入时使用本批临时表。
  * @returns {Promise<string>} 名称与图片哈希组成的稳定指纹。
  */
-async function garmentFingerprint(item, imageHashes) {
+async function garmentFingerprint(item, imageHashes, items = garments) {
+    if (item.componentIds) {
+        const members = [];
+        // 关联只允许一层，复用图片哈希缓存；同名但成员不同的搭配不会误判为重复。
+        for (const id of item.componentIds) members.push(await garmentFingerprint(items.get(id), imageHashes, items));
+        return JSON.stringify([item.name.trim(), 'combination', members]);
+    }
     let hash = imageHashes.get(item.image);
     if (hash === undefined) {
         hash = '';
         if (item.image) {
             const data = await loadImageDataUrl(item.image);
-            const bytes = Uint8Array.from(window.parent.atob(data.slice(data.indexOf(',') + 1)), char => char.charCodeAt(0));
-            const digest = await window.parent.crypto.subtle.digest('SHA-256', bytes);
-            hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+            hash = await hashGarmentImage(data);
         }
         imageHashes.set(item.image, hash);
     }
     return JSON.stringify([item.name.trim(), hash]);
+}
+
+/**
+ * 对解码后的原图字节计算 SHA-256，供导入查重与固定文件名共用，避免名称或数据地址头影响结果。
+ * @param {string} dataUrl 已在入口校验的原图数据地址。
+ * @returns {Promise<string>} 完整的 64 位小写十六进制哈希。
+ */
+async function hashGarmentImage(dataUrl) {
+    const bytes = Uint8Array.from(window.parent.atob(dataUrl.slice(dataUrl.indexOf(',') + 1)), char => char.charCodeAt(0));
+    const digest = await window.parent.crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
 /**
@@ -3126,16 +3214,21 @@ function readGarmentImage(file) {
 }
 
 /**
- * 使用酒馆上传接口解码原图，按真实图片格式保存，不重新压缩或裁剪。
+ * 使用原图 SHA-256 派生固定 UUID 文件名，再按原格式上传；同图跨导入复用路径，不重新压缩或裁剪。
  * @param {string} dataUrl 已在导入入口校验或由读取器生成的图片数据地址。
+ * @param {string} [imageHash] 本批查重已算出的完整哈希，省去重复解码和摘要计算；其他入口自行计算。
  * @returns {Promise<string>} 当前酒馆用户目录中的图片相对路径。
  */
-async function uploadGarmentImage(dataUrl) {
+async function uploadGarmentImage(dataUrl, imageHash) {
     const [, format, image] = DATA_IMAGE_PATTERN.exec(dataUrl);
+    const hash = imageHash ?? await hashGarmentImage(dataUrl);
+    // 截取摘要前 128 位并设置 UUID v8 的版本与变体位；查重仍使用完整 SHA-256，不用截断值代替。
+    const variant = ((parseInt(hash[16], 16) & 3) | 8).toString(16);
+    const filename = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-8${hash.slice(13, 16)}-${variant}${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
     const response = await window.parent.fetch('/api/images/upload', {
         method: 'POST',
         headers: SillyTavern.getRequestHeaders(),
-        body: JSON.stringify({ image, format: format === 'jpeg' ? 'jpg' : format, filename: window.parent.crypto.randomUUID(), ch_name: IMAGE_FOLDER }),
+        body: JSON.stringify({ image, format: format === 'jpeg' ? 'jpg' : format, filename, ch_name: IMAGE_FOLDER }),
     });
     if (!response.ok) throw new Error(`图片保存失败（HTTP ${response.status}）。`);
     const path = String((await response.json()).path ?? '').replace(/^\//, '');
@@ -3338,7 +3431,7 @@ function commitGarments(next, selectedId, groups = garmentGroups, refreshDetails
 }
 
 /**
- * 把指定服装和对应标签打包成可重新导入的文件，图片以原始数据地址保存在文件内。
+ * 把指定服装、搭配成员及对应标签打包成可独立恢复的文件，图片以原始数据地址保存在文件内。
  * @param {Iterable<string>} ids 待导出的服装标识。
  * @param {boolean} includeEmptyGroups 是否连同空标签一起备份。
  * @returns {Promise<void>} 图片读取完成并触发下载后结束。
@@ -3346,8 +3439,11 @@ function commitGarments(next, selectedId, groups = garmentGroups, refreshDetails
 async function exportGarments(ids, includeEmptyGroups = false) {
     const items = [];
     const groupIds = new Set();
-    for (const id of ids) {
+    // 单独导出搭配时同时包含成员，确保文件可独立恢复；Set 避免共享单品重复打包。
+    const exportIds = new Set(ids);
+    for (const id of exportIds) {
         const item = garments.get(id);
+        if (item.componentIds) for (const memberId of item.componentIds) exportIds.add(memberId);
         items.push({ ...item });
         if (item.groupId) groupIds.add(item.groupId);
     }
@@ -3403,6 +3499,7 @@ async function handleGarmentAction(event) {
             if (!saved) return;
             const next = new Map(garments);
             next.set(item.id, { ...saved, image: '' });
+            validateAppliedGarmentChange(item.id, next);
             commitGarments(next, item.id);
             void deleteGarmentImages([item.image]);
             setLibraryStatus('图片已删除，名称和描述已保留');
@@ -3414,11 +3511,16 @@ async function handleGarmentAction(event) {
 }
 
 /**
- * 删除指定服装并清理所有范围的应用选择，保存成功后才回收无引用的原图。
+ * 删除前阻止留下悬空搭配，删除成功时清理所有范围的应用选择，再回收无引用的原图。
  * @param {Set<string>} ids 待删除的服装标识集合。
  * @returns {void} 无返回值。
  */
 function deleteGarments(ids) {
+    for (const item of garments.values()) {
+        if (!ids.has(item.id) && item.componentIds?.some(id => ids.has(id))) {
+            throw new Error(`所选服装仍被搭配“${item.name}”使用，请先编辑该搭配移除成员，或一并删除搭配。`);
+        }
+    }
     if (!ids.size || !window.parent.confirm(`删除所选的 ${ids.size} 件服装及其图片？此操作不可撤销。`)) return;
     const next = new Map(garments);
     const removedImages = [];
@@ -3430,6 +3532,131 @@ function deleteGarments(ids) {
     // 先保存删除结果，再清理不再被引用的文件，存档失败时仍可继续查看原图。
     void deleteGarmentImages(removedImages);
     setLibraryStatus(`已删除 ${ids.size} 件服装`);
+}
+
+/**
+ * 直接打开搭配编辑器，新建时可选地带入已有勾选，编辑时读取原搭配并保留当前详情草稿。
+ * @param {MouseEvent} event 顶部新建或详情编辑按钮的点击事件，通过按钮动作区分两种入口。
+ * @returns {void} 仅填充模态框，保存前不修改服装和应用选择。
+ */
+function openCombinationEditor(event) {
+    const item = event.currentTarget.dataset.action === 'edit-combination' ? garments.get(selectedGarmentId) : undefined;
+    const selected = new Set();
+    for (const id of item?.componentIds ?? checkedGarmentIds) {
+        const garment = garments.get(id);
+        for (const member of getGarmentMembers(garment)) selected.add(member.id);
+    }
+    const dialog = panel.querySelector('#tw-combination-editor');
+    dialog.dataset.garmentId = item?.id ?? '';
+    dialog.querySelector('[name="combination_name"]').value = item ? panel.querySelector('[name="garment_name"]').value : '新搭配';
+    const rows = dialog.querySelector('.tw-combination-items');
+    rows.replaceChildren();
+    for (const garment of garments.values()) {
+        if (garment.componentIds) continue;
+        const row = hostDocument.createElement('label');
+        row.className = 'tw-combination-item';
+        const checkbox = hostDocument.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.value = garment.id;
+        checkbox.checked = selected.has(garment.id);
+        row.append(checkbox);
+        if (garment.image) {
+            const image = hostDocument.createElement('img');
+            image.src = garment.image;
+            image.alt = '';
+            image.loading = 'lazy';
+            row.append(image);
+        }
+        const name = hostDocument.createElement('span');
+        name.textContent = `${garment.name} · ${CATEGORY_LABELS.get(garment.category)}`;
+        row.append(name);
+        rows.append(row);
+    }
+    dialog.querySelector('.tw-combination-status').textContent = '';
+    dialog.showModal();
+}
+
+/** 关闭搭配编辑器并丢弃未提交的成员选择；无参数，无返回值。 */
+function closeCombinationEditor() {
+    const dialog = panel.querySelector('#tw-combination-editor');
+    if (dialog.open) dialog.close();
+}
+
+/**
+ * 一次保存搭配及成员关系，保留用户编辑的整段描述；未编辑描述时继续引用成员，不复制原图。
+ * @param {SubmitEvent} event 搭配表单提交事件。
+ * @returns {void} 保存成功后显示搭配详情，失败保留编辑内容。
+ */
+function saveCombination(event) {
+    event.preventDefault();
+    const dialog = panel.querySelector('#tw-combination-editor');
+    try {
+        const name = dialog.querySelector('[name="combination_name"]').value.trim();
+        const componentIds = [];
+        for (const input of dialog.querySelectorAll('.tw-combination-items input:checked')) {
+            // 模态框打开期间可能删除记录；在这一个编辑入口确认成员仍存在。
+            if (!garments.has(input.value) || garments.get(input.value).componentIds) throw new Error('搭配成员已变化，请重新打开编辑器。');
+            componentIds.push(input.value);
+        }
+        if (!name || !componentIds.length) throw new Error('请填写搭配名称，并至少选择一件服装。');
+        const previous = garments.get(dialog.dataset.garmentId);
+        const id = previous?.id ?? window.parent.crypto.randomUUID();
+        const item = { id, name, category: 'outfits', description: '', image: '', groupId: currentGroup === '*' ? '' : currentGroup,
+            favorite: false, lastUsedAt: 0, ...previous, componentIds };
+        item.name = name;
+        if (previous) {
+            item.category = panel.querySelector('[name="garment_category"]').value;
+            Object.assign(item, readGarmentDescriptionDraft(previous));
+        }
+        const next = new Map(garments);
+        next.set(id, item);
+        const selections = readWearerSelections();
+        if (selections.user.has(id) || selections.char.has(id)) buildWardrobeContent(item, sendSettings, next);
+        commitGarments(next, id);
+        closeCombinationEditor();
+        checkedGarmentIds.clear();
+        multiSelectMode = false;
+        currentGroup = '*';
+        updateCategory('combinations');
+        panel.querySelector('[data-detail="description"]').click();
+        setMobileDetails(true);
+        setGarmentStatus('搭配已保存');
+    } catch (error) { dialog.querySelector('.tw-combination-status').textContent = String(error); }
+}
+
+/**
+ * 解析一套穿搭包含的实际服装，普通套装与单品均可直接成为搭配成员。
+ * @param {WardrobeItem} item 已在存档或编辑入口校验的服装／搭配。
+ * @param {Map<string, WardrobeItem>} items 成员所在服装表，保存前验证可传入待提交表。
+ * @returns {WardrobeItem[]} 按保存顺序排列的实际服装。
+ */
+function getGarmentMembers(item, items = garments) {
+    return item.componentIds ? item.componentIds.map(id => items.get(id)) : [item];
+}
+
+/**
+ * 未编辑的搭配自动合并成员描述；用户整段编辑后使用保存的正文，旧补充说明继续保留在合并结果中。
+ * @param {WardrobeItem} item 普通服装或搭配。
+ * @param {Map<string, WardrobeItem>} items 成员所在服装表。
+ * @returns {string} 模板使用的完整描述，保留成员名称与分类对应关系。
+ */
+function getGarmentDescription(item, items = garments) {
+    if (!item.componentIds || item.descriptionOverride) return item.description;
+    const lines = item.description ? [item.description] : [];
+    for (const member of getGarmentMembers(item, items)) lines.push(`${member.name}（${CATEGORY_LABELS.get(member.category)}）：${member.description}`);
+    return lines.join('\n');
+}
+
+/**
+ * 读取唯一描述编辑框，未改动自动合并正文时保留引用，改动时保存为整套正文，避免重复追加成员描述。
+ * @param {WardrobeItem} item 编辑前的服装或搭配，调整成员时也以原记录判断描述是否被修改。
+ * @returns {{description: string, descriptionOverride?: boolean}} 待合并到服装记录的描述字段。
+ */
+function readGarmentDescriptionDraft(item) {
+    const description = panel.querySelector('[name="garment_description"]').value.trim();
+    if (!item.componentIds) return { description };
+    if (description === getGarmentDescription(item).trim()) return { description: item.description };
+    return { description, descriptionOverride: true };
 }
 
 /**
@@ -3687,7 +3914,7 @@ function selectAllGarments(event) {
 }
 
 /**
- * 同步多选模式、勾选和底部操作栏显隐，不重建图片，保留勾选时的键盘焦点。
+ * 同步多选模式、勾选及底部操作栏状态，不重建图片，保留勾选时的键盘焦点。
  * @returns {void} 无返回值。
  */
 function renderBulkState() {
@@ -3968,11 +4195,12 @@ function matchesGarmentFilter(item, filter, selections) {
         case 'all': return true;
         case 'favorites': return item.favorite;
         case 'recent': return item.lastUsedAt > 0;
+        case 'combinations': return Boolean(item.componentIds);
         case 'assigned-user': return selections.user.has(item.id);
         case 'assigned-char': return selections.char.has(item.id);
         case 'unassigned': return !selections.user.has(item.id) && !selections.char.has(item.id);
-        case 'missing-description': return !item.description.trim();
-        case 'missing-image': return !item.image;
+        case 'missing-description': return item.descriptionOverride ? !item.description.trim() : getGarmentMembers(item).some(member => !member.description.trim());
+        case 'missing-image': return getGarmentMembers(item).some(member => !member.image);
         default: return item.category === filter;
     }
 }
@@ -3990,7 +4218,7 @@ function renderGarmentLibrary() {
     visibleGarmentIds = new Set();
     for (const item of garments.values()) {
         if (currentGroup !== '*' && currentGroup !== item.groupId) continue;
-        if (garmentSearch && !`${item.name}\n${item.description}\n${CATEGORY_LABELS.get(item.category)}\n${garmentGroups.get(item.groupId) ?? '未分组'}`.toLocaleLowerCase().includes(garmentSearch)) continue;
+        if (garmentSearch && !`${item.name}\n${getGarmentDescription(item)}\n${CATEGORY_LABELS.get(item.category)}\n${garmentGroups.get(item.groupId) ?? '未分组'}`.toLocaleLowerCase().includes(garmentSearch)) continue;
         counts.set('all', (counts.get('all') ?? 0) + 1);
         counts.set(item.category, (counts.get(item.category) ?? 0) + 1);
         // 快捷筛选数量与标签、搜索同步，按固定筛选数单次遍历，不逐件扫描角色清单。
@@ -4026,17 +4254,18 @@ function renderGarmentLibrary() {
         card.className = 'tw-garment-card';
         card.dataset.garment = item.id;
         card.setAttribute('aria-pressed', String(item.id === selectedGarmentId));
-        if (item.image) {
+        const cover = item.image || (item.componentIds ? garments.get(item.componentIds[0]).image : '');
+        if (cover) {
             const image = hostDocument.createElement('img');
-            image.src = item.image;
+            image.src = cover;
             image.alt = item.name;
             // 列表交给浏览器懒加载和异步解码原图路径，不在渲染时读取 Base64 或另存缩略副本。
             image.loading = 'lazy';
             image.decoding = 'async';
             card.append(image);
-        } else card.innerHTML = icon('shirt');
+        } else card.innerHTML = icon(item.componentIds ? 'star' : 'shirt');
         const name = hostDocument.createElement('span');
-        name.textContent = item.name;
+        name.textContent = item.componentIds ? `${item.name}（${item.componentIds.length} 件搭配）` : item.name;
         card.append(name);
         const metadata = hostDocument.createElement('div');
         metadata.className = 'tw-card-meta';
@@ -4072,7 +4301,7 @@ function renderGarmentLibrary() {
 }
 
 /**
- * 根据当前选中服装填充可编辑详情，并显示当前范围的应用或取消应用入口。
+ * 根据当前选中服装填充详情，搭配的合并正文直接进入唯一描述编辑框，并同步当前范围的应用入口。
  * @returns {void} 无返回值。
  */
 function renderGarmentDetails() {
@@ -4081,7 +4310,10 @@ function renderGarmentDetails() {
     panel.querySelector('[name="garment_name"]').value = item?.name ?? '';
     panel.querySelector('[name="garment_category"]').value = item?.category ?? 'other';
     panel.querySelector('[name="garment_group"]').value = item?.groupId ?? '';
-    panel.querySelector('[name="garment_description"]').value = item?.description ?? '';
+    panel.querySelector('[name="garment_description"]').value = item ? getGarmentDescription(item) : '';
+    panel.querySelector('[name="garment_description"]').placeholder = '填写款式、颜色、材质等服装描述';
+    panel.querySelector('.tw-description-actions').hidden = Boolean(item?.componentIds);
+    panel.querySelector('.tw-combination-details').hidden = !item?.componentIds;
     setDescriptionBusy(Boolean(descriptionRequest));
     renderWearerState();
 }
@@ -4094,7 +4326,24 @@ function renderGarmentImage() {
     const item = garments.get(selectedGarmentId);
     const preview = panel.querySelector('.tw-preview');
     preview.replaceChildren();
-    if (item?.image) {
+    preview.dataset.combination = String(Boolean(item?.componentIds));
+    if (item?.componentIds) {
+        for (const member of getGarmentMembers(item)) {
+            const cell = hostDocument.createElement('div');
+            cell.className = 'tw-preview-member';
+            if (member.image) {
+                const image = hostDocument.createElement('img');
+                image.src = member.image;
+                image.alt = member.name;
+                cell.append(image);
+            } else cell.innerHTML = icon('shirt');
+            const name = hostDocument.createElement('span');
+            name.textContent = member.name;
+            name.title = member.name;
+            cell.append(name);
+            preview.append(cell);
+        }
+    } else if (item?.image) {
         const image = hostDocument.createElement('img');
         image.src = item.image;
         image.alt = item.name;
@@ -4105,7 +4354,7 @@ function renderGarmentImage() {
         title.textContent = item?.name ?? '未选择服装';
         preview.append(title);
     }
-    panel.querySelector('#tw-garment-image-state').textContent = item ? (item.image ? '已导入' : '无图片') : '—';
+    panel.querySelector('#tw-garment-image-state').textContent = item?.componentIds ? '使用成员图片' : item ? (item.image ? '已导入' : '无图片') : '—';
 }
 
 /**
@@ -4325,7 +4574,7 @@ function commitGeneratedGarment(item, result, saveDescription) {
 }
 
 /**
- * 识别期间暂时锁定当前服装编辑；选择其他服装仍可取消本次识别。
+ * 识别期间暂时锁定当前服装编辑；搭配直接引用成员图文，不对搭配另行上传或识图。
  * @param {boolean} busy 是否正在识别。
  * @returns {void} 无返回值。
  */
@@ -4342,6 +4591,8 @@ function setDescriptionBusy(busy) {
     const replaceButton = panel.querySelector('[data-action="replace-image"]');
     replaceButton.disabled = !item || busy || replacingImage;
     replaceButton.textContent = replacingImage ? '上传中…' : item?.image ? '替换图片' : '上传图片';
+    if (item?.componentIds) replaceButton.disabled = true;
+    panel.querySelector('[data-action="edit-combination"]').disabled = !item?.componentIds || busy;
     const bulkButton = panel.querySelector('[data-action="describe-all"]');
     bulkButton.disabled = busy;
     bulkButton.textContent = descriptionRequest?.bulk ? '识图中…' : '一键识图';
@@ -4375,17 +4626,37 @@ function saveSelectedGarment() {
         return undefined;
     }
     try {
-        const updated = { ...item, name: name.value, category: panel.querySelector('[name="garment_category"]').value, groupId: panel.querySelector('[name="garment_group"]').value, description: panel.querySelector('[name="garment_description"]').value.trim() };
-        const selections = readWearerSelections();
-        if (selections.user.has(item.id) || selections.char.has(item.id)) buildWardrobeContent(updated, sendSettings);
+        const updated = { ...item, name: name.value, category: panel.querySelector('[name="garment_category"]').value, groupId: panel.querySelector('[name="garment_group"]').value, ...readGarmentDescriptionDraft(item) };
         const next = new Map(garments);
         next.set(item.id, updated);
+        validateAppliedGarmentChange(item.id, next);
         commitGarments(next, item.id);
         setGarmentStatus('已保存');
         return updated;
     } catch (error) {
         setGarmentStatus(String(error), true);
         return undefined;
+    }
+}
+
+/**
+ * 验证正在应用的服装及依赖它的搭配，编辑描述和删除图片共用同一个提交前检查。
+ * @param {string} changedId 本次修改的服装 ID。
+ * @param {Map<string, WardrobeItem>} next 待提交的服装表。
+ * @returns {void} 缺少当前发送方式要求的成员图文时抛出错误。
+ */
+function validateAppliedGarmentChange(changedId, next) {
+    const selections = readWearerSelections();
+    const applied = new Set([...selections.user, ...selections.char]);
+    // 单品通过搭配间接应用时也要验证，避免保存成功后下一次聊天才发现成员资料不完整。
+    for (const id of applied) {
+        const active = next.get(id);
+        if (id === changedId) buildWardrobeContent(active, sendSettings, next);
+        else for (const memberId of active.componentIds ?? []) {
+            if (memberId !== changedId) continue;
+            buildWardrobeContent(active, sendSettings, next);
+            break;
+        }
     }
 }
 
@@ -4402,20 +4673,26 @@ function setGarmentStatus(message, error = false) {
 }
 
 /**
- * 按发送模式构建真正的文本或图片内容块，不把图片地址伪装成文字描述。
+ * 按发送模式构建一套穿搭；搭配按成员验证并发送多张图片，始终算一套。
  * @param {WardrobeItem} item 当前应用的服装。
  * @param {{content_type: string, position: string}} settings 已保存的发送设置。
+ * @param {Map<string, WardrobeItem>} items 成员所在服装表。
  * @returns {Object[]} 符合酒馆多模态消息格式的内容块。
  */
-function buildWardrobeContent(item, settings) {
+function buildWardrobeContent(item, settings, items = garments) {
     const parts = [];
+    const members = getGarmentMembers(item, items);
     if (settings.content_type !== 'image') {
-        if (!item.description.trim()) throw new Error('当前内容类型需要文字描述，请先填写服装描述。');
-        parts.push({ type: 'text', text: `当前服装：${item.name}\n${item.description}` });
+        // 自定义整套正文已覆盖成员文字；自动合并模式仍逐件检查，不能用空成员凑出看似完整的描述。
+        const describedItems = item.descriptionOverride ? [item] : members;
+        for (const member of describedItems) if (!member.description.trim()) throw new Error(`“${member.name}”缺少描述，当前内容类型需要文字描述，请先填写服装描述。`);
+        parts.push({ type: 'text', text: `当前服装：${item.name}\n${getGarmentDescription(item, items)}` });
     }
     if (settings.content_type !== 'text') {
-        if (!item.image) throw new Error('当前内容类型需要图片，请先导入服装图片。');
-        parts.push({ type: 'image_url', image_url: { url: item.image, detail: 'auto' } });
+        for (const member of members) {
+            if (!member.image) throw new Error(`“${member.name}”缺少图片，当前内容类型需要图片，请先导入服装图片。`);
+            parts.push({ type: 'image_url', image_url: { url: member.image, detail: 'auto' } });
+        }
     }
     return parts;
 }
@@ -4432,17 +4709,26 @@ function buildWardrobeContent(item, settings) {
  */
 function buildWearerContent(items, wearer, settings, templates, names, imageTemplates = wardrobeTemplates.image) {
     if (!items.length) return [];
+    // 同一角色已选择搭配时，成员不再单独成为候选穿搭；共享单品仍可属于多套搭配或另一角色。
+    const memberIds = new Set();
+    for (const item of items) if (item.componentIds) for (const id of item.componentIds) memberIds.add(id);
+    items = items.filter(item => !memberIds.has(item.id));
     const images = [];
     const outfitNames = [];
     const descriptions = [];
     const outfits = [];
     const taggedOutfits = [];
+    const combinations = [];
     for (const item of items) {
+        const imageStart = images.length + 1;
         for (const part of buildWardrobeContent(item, settings)) if (part.type === 'image_url') images.push(part);
         outfitNames.push(item.name);
-        descriptions.push(item.description);
-        outfits.push(`${outfits.length + 1}. ${item.name}\n${item.description}`);
-        // 标签按图片和服装原顺序编号，直接从表中读取；未分组时不猜测场景。
+        const description = getGarmentDescription(item);
+        descriptions.push(description);
+        outfits.push(`${outfits.length + 1}. ${item.name}\n${description}`);
+        const members = getGarmentMembers(item);
+        combinations.push(`${outfits.length}. ${item.name}：${members.map(member => `${member.name}（${CATEGORY_LABELS.get(member.category)}）`).join('＋')}${settings.content_type === 'text' ? '' : `；参考图 ${imageStart}—${images.length}，依次对应上述成员`}`);
+        // 标签使用穿搭编号，成员图片另按组合分组；直接读取实际标签，不猜测未分组服装的场景。
         const tag = garmentGroups.get(item.groupId);
         if (tag) taggedOutfits.push(`${outfits.length}. ${item.name}：${tag}`);
     }
@@ -4454,6 +4740,7 @@ function buildWearerContent(items, wearer, settings, templates, names, imageTemp
     const field = items.length === 1 ? 'single' : 'wardrobe';
     // 归属说明独立于可编辑模板，文字和图片模式均明确边界；共享只由两边清单同时列出表达。
     const texts = [`【${wearer === 'user' ? 'USER' : 'Char'}（${names[wearer]}）的服装】以下服装文字及紧随其后的图片仅供该角色使用。另一角色只能使用其自身服装清单中明确列出的服装，不得将本清单中未分配给对方的服装转给对方，也不得根据性别自动共享。`];
+    if (memberIds.size) texts.push(`穿搭组合（以下每个编号为一套，成员同时穿着；切换时按整套切换，不将单品当作不同套装，不跨套混搭。图片按下列分组对应，不按图片张数计算套数）：\n${combinations.join('\n')}`);
     // 标签不依赖模板占位符，纯图片模式也能拿到实际场景标签，且不混入另一角色的服装。
     if (taggedOutfits.length) texts.push(`服装标签（用于匹配场景）：\n${taggedOutfits.join('\n')}`);
     // 一次替换受支持的变量，不再次解释服装描述里原有的双花括号，也不执行模板代码。
@@ -5301,6 +5588,7 @@ function destroyWardrobe() {
     if (importConflictDialog?.open) importConflictDialog.close();
     closeImageImport();
     closeGarmentGroupManager();
+    closeCombinationEditor();
     window.parent.clearTimeout(garmentSearchTimer);
     window.parent.clearTimeout(libraryStatusTimer);
     for (const subscription of subscriptions) subscription.stop();
