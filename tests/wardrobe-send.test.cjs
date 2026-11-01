@@ -10,7 +10,7 @@ assert.ok(source.includes(marker), '应能定位宿主启动边界');
 const sandbox = { window: { parent: { document: {}, matchMedia: () => ({ matches: false }), AbortController } } };
 vm.runInNewContext(source.replace(marker, 'globalThis.testApi = { buildWardrobeContent, buildWearerContent, insertWardrobeContent, loadGarments, readWearerSelections, injectWardrobeContent }; return;\n' + marker), sandbox);
 const { buildWardrobeContent, buildWearerContent, insertWardrobeContent, loadGarments, readWearerSelections, injectWardrobeContent } = sandbox.testApi;
-const item = { id: 'blue', name: '蓝色外套', category: 'coats', description: '深蓝色，银色刺绣', image: 'data:image/png;base64,aGVsbG8=' };
+const item = { groupIds: [], id: 'blue', name: '蓝色外套', category: 'coats', description: '深蓝色，银色刺绣', image: 'data:image/png;base64,aGVsbG8=' };
 const history = Object.freeze([
     Object.freeze({ role: 'system', content: '系统提示一' }),
     Object.freeze({ role: 'system', content: '系统提示二' }),
@@ -63,7 +63,7 @@ assert.equal(multipart[0].tool_call_id, 'original-tool', '工具字段应保留'
 assert.throws(() => buildWardrobeContent({ ...item, description: '' }, { content_type: 'text' }), /描述/, '缺少描述时不能假装发送成功');
 assert.throws(() => buildWardrobeContent({ ...item, image: '' }, { content_type: 'image' }), /图片/, '缺少图片时不能把地址文字充当图片');
 
-// USER 和 Char 各自按实际套数选择模板；图片模式附带图片提示词，不套用角色文字描述模板。
+// USER 和 Char 各自按候选记录数选择模板；保留旧命名的自定义模板，图片模式不套用角色文字模板。
 const templates = {
     user: { single: 'USER单套|{{user}}|{{name}}|{{description}}', wardrobe: 'USER衣柜|{{wearer}}|{{count}}|{{outfits}}' },
     char: { single: 'Char单套|{{char}}|{{name}}|{{description}}', wardrobe: 'Char衣柜|{{wearer}}|{{count}}|{{outfits}}' },
@@ -83,13 +83,15 @@ for (const wearer of ['user', 'char']) {
                 assert.ok(text.startsWith(`【${wearer === 'user' ? 'USER' : 'Char'}（${names[wearer]}）的服装】`), '所有发送模式与自定义模板都必须明确穿着归属');
                 assert.ok(text.includes('不得根据性别自动共享'), '不能将性别当成自动共享衣服的依据');
                 assert.ok(text.includes(names[wearer]), '模板应使用对应角色名称');
+                assert.ok(text.includes(`ID：${JSON.stringify(item.id)}`) && text.includes('分类：外套'), '自定义模板下仍有结构化候选信息');
+                assert.ok(text.includes('固定穿搭规则') && text.includes('一身完整穿搭'), '三种发送类型都保留自由搭配规则');
                 if (content_type === 'image') {
                     assert.ok(!text.includes(item.description), '默认图片提示词不强制附带已保存的文字描述');
                     assert.ok(!text.includes('USER单套|') && !text.includes('Char单套|'), '图片模式不套用角色文字模板');
                     assert.ok(text.includes('服装') && (text.includes('忽略') || text.includes('不采用')), '图片模式应附带服饰参考约束');
                     continue;
                 }
-                assert.ok(text.includes(`${wearer === 'user' ? 'USER' : 'Char'}${items.length === 1 ? '单套' : '衣柜'}|`), '模板应按角色和套数独立选择');
+                assert.ok(text.includes(`${wearer === 'user' ? 'USER' : 'Char'}${items.length === 1 ? '单套' : '衣柜'}|`), '模板应按角色和候选记录数独立选择');
                 assert.ok(text.includes(item.description), '模板应包含第一套服装');
                 if (items.length > 1) assert.ok(text.includes(second.description) && text.includes('|2|'), '衣柜模板应包含全部服装与数量');
             }
@@ -111,7 +113,17 @@ for (const position of ['system_end', 'context_end', 'user_end']) {
 const literal = buildWearerContent([{ ...item, description: '{{char}} $&' }], 'user', { content_type: 'text' }, templates, names);
 assert.ok(literal[0].text.includes('{{char}} $&'), '服装描述中的占位符和替换符不得被二次解释');
 
-// 单套和衣柜的图片提示词独立生效，保留每张原图，并兼容尚未生成描述的图片。
+// 自定义模板省略描述变量时，文字资料仍随候选清单提供，图片模式则保持不自动附加描述。
+const briefTemplates = { user: { single: '自定义简短模板 {{name}}', wardrobe: '自定义简短模板 {{count}}' } };
+for (const content_type of ['text', 'image', 'text_image']) {
+    for (const items of [[item], [item, second]]) {
+        const parts = buildWearerContent(items, 'user', { content_type }, briefTemplates, names);
+        for (const candidate of items) assert.equal(parts[0].text.includes(candidate.description), content_type !== 'image');
+        assert.equal(parts[0].text.includes('自定义简短模板'), content_type !== 'image', '不改写自定义模板，只补齐发送类型要求的资料');
+    }
+}
+
+// 单条和衣柜图片提示词独立生效，兼容旧模板字段及尚未生成描述的图片。
 const imageTemplates = { single: '单套图片|{{wearer}}|{{name}}', wardrobe: '衣柜图片|{{wearer}}|{{count}}|{{outfits}}' };
 for (const wearer of ['user', 'char']) {
     for (const items of [[item], [item, second]]) {
@@ -163,6 +175,7 @@ assert.equal(readWearerSelections().char.size, 0, '取消全部选择后不得�
 async function checkInjection() {
 sandbox.SillyTavern.name1 = '男主';
 sandbox.SillyTavern.name2 = '女主';
+sandbox.SillyTavern.getContext = () => ({ chat: [] });
 sandbox.toastr = { error(message) { assert.fail(message); } };
 scriptVariables.wardrobe_selections = { user: [item.id], char: [second.id] };
 const request = { chat: [{ role: 'user', content: '继续剧情' }] };
@@ -178,14 +191,14 @@ assert.equal(typeof charOnly.chat[0].content, 'string');
 assert.ok(charOnly.chat[0].content.includes('Char（女主）') && !charOnly.chat[0].content.includes('【USER'), '只分配给 Char 时不生成 USER 服装清单');
 
 // 场景匹配需要真实标签；文字和图片模式都必须保留服装顺序与标签对应关系。
-scriptVariables.wardrobe_items = [{ ...item, groupId: 'day' }, { ...second, groupId: 'evening' }];
-scriptVariables.wardrobe_groups = [{ id: 'day', name: '日常' }, { id: 'evening', name: '晚宴' }];
+scriptVariables.wardrobe_items = [{ ...item, groupIds: ['day', 'summer'] }, { ...second, groupIds: ['evening'] }];
+scriptVariables.wardrobe_groups = [{ id: 'day', name: '日常' }, { id: 'evening', name: '晚宴' }, { id: 'summer', name: '夏季' }];
 loadGarments();
 for (const wearer of ['user', 'char']) {
     for (const content_type of ['text', 'image', 'text_image']) {
         const parts = buildWearerContent(scriptVariables.wardrobe_items, wearer, { content_type }, templates, names, imageTemplates);
         const text = parts[0].text;
-        assert.ok(text.includes(`1. ${item.name}：日常`), '第一套标签对应第一张图片');
+        assert.ok(text.includes(`1. ${item.name}：日常、夏季`), '第一套标签对应第一张图片');
         assert.ok(text.includes(`2. ${second.name}：晚宴`), '第二套标签对应第二张图片');
         const untagged = buildWearerContent([item], wearer, { content_type }, templates, names, imageTemplates);
         assert.ok(!untagged[0].text.includes('服装标签（用于匹配场景）'), '未分组的服装不补造场景标签');
