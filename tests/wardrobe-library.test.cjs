@@ -25,6 +25,23 @@ let sequence = 0;
 let confirmation = true;
 let promptValue = '';
 let chatId = 'chat';
+let characterAvatar = '角色甲.png';
+let groupId = null;
+let duplicateAction = 'keep';
+let duplicatePrompts = 0;
+
+/**
+ * 模拟原生重复项对话框，驱动真实选择回调并记录提示次数。
+ * @returns {Object} 可显示、关闭并读取选择结果的对话框替身。
+ */
+function createImportDialog() {
+    let onClose;
+    return {
+        setAttribute() {}, querySelector: () => ({}), remove() {},
+        addEventListener: (_name, callback) => { onClose = callback; },
+        showModal() { duplicatePrompts++; this.returnValue = duplicateAction; onClose(); },
+    };
+}
 
 /**
  * 模拟酒馆图片上传、读取和删除，断言使用真实请求参数，文件内容保持字节一致。
@@ -89,7 +106,7 @@ function control(selector) {
 
 const document = {
     body: { append() {} },
-    createElement: () => ({ click() { downloads.push({ href: this.href, name: this.download }); }, remove() {} }),
+    createElement: tag => tag === 'dialog' ? createImportDialog() : ({ click() { downloads.push({ href: this.href, name: this.download }); }, remove() {} }),
 };
 const sandbox = {
     window: { parent: {
@@ -98,7 +115,8 @@ const sandbox = {
         // 用可手动触发的计时器验证提示生命周期，不让回归测试实际等待三秒。
         setTimeout: (callback, delay) => { const id = ++timerSequence; statusTimers.set(id, { callback, delay }); return id; },
         clearTimeout: id => statusTimers.delete(id),
-        crypto: { randomUUID: () => `new-${++sequence}` },
+        crypto: { randomUUID: () => `new-${++sequence}`, subtle: require('node:crypto').webcrypto.subtle },
+        atob: value => Buffer.from(value, 'base64').toString('binary'),
         URL: { createObjectURL: blob => { const url = `blob:${++sequence}`; blobs.set(url, blob); return url; }, revokeObjectURL: url => blobs.delete(url) },
         confirm: () => confirmation, prompt: () => promptValue,
     } },
@@ -107,15 +125,19 @@ const sandbox = {
         if (writesFail) throw new Error('存储失败');
         Object.assign(option.type === 'script' ? scriptVariables : chatVariables, structuredClone(data));
     },
-    SillyTavern: { getCurrentChatId: () => chatId, getRequestHeaders: () => ({ 'X-CSRF-Token': 'test-token' }) },
+    SillyTavern: {
+        getCurrentChatId: () => chatId, getRequestHeaders: () => ({ 'X-CSRF-Token': 'test-token' }),
+        getContext: () => ({ characterId: 0, characters: [{ avatar: characterAvatar }], groupId }),
+    },
     toastr: { error: message => notices.push(message), success: message => notices.push(message) },
     console,
     recordDetailRefresh: () => { detailRefreshes++; },
-    testPanel: { querySelector: control, querySelectorAll: selector => selector === 'input[data-wearer]' ? wearerInputs : [] },
+    testPanel: { append() {}, querySelector: control, querySelectorAll: selector => selector === 'input[data-wearer]' ? wearerInputs : [] },
 };
 vm.createContext(sandbox);
 const hooks = `
 panel = testPanel;
+settingsPanel = { open: false };
 root = { isConnected: true };
 refreshWardrobe = () => { recordDetailRefresh(); renderWearerState(); };
 const actualRenderGarmentLibrary = renderGarmentLibrary;
@@ -129,6 +151,7 @@ globalThis.api = { parseWardrobeData, parseWardrobeFile, loadGarments, exportGar
     deleteGarments, addGarmentGroup, deleteGarmentGroup, moveCheckedGarments, selectAllGarments,
     readWearerSelections, selectWearer, renderWearerState, handleBulkAction, toggleMultiSelect, checkGarment, renderBulkState: actualRenderBulkState,
     searchGarments, sortGarments,
+    handleGarmentTransfer, selectSelectionScope,
     state: () => ({ garments, garmentGroups, currentGroup, selectedGarmentId, checkedGarmentIds, multiSelectMode }),
     selectGroup: id => { currentGroup = id; },
     showIds: ids => { visibleGarmentIds = new Set(ids); },
@@ -462,6 +485,8 @@ async function main() {
     await checkOutfitManager();
     await checkFavorites();
     await checkLibraryBrowsing();
+    await checkImportDuplicatesAndTransfers();
+    await checkSelectionScopes();
     console.log('通过多选与操作栏显隐、衣柜导出回读、标签存储、可见范围全选、批量归类与角色应用、删除及失败回滚检查。');
     console.log('通过图片落盘、逐张迁移及重试、读取缓存、多模态注入、自包含备份、原图格式及删除和导入回滚检查。');
 }
@@ -595,7 +620,7 @@ async function checkFavorites() {
     assert.equal(api.parseWardrobeData(backup).items.get('blue').favorite, true, '导出回读保留收藏状态');
 
     // 使用真实渲染函数检查列表和计数，避免只测存档却漏掉左侧收藏仍为空的问题。
-    document.createElement = createLibraryNode;
+    document.createElement = tag => tag === 'dialog' ? createImportDialog() : createLibraryNode();
     document.createDocumentFragment = createLibraryNode;
     const categories = ['all', 'coats', 'favorites', 'recent'].map(category => ({
         dataset: { category }, querySelector: () => control(`count-${category}`),
@@ -732,6 +757,200 @@ async function checkLibraryBrowsing() {
     assert.equal(control('[name="garment_description"]').value, '不能被搜索和排序覆盖的草稿');
     assert.doesNotMatch(source, /data-detail(?:-page)?="preferences"|tw-detail-placeholder/, '详情设置页及专属占位样式已移除');
     console.log('通过搜索防抖及组合筛选、四种排序、搜索后全选、最近使用排序与持久化、失败保留和详情草稿检查。');
+}
+
+/**
+ * 验证重复备份的三种处理、字节哈希、整批取消和回滚，以及拖放／粘贴共用导入入口。
+ * @returns {Promise<void>} 导入及资源断言完成后结束。
+ */
+async function checkImportDuplicatesAndTransfers() {
+    scriptVariables.wardrobe_items = [blue, red];
+    scriptVariables.wardrobe_groups = [];
+    scriptVariables.wardrobe_selections = { user: ['blue'], char: ['red'] };
+    api.selectGroup('*');
+    api.selectCategory('all');
+    api.sendType('text');
+    api.loadGarments();
+    await api.migrateLegacyImages();
+    const storedImage = api.state().garments.get('blue').image;
+    const backup = { format: 'tw-wardrobe', version: 1, groups: [], items: [{ ...blue, description: '备份中的新描述', favorite: true }, red] };
+    const input = { value: 'selected', files: [{ name: '重复.json', type: 'application/json', text: async () => JSON.stringify(backup) }] };
+    const beforeUploads = uploads;
+    let prompts = duplicatePrompts;
+    duplicateAction = 'skip';
+    await api.importGarments({ currentTarget: input });
+    await api.importGarments({ currentTarget: input });
+    assert.equal(api.state().garments.size, 2, '相同备份重复导入不增加服装');
+    assert.equal(uploads, beforeUploads, '跳过不上传任何图片');
+    assert.equal(duplicatePrompts, prompts + 2, `每批重复项只提示一次；最近提示：${notices.at(-1)}`);
+    assert.equal(api.state().garments.get('blue').description, blue.description, '跳过保留已有元数据');
+
+    duplicateAction = 'overwrite';
+    await api.importGarments({ currentTarget: input });
+    assert.equal(api.state().garments.size, 2);
+    assert.equal(api.state().garments.get('blue').description, '备份中的新描述');
+    assert.equal(api.state().garments.get('blue').favorite, true);
+    assert.equal(api.state().garments.get('blue').image, storedImage, '相同原图复用既有路径');
+    assert.equal(uploads, beforeUploads, '覆盖无需重复上传相同原图');
+    assert.equal(api.readWearerSelections().user.has('blue'), true, '覆盖保留原 ID 和应用关联');
+    assert.equal(api.readWearerSelections().char.has('red'), true);
+
+    const beforeOverwriteFailure = JSON.stringify(scriptVariables);
+    backup.items[0].description = '保存失败时不能写入的描述';
+    writesFail = true;
+    await api.importGarments({ currentTarget: input });
+    writesFail = false;
+    assert.equal(JSON.stringify(scriptVariables), beforeOverwriteFailure, '覆盖存储失败保留原服装和应用关联');
+    assert.equal(api.state().garments.get('blue').description, '备份中的新描述');
+    backup.items[0].description = '备份中的新描述';
+
+    duplicateAction = 'keep';
+    await api.importGarments({ currentTarget: input });
+    assert.equal(api.state().garments.size, 4, '明确保留两份才增加副本');
+    assert.equal(api.readWearerSelections().user.size, 1, '副本不自动应用');
+    const beforeCancel = JSON.stringify(scriptVariables);
+    const cancelUploads = uploads;
+    duplicateAction = '';
+    await api.importGarments({ currentTarget: input });
+    assert.equal(JSON.stringify(scriptVariables), beforeCancel, '取消保留整批原存档');
+    assert.equal(uploads, cancelUploads, '取消在上传前发生');
+    assert.equal(input.value, '');
+
+    // 同名但原图不同、同图但名称不同都不是重复，不能仅按文件名或 ID 去重。
+    duplicateAction = 'skip';
+    prompts = duplicatePrompts;
+    input.files = [{ name: '不同.json', text: async () => JSON.stringify({ format: 'tw-wardrobe', version: 1, groups: [], items: [
+        { ...blue, id: 'different-image', image: 'data:image/png;base64,d29ybGQ=' },
+        { ...blue, id: 'different-name', name: '另一名称' },
+    ] }) }];
+    await api.importGarments({ currentTarget: input });
+    assert.equal(api.state().garments.size, 6);
+    assert.equal(duplicatePrompts, prompts, '仅名称与哈希同时相同才提示');
+
+    input.files = [{ name: '批内.json', text: async () => JSON.stringify({ format: 'tw-wardrobe', version: 1, groups: [], items: [
+        { ...blue, id: 'batch-one', name: '批内重复' }, { ...red, id: 'batch-two', name: '批内重复' },
+    ] }) }];
+    const beforeBatch = uploads;
+    await api.importGarments({ currentTarget: input });
+    assert.equal(api.state().garments.size, 7, '同一备份内部的重复也受处理方式控制');
+    assert.equal(uploads, beforeBatch + 1);
+
+    // 全部文件先校验，混入坏文件时连前面的有效图片都不上传。
+    const beforeInvalid = JSON.stringify(scriptVariables);
+    const invalidUploads = uploads;
+    input.files = [new File(['valid'], '有效.png', { type: 'image/png' }), { name: '坏.json', text: async () => '{bad' }];
+    await api.importGarments({ currentTarget: input });
+    assert.equal(JSON.stringify(scriptVariables), beforeInvalid);
+    assert.equal(uploads, invalidUploads);
+
+    const transferFile = new File(['transfer-image'], '拖入.png', { type: 'image/png' });
+    let prevented = 0;
+    const transfer = {
+        type: 'dragover', dataTransfer: { types: ['Files'], files: [transferFile] },
+        target: { closest: () => null }, preventDefault() { prevented++; },
+    };
+    await api.handleGarmentTransfer(transfer);
+    assert.equal(transfer.dataTransfer.dropEffect, 'copy');
+    transfer.type = 'drop';
+    await api.handleGarmentTransfer(transfer);
+    assert.equal(prevented, 2);
+    assert.ok(Array.from(api.state().garments.values()).some(item => item.name === '拖入'));
+    const afterDrop = api.state().garments.size;
+    await api.handleGarmentTransfer({ ...transfer, type: 'paste', clipboardData: { files: [transferFile] } });
+    assert.equal(api.state().garments.size, afterDrop, '粘贴图片也走重复项检查');
+    const pasted = new File(['clipboard-image'], '粘贴.png', { type: 'image/png' });
+    await api.handleGarmentTransfer({ ...transfer, type: 'paste', clipboardData: { files: [pasted] } });
+    assert.equal(api.state().garments.size, afterDrop + 1, '剪贴板图片成功上传');
+    const beforeTextPaste = prevented;
+    await api.handleGarmentTransfer({ ...transfer, type: 'paste', clipboardData: { files: [pasted] }, target: { closest: () => ({}) } });
+    await api.handleGarmentTransfer({ ...transfer, type: 'paste', clipboardData: { files: [] } });
+    assert.equal(prevented, beforeTextPaste, '输入框及纯文字粘贴不被拦截');
+    input.files = [{ name: '空标签.json', text: async () => JSON.stringify({ format: 'tw-wardrobe', version: 1, items: [], groups: [{ id: 'empty-backup', name: '备份的空标签' }] }) }];
+    await api.importGarments({ currentTarget: input });
+    assert.ok(Array.from(api.state().garmentGroups.values()).includes('备份的空标签'), '只有空标签的整库备份仍可恢复');
+    duplicateAction = 'keep';
+    console.log('通过重复项跳过／覆盖／保留、字节哈希、批内去重、取消及校验前置、拖放和剪贴板图片检查。');
+}
+
+/**
+ * 验证全局、角色卡、聊天隔离及真实请求注入，保存失败与缺少上下文时不回退到其他范围。
+ * @returns {Promise<void>} 范围存档、发送及删除清理断言完成后结束。
+ */
+async function checkSelectionScopes() {
+    scriptVariables.wardrobe_items = [blue, red];
+    scriptVariables.wardrobe_groups = [];
+    scriptVariables.wardrobe_selections = { user: ['blue'], char: ['red'] };
+    scriptVariables.wardrobe_scoped_selections = {};
+    delete scriptVariables.wardrobe_selection_scope;
+    characterAvatar = '角色甲.png';
+    chatId = '同名聊天';
+    api.loadGarments();
+    const scopeControl = control('.tw-selection-scope select');
+    control('[name="garment_description"]').value = '切换范围时保留的草稿';
+    scopeControl.value = 'character';
+    api.selectSelectionScope({ currentTarget: scopeControl });
+    assert.equal(api.readWearerSelections().char.size, 0, '首次角色卡范围为空，不复制全局选择');
+    assert.equal(control('[name="garment_description"]').value, '切换范围时保留的草稿');
+    api.applyGarments(['blue'], 'char');
+    api.applyGarments(['red'], 'user');
+    chatId = '角色甲的另一聊天';
+    assert.equal(api.readWearerSelections().char.has('blue'), true, '同一卡跨聊天共用选择');
+    characterAvatar = '角色乙.png';
+    assert.equal(api.readWearerSelections().char.size, 0, '另一角色卡的选择独立');
+    api.applyGarments(['red'], 'char');
+    const request = { chat: [{ role: 'user', content: '继续' }] };
+    await api.injectWardrobeContent(request);
+    assert.match(request.chat[0].content, /红色外套/);
+    assert.doesNotMatch(request.chat[0].content, /蓝色外套/);
+    characterAvatar = '角色甲.png';
+    assert.equal(api.readWearerSelections().char.has('blue'), true, '切回原卡恢复原选择');
+    assert.equal(api.readWearerSelections().user.has('red'), true, 'USER 归属也按范围隔离');
+
+    scopeControl.value = 'chat';
+    api.selectSelectionScope({ currentTarget: scopeControl });
+    assert.equal(api.readWearerSelections().char.size, 0);
+    chatId = '同名聊天';
+    api.applyGarments(['red'], 'char');
+    chatId = '另一聊天';
+    assert.equal(api.readWearerSelections().char.size, 0, '同一卡的两个聊天独立');
+    api.applyGarments(['blue'], 'char');
+    chatId = '同名聊天';
+    assert.equal(api.readWearerSelections().char.has('red'), true);
+    characterAvatar = '角色乙.png';
+    assert.equal(api.readWearerSelections().char.size, 0, '不同卡的同名聊天互不串用');
+    api.applyGarments(['blue'], 'char');
+    groupId = '群组甲';
+    assert.equal(api.readWearerSelections().char.size, 0, '同名群聊与单聊隔离');
+    api.applyGarments(['red'], 'char');
+    groupId = '群组乙';
+    assert.equal(api.readWearerSelections().char.size, 0, '不同群组的同名聊天隔离');
+    groupId = null;
+
+    const beforeFailure = JSON.stringify(scriptVariables);
+    writesFail = true;
+    assert.throws(() => api.applyGarments(['red'], 'char'), /存储失败/);
+    scopeControl.value = 'global';
+    api.selectSelectionScope({ currentTarget: scopeControl });
+    writesFail = false;
+    assert.equal(scopeControl.value, 'chat', '保存范围失败恢复原菜单值');
+    assert.equal(JSON.stringify(scriptVariables), beforeFailure, '失败保留范围、归属和使用时间');
+    chatId = '';
+    assert.equal(api.readWearerSelections().char.size, 0, '首页没有聊天时不读取其他范围');
+    assert.throws(() => api.applyGarments(['blue'], 'char'), /先打开聊天/);
+    const emptyRequest = { chat: [{ role: 'user', content: '继续' }] };
+    await api.injectWardrobeContent(emptyRequest);
+    assert.equal(emptyRequest.chat[0].content, '继续', '无范围上下文时不发送全局服装');
+
+    scopeControl.value = 'global';
+    api.selectSelectionScope({ currentTarget: scopeControl });
+    assert.equal(api.readWearerSelections().user.has('blue'), true);
+    assert.equal(api.readWearerSelections().char.has('red'), true, '全局选择未被独立范围覆盖');
+    api.deleteGarments(new Set(['blue']));
+    assert.ok(!scriptVariables.wardrobe_selections.user.includes('blue'));
+    for (const record of Object.values(scriptVariables.wardrobe_scoped_selections)) {
+        assert.ok(!record.user.includes('blue') && !record.char.includes('blue'), '删除清理所有范围的引用');
+    }
+    console.log('通过三种范围切换、跨卡／跨聊天／群组隔离、请求注入、失败回滚、首页空范围与全范围删除清理检查。');
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });
