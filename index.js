@@ -5210,9 +5210,10 @@ function showGarmentDescription() {
 async function generateGarmentDescription() {
     if (descriptionRequest) return;
     const item = garments.get(selectedGarmentId);
+    // 请求与错误脱敏始终使用同一份已保存连接，避免处理中修改设置后丢失本次密钥。
+    const config = savedApiSettings;
     let request;
     try {
-        const config = savedApiSettings;
         if (config.mode === 'custom' && (!config.apiurl || !config.model)) throw new Error('请先在 API 页保存完整的接口地址与模型。');
         request = { generationId: `wardrobe-description-${window.parent.crypto.randomUUID()}` };
         descriptionRequest = request;
@@ -5226,7 +5227,7 @@ async function generateGarmentDescription() {
         panel.querySelector('[name="garment_description"]').value = result.description;
         setGarmentStatus(result.category !== undefined || result.tags !== undefined ? '分类与标签已保存，名称与描述请保存或应用' : result.name !== undefined ? '名称与描述已生成，请保存或应用' : '描述已生成，请保存或应用');
     } catch (error) {
-        if (root.isConnected && (!request || descriptionRequest === request)) setGarmentStatus(describeApiError(error), true);
+        if (root.isConnected && (!request || descriptionRequest === request)) setGarmentStatus(describeApiError(error, config.key), true);
     } finally {
         if (request && descriptionRequest === request) {
             descriptionRequest = null;
@@ -5253,10 +5254,11 @@ async function generateMissingGarmentDescriptions() {
         return;
     }
     if (!window.parent.confirm(`${currentCategory === 'missing-description' ? '当前筛选中' : '衣柜中'}有 ${ids.length} 张图片尚未识别，是否一键识图？\n仅识别没有描述的图片，已有描述的图片将跳过。识别结果会自动保存。`)) return;
+    // 整批共用同一份连接，错误提示也按该连接移除密钥。
+    const config = savedApiSettings;
     let request;
     let completed = 0;
     try {
-        const config = savedApiSettings;
         if (config.mode === 'custom' && (!config.apiurl || !config.model)) throw new Error('请先在 API 页保存完整的接口地址与模型。');
         request = { generationId: '', bulk: true, completed: 0 };
         descriptionRequest = request;
@@ -5281,7 +5283,7 @@ async function generateMissingGarmentDescriptions() {
         setLibraryStatus(`识图完成，已识别并保存 ${completed} 张图片`);
     } catch (error) {
         if (root.isConnected && (!request || descriptionRequest === request)) {
-            setLibraryStatus(`识图已停止，已保存 ${completed} 张图片。${describeApiError(error)}`, true);
+            setLibraryStatus(`识图已停止，已保存 ${completed} 张图片。${describeApiError(error, config.key)}`, true);
         }
     } finally {
         if (request && descriptionRequest === request) {
@@ -5924,13 +5926,32 @@ function saveSendSettings(event) {
 }
 
 /**
- * 加载脚本配置；旧版跟随预设的参数显示为当前实际数值，使显示、保存与请求保持一致。
+ * 加载浏览器本地连接并迁移旧脚本变量；旧版跟随预设的参数显示为当前实际数值。
  * @returns {void} 无返回值。
  */
 function loadApiSettings() {
-    const saved = getVariables({ type: 'script' }).wardrobe_api;
+    const legacy = getVariables({ type: 'script' }).wardrobe_api;
+    let saved = legacy;
+    let storageFailed = false;
+    try {
+        const storage = window.parent.localStorage;
+        const storageKey = getApiStorageKey();
+        const stored = storage.getItem(storageKey);
+        saved = stored === null ? legacy : JSON.parse(stored);
+        if (saved !== undefined && (!saved || typeof saved !== 'object' || Array.isArray(saved))) {
+            throw new Error('API 配置格式不正确。');
+        }
+        if (legacy !== undefined) {
+            // 先持久保存再删旧变量，防止存储被禁用时丢失密钥；本机已有配置时不被导入的脚本覆盖。
+            if (stored === null) storage.setItem(storageKey, JSON.stringify(saved));
+            deleteVariable('wardrobe_api', { type: 'script' });
+        }
+    } catch {
+        // 不回显存储异常，异常内容可能包含正在迁移的完整连接及密钥。
+        storageFailed = true;
+    }
     const preset = getPreset('in_use').settings;
-    if (saved && typeof saved === 'object') {
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
         apiForm.elements.mode.value = saved.mode === 'custom' ? 'custom' : 'host';
         for (const name of ['apiurl', 'key', 'model']) {
             const value = saved[name];
@@ -5946,6 +5967,15 @@ function loadApiSettings() {
     }
     updateApiMode();
     savedApiSettings = collectApiSettings();
+    if (storageFailed) setApiStatus('API 配置读取或迁移失败，请检查浏览器本地存储权限及脚本变量清理权限；确认成功前不要分享脚本。', true);
+}
+
+/**
+ * 为当前脚本生成浏览器存储键，避免多个衣柜脚本互相覆盖连接；此存储不进入脚本导出。
+ * @returns {string} 当前酒馆站点及脚本使用的本地配置键。
+ */
+function getApiStorageKey() {
+    return `tavern-wardrobe:api:${getScriptId()}`;
 }
 
 /**
@@ -6165,7 +6195,7 @@ function collectApiSettings() {
 }
 
 /**
- * 将配置保存到当前脚本变量，保留同一脚本中其他功能的变量。
+ * 将连接保存在当前浏览器，清理可随脚本导出的旧配置；保存失败时不切换识图使用的连接。
  * @param {SubmitEvent} event API 表单的提交事件。
  * @returns {void} 无返回值。
  */
@@ -6174,11 +6204,12 @@ function saveApiSettings(event) {
     const config = readApiSettings(true);
     if (!config) return;
     try {
-        insertOrAssignVariables({ wardrobe_api: config }, { type: 'script' });
+        window.parent.localStorage.setItem(getApiStorageKey(), JSON.stringify(config));
+        deleteVariable('wardrobe_api', { type: 'script' });
         savedApiSettings = config;
-        setApiStatus('已保存');
-    } catch (error) {
-        setApiStatus(`保存失败：${String(error)}`, true);
+        setApiStatus('已保存到当前浏览器');
+    } catch {
+        setApiStatus('保存失败，请检查浏览器本地存储权限及脚本变量清理权限；确认成功前不要分享脚本。', true);
     }
 }
 
@@ -6233,7 +6264,7 @@ async function requestApi(event) {
         }
     } catch (error) {
         if (apiRequest === request) {
-            const message = describeApiError(error);
+            const message = describeApiError(error, config.key);
             if (action === 'models') {
                 modelListMessage = `获取模型失败：${message}`;
                 modelListError = true;
@@ -6250,11 +6281,12 @@ async function requestApi(event) {
 }
 
 /**
- * 将接口明确返回的鉴权或权限错误转成可操作提示，其余错误保留原始原因。
+ * 将接口明确返回的鉴权或权限错误转成可操作提示，其余错误隐藏本次密钥后保留原因。
  * @param {unknown} error 宿主请求接口抛出的错误。
- * @returns {string} 供模型列表和连接测试共同使用的错误说明。
+ * @param {string} [key] 本次请求使用的密钥，未指定时采用已保存连接的密钥。
+ * @returns {string} 供识图、模型列表和连接测试共同使用的错误说明。
  */
-function describeApiError(error) {
+function describeApiError(error, key = savedApiSettings.key) {
     const message = typeof error?.message === 'string' ? error.message : String(error);
     const status = String(error?.status ?? error?.response?.status ?? '');
     if (status === '401' || /\b401\b|unauthorized|(?:invalid|incorrect|expired)[\s_-]+(?:api[\s_-]+)?key/i.test(message)) {
@@ -6263,7 +6295,8 @@ function describeApiError(error) {
     if (status === '403' || /\b403\b|forbidden/i.test(message)) {
         return '访问被拒绝，请检查 API Key 权限或服务端访问限制';
     }
-    return message;
+    // 上游可能将请求参数写入错误文本；在所有 API 错误进入界面前移除实际使用的密钥。
+    return key ? message.replaceAll(key, '[已隐藏密钥]') : message;
 }
 
 /**
