@@ -229,10 +229,11 @@ const PANEL_HTML = `
             <main class="tw-library" aria-label="服装列表" data-layout="grid" data-multi-select="false">
                 <div class="tw-group-bar">
                     <button type="button" data-action="add-group">新增标签</button>
-                    <nav class="tw-group-tabs" aria-label="服装标签"></nav>
+                    <nav class="tw-group-tabs" aria-label="服装标签">
+                        <button type="button" data-action="manage-groups" aria-label="管理标签" title="重命名与排序">${icon('pencil')}</button>
+                    </nav>
                 </div>
                 <div class="tw-library-toolbar" role="group" aria-label="服装操作">
-                    <button type="button" data-action="manage-groups" aria-label="管理标签" title="重命名与排序">${icon('pencil')}</button>
                     <button type="button" data-action="toggle-multi" aria-pressed="false" aria-controls="tw-bulk-actions">多选</button>
                     <button type="button" data-action="create-combination">${icon('plus')}<span>合并搭配</span></button>
                     <button type="button" data-action="describe-all">一键识图</button>
@@ -1061,6 +1062,11 @@ const PANEL_CSS = `
 #tw-panel .tw-group-tabs {
     flex: 1;
     min-width: 0;
+}
+
+/* 管理入口跟随标签排列在末尾，剩余空间留在它左侧，使按钮靠齐标签栏右端。 */
+#tw-panel .tw-group-tabs > [data-action="manage-groups"] {
+    margin-left: auto;
 }
 
 #tw-panel .tw-group-bar::-webkit-scrollbar,
@@ -4227,7 +4233,8 @@ function renderGarmentGroups() {
     const groups = getFilterGarmentGroups();
     if (currentGroup && currentGroup !== '*' && !groups.has(currentGroup)) currentGroup = '*';
     selectedGroupByFilter.set(currentCategory, currentGroup);
-    panel.querySelector('[data-action="manage-groups"]').disabled = groups.size === 0;
+    const manageButton = panel.querySelector('[data-action="manage-groups"]');
+    manageButton.disabled = groups.size === 0;
     const tabs = hostDocument.createDocumentFragment();
     for (const [id, name] of [['*', '全部'], ['', '未分组'], ...groups]) {
         const button = hostDocument.createElement('button');
@@ -4249,7 +4256,8 @@ function renderGarmentGroups() {
             tabs.append(tab);
         } else tabs.append(button);
     }
-    panel.querySelector('.tw-group-tabs').replaceChildren(tabs);
+    // 复用末尾的管理按钮，标签刷新时保留其点击监听和禁用状态。
+    panel.querySelector('.tw-group-tabs').replaceChildren(tabs, manageButton);
     const select = panel.querySelector('.tw-bulk-group');
     select.replaceChildren();
     for (const [id, name] of [['*', '标签…'], ['', '清空标签'],
