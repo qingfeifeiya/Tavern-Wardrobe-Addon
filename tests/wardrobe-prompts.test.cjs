@@ -41,6 +41,8 @@ const downloads = [];
 const downloadBlobs = new Map();
 const controls = {
     '[name="description_mode"]': { value: 'outfit' },
+    '[name="description_category"]': { value: 'on' },
+    '[name="description_tags"]': { value: 'on' },
     '[name="garment_name"]': { value: '手工填写的名称' },
     '[name="garment_category"]': { value: 'coats' },
     '[name="garment_content_rating"]': { value: 'unrated' },
@@ -395,6 +397,7 @@ async function main() {
     console.log('通过 JSON 名称与描述解析、AI 标签创建及复用、保存失败回滚、纯文本兼容及 USER/Char 模板继承检查。');
     console.log('通过设置导出字段白名单、API 零导出与零覆盖、设置恢复、错误文件及保存失败检查。');
     await checkGeneratedOrganization();
+    await checkDescriptionOptions();
     await checkGeneratedTagApproval();
     await checkBulkDescriptions();
 }
@@ -514,6 +517,62 @@ async function checkGeneratedOrganization() {
     assert.equal(saved.wardrobe_items[0].description, '批量描述');
     assert.ok(saved.wardrobe_items[0].groupIds.some(id => api.state().garmentGroups.get(id) === '正式'), '批量识图自动归入标签分组');
     console.log('通过单张与批量识图自动分类、标签归组、详情同步、旧格式兼容及失败保留检查。');
+}
+
+/**
+ * 验证分类、标签四种选项组合同时约束请求与保存；批量识图沿用同一选项，不触碰关闭项。
+ * @returns {Promise<void>} 单张、旧字段兼容及批量断言通过后结束。
+ */
+async function checkDescriptionOptions() {
+    const image = 'data:image/png;base64,aGVsbG8=';
+    for (const category of ['on', 'off']) for (const tags of ['on', 'off']) {
+        controls['[name="description_category"]'].value = category;
+        controls['[name="description_tags"]'].value = tags;
+        saved.wardrobe_items = [{ id: 'options', name: '原名称', category: 'tops', description: '', image, groupIds: ['daily'] }];
+        saved.wardrobe_groups = [{ id: 'daily', name: '日常' }];
+        api.loadGarments();
+        controls['[name="garment_category"]'].value = 'tops';
+        const previousConfirmations = confirmations.length;
+        // 故意让模型始终返回全部字段，确保关闭项在回复入口被丢弃，而不只是修改提示词。
+        modelReply = JSON.stringify({ name: '生成名称', description: '生成描述', category: 'coats', tags: ['冬季'] });
+        await api.generateGarmentDescription();
+        const request = requests.at(-1).user_input;
+        assert.ok(request.includes(category === 'on' ? 'category 为一个服装分类标识' : 'AI 分类已关闭'));
+        assert.ok(request.includes(tags === 'on' ? 'tags 为标签名称数组' : 'AI 标签已关闭'));
+        assert.equal(saved.wardrobe_items[0].category, category === 'on' ? 'coats' : 'tops');
+        assert.equal(controls['[name="garment_category"]'].value, category === 'on' ? 'coats' : 'tops');
+        assert.equal(saved.wardrobe_groups.length, tags === 'on' ? 2 : 1);
+        assert.deepEqual(saved.wardrobe_items[0].groupIds.map(id => api.state().garmentGroups.get(id)), tags === 'on' ? ['日常', '冬季'] : ['日常']);
+        assert.equal(confirmations.length - previousConfirmations, tags === 'on' ? 1 : 0, '关闭标签时不弹出创建确认');
+        assert.equal(controls['[name="garment_name"]'].value, '生成名称');
+        assert.equal(controls['[name="garment_description"]'].value, '生成描述');
+        assert.equal(saved.wardrobe_items[0].description, '', '单张识图仍保留描述草稿流程');
+    }
+    // 旧提示词用 category 返回标签；关闭分类后仍能使用标签，关闭标签则不从旧字段创建。
+    for (const tags of ['on', 'off']) {
+        controls['[name="description_tags"]'].value = tags;
+        modelReply = JSON.stringify({ name: '旧名称', description: '旧描述', category: ['旧标签'] });
+        const previousGroups = saved.wardrobe_groups.length;
+        await api.generateGarmentDescription();
+        assert.equal(saved.wardrobe_groups.length, previousGroups + (tags === 'on' ? 1 : 0));
+        assert.equal(saved.wardrobe_items[0].category, 'tops');
+    }
+    saved.wardrobe_items = [
+        { id: 'bulk-off-a', name: '甲', category: 'tops', description: '', image, groupIds: ['daily'] },
+        { id: 'bulk-off-b', name: '乙', category: 'shoes', description: '', image, groupIds: [] },
+    ];
+    saved.wardrobe_groups = [{ id: 'daily', name: '日常' }];
+    api.loadGarments();
+    controls['[name="garment_description"]'].value = '';
+    modelReply = JSON.stringify({ name: '批量名称', description: '批量描述', category: 'outfits', tags: ['不应新增'] });
+    await api.generateMissingGarmentDescriptions();
+    assert.deepEqual(saved.wardrobe_items.map(item => item.category), ['tops', 'shoes'], '批量关闭分类时保留每张原分类');
+    assert.deepEqual(saved.wardrobe_items.map(item => item.groupIds), [['daily'], []], '批量关闭标签时保留原标签');
+    assert.ok(saved.wardrobe_items.every(item => item.name === '批量名称' && item.description === '批量描述'), '关闭可选项仍生成并保存批量描述');
+    assert.equal(saved.wardrobe_groups.length, 1);
+    controls['[name="description_category"]'].value = 'on';
+    controls['[name="description_tags"]'].value = 'on';
+    console.log('通过分类与标签四种选项、关闭项无写入或确认、旧字段兼容及批量描述生成检查。');
 }
 
 /**

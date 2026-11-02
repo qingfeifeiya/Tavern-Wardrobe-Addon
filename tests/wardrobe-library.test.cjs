@@ -24,6 +24,7 @@ let writesFail = false;
 let sequence = 0;
 let confirmation = true;
 let promptValue = '';
+let promptDefault = '';
 let chatId = 'chat';
 let characterAvatar = '角色甲.png';
 let groupId = null;
@@ -157,7 +158,9 @@ const sandbox = {
         crypto: { randomUUID: () => `new-${++sequence}`, subtle: require('node:crypto').webcrypto.subtle },
         atob: value => Buffer.from(value, 'base64').toString('binary'),
         URL: { createObjectURL: blob => { const url = `blob:${++sequence}`; blobs.set(url, blob); return url; }, revokeObjectURL: url => blobs.delete(url) },
-        confirm: () => confirmation, prompt: () => promptValue,
+        confirm: () => confirmation,
+        /** 记录标签输入框的预填值；参数为提示与默认值，返回模拟的用户输入。 */
+        prompt: (_message, defaultValue) => { promptDefault = defaultValue; return promptValue; },
     } },
     getVariables: option => option.type === 'script' ? scriptVariables : chatVariables,
     insertOrAssignVariables: (data, option) => {
@@ -1563,7 +1566,7 @@ async function checkCombinations() {
 }
 
 /**
- * 验证多标签迁移、真实复选框与卡片渲染、组合筛选、批量增减、备份回读及失败回滚。
+ * 验证多标签迁移、真实复选框与卡片渲染、下拉创建、组合筛选、批量增减、备份回读及失败回滚。
  * @returns {Promise<void>} 数据与交互断言完成后结束。
  */
 async function checkMultipleTags() {
@@ -1713,6 +1716,58 @@ async function checkMultipleTags() {
     assert.deepEqual(manyTags.children.map(tag => tag.textContent), ['Summer', '标签001', '+298']);
     assert.ok(manyTags.title.endsWith('标签299'), '悬停包含未渲染的末尾标签');
     assert.equal(manyTags.attributes['aria-label'], manyTags.title, '读屏同样可以获取全部标签');
+    // 下拉内创建与关联一次提交；验证重复、取消和失败时不破坏既有勾选与编辑草稿。
+    const addTagEvent = { currentTarget: { dataset: { action: 'add-garment-group' } } };
+    const selectedId = api.state().selectedGarmentId;
+    const previousGroup = api.state().currentGroup;
+    const beforeDetailRefresh = detailRefreshes;
+    let searchFocused = false;
+    /** 记录搜索框焦点恢复；无参数，无返回值。 */
+    search.focus = () => { searchFocused = true; };
+    picker.open = true;
+    search.value = '  下拉新标签  ';
+    control('[name="garment_name"]').value = '新建标签时保留的名称草稿';
+    control('[name="garment_description"]').value = '新建标签时保留的描述草稿';
+    promptValue = '  下拉新标签  ';
+    api.addGarmentGroup(addTagEvent);
+    const created = scriptVariables.wardrobe_groups.find(group => group.name === '下拉新标签');
+    assert.equal(promptDefault, '下拉新标签', '搜索内容预填为标签名');
+    assert.ok(scriptVariables.wardrobe_items[0].groupIds.includes(created.id), '创建后自动关联当前服装');
+    assert.equal(fieldset.querySelectorAll().find(input => input.value === created.id).checked, true, '新增选项立即勾选');
+    assert.equal(api.state().currentGroup, previousGroup, '下拉创建不切换列表标签');
+    assert.equal(api.state().selectedGarmentId, selectedId, '下拉创建保留当前服装');
+    assert.equal(picker.open, true, '保存后仍可继续选择');
+    assert.equal(search.value, '', '成功后显示全部标签');
+    assert.equal(searchFocused, true, '成功后返回搜索框继续操作');
+    assert.equal(detailRefreshes, beforeDetailRefresh, '创建标签不重填详情');
+    assert.equal(control('[name="garment_name"]').value, '新建标签时保留的名称草稿');
+    assert.equal(control('[name="garment_description"]').value, '新建标签时保留的描述草稿');
+    const afterCreation = JSON.stringify(scriptVariables);
+    api.addGarmentGroup(addTagEvent);
+    assert.equal(JSON.stringify(scriptVariables), afterCreation, '同名复用且不重复勾选');
+    for (const cancelled of [null, '   ']) {
+        promptValue = cancelled;
+        api.addGarmentGroup(addTagEvent);
+        assert.equal(JSON.stringify(scriptVariables), afterCreation, '取消或空白不产生标签');
+    }
+    search.value = '保存失败的标签';
+    promptValue = search.value;
+    writesFail = true;
+    api.addGarmentGroup(addTagEvent);
+    writesFail = false;
+    assert.equal(JSON.stringify(scriptVariables), afterCreation, '失败时标签与归属都不提交');
+    assert.equal(api.state().garmentGroups.size, 301, '失败不留下内存中的空标签');
+    assert.equal(search.value, '保存失败的标签', '失败保留搜索内容便于重试');
+    assert.match(control('.tw-garment-status').textContent, /存储失败/);
+    api.selectItem(null);
+    api.renderFullLibrary();
+    assert.equal(control('[data-action="add-garment-group"]').disabled, true, '未选服装时禁用详情创建');
+    api.selectItem(selectedId);
+    api.renderFullLibrary();
+    assert.equal(control('[data-action="add-garment-group"]').disabled, false, '选中服装后可创建');
+    search.value = '';
+    api.filterGarmentGroupOptions();
+    console.log('通过下拉内创建并勾选、同名复用、取消、失败回滚、禁用状态及草稿保留检查。');
     console.log('通过 300 标签的搜索多选、输入合并、隐藏选择保留、数量摘要、零结果、Escape 与框外收起检查。');
     console.log('通过多标签迁移、复选框复用、卡片与组合筛选、批量添加移除清空、备份回读及失败回滚检查。');
 }
