@@ -113,6 +113,24 @@ for (const position of ['system_end', 'context_end', 'user_end']) {
 const literal = buildWearerContent([{ ...item, description: '{{char}} $&' }], 'user', { content_type: 'text' }, templates, names);
 assert.ok(literal[0].text.includes('{{char}} $&'), '服装描述中的占位符和替换符不得被二次解释');
 
+// 分级固定随候选发送，不依赖模板变量；同一清单中的 SFW 与 NSFW 必须各自对应正确服装。
+for (const wearer of ['user', 'char']) {
+    for (const content_type of ['text', 'image', 'text_image']) {
+        const ratedItems = [{ ...item, contentRating: 'sfw' }, { ...second, contentRating: 'nsfw' }];
+        const custom = { [wearer]: { single: '自定义', wardrobe: '自定义' } };
+        const parts = buildWearerContent(ratedItems, wearer, { content_type }, custom, names, { single: '图片参考', wardrobe: '图片参考' }, new Set([second.id]));
+        assert.ok(parts[0].text.includes(`${item.name}（单品；分类：外套；内容分级：SFW（日常／非色情服装）`));
+        assert.ok(parts[0].text.includes(`${second.name}（单品；分类：外套；内容分级：NSFW（色情／成人服装）`));
+        assert.match(parts[0].text, /当前实际穿着[^\n]*\n红色长裙[^\n]*内容分级：NSFW/);
+        assert.ok(parts[0].text.includes('NSFW 标记不代表当前剧情允许色情内容'), '分级说明性质，不自动触发色情剧情');
+        const unrated = buildWearerContent([item], wearer, { content_type }, custom, names);
+        assert.ok(unrated[0].text.includes('内容分级：未标注'), '旧服装不冒充已确认的 SFW');
+        const disabled = buildWearerContent(ratedItems, wearer, { content_type, send_content_rating: false }, custom, names, { single: '图片参考', wardrobe: '图片参考' }, new Set([second.id]));
+        assert.doesNotMatch(disabled[0].text, /内容分级|NSFW|SFW/, '关闭后候选、当前穿着和说明均不发送分级');
+        assert.equal(ratedItems[1].contentRating, 'nsfw', '开关不改写服装数据');
+    }
+}
+
 // 自定义模板省略描述变量时，文字资料仍随候选清单提供，图片模式则保持不自动附加描述。
 const briefTemplates = { user: { single: '自定义简短模板 {{name}}', wardrobe: '自定义简短模板 {{count}}' } };
 for (const content_type of ['text', 'image', 'text_image']) {

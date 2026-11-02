@@ -18,7 +18,7 @@ const currentButtons = ['user', 'char'].map(wearer => ({
 }));
 const sendStatus = { textContent: '', dataset: {} };
 const sendForm = {
-    elements: { content_type: { value: 'text' }, position: { value: 'user_end' }, marker_mode: { value: 'strip' } },
+    elements: { content_type: { value: 'text' }, position: { value: 'user_end' }, marker_mode: { value: 'strip' }, send_content_rating: { checked: true } },
     querySelector: () => sendStatus,
 };
 const sandbox = {
@@ -194,6 +194,27 @@ async function checkCurrentOutfits() {
     assert.equal(messages[0].tool_calls, oldMessage.tool_calls);
     assert.equal(messages[1], userMessage);
     assert.ok(oldMessage.content[0].text.includes('outfit:'));
+
+    // 开关以保存后的配置生效，失败时不能提前影响下一次请求，也不能清掉服装分级。
+    reset();
+    for (const enabled of [false, true]) {
+        sendForm.elements.send_content_rating.checked = enabled;
+        api.saveSendSettings({ preventDefault() {} });
+        assert.equal(saved.wardrobe_send.send_content_rating, enabled, '保存分级开关');
+        sendForm.elements.send_content_rating.checked = !enabled;
+        api.loadSendSettings();
+        assert.equal(sendForm.elements.send_content_rating.checked, enabled, '重载回填分级开关');
+        const event = { chat: [{ role: 'user', content: '继续' }] };
+        await api.injectWardrobeContent(event);
+        const blocks = event.chat[0].content.filter(part => part.type === 'text');
+        assert.equal(blocks.some(part => part.text.includes('内容分级')), enabled, '真实注入遵循已保存开关');
+    }
+    writesFail = true;
+    sendForm.elements.send_content_rating.checked = false;
+    api.saveSendSettings({ preventDefault() {} });
+    writesFail = false;
+    assert.equal(api.state().sendSettings.send_content_rating, true, '保存失败仍使用原开关');
+    assert.equal(saved.wardrobe_send.send_content_rating, true, '保存失败保留存档开关');
 
     for (const mode of ['strip', 'keep', 'off']) {
         reset();

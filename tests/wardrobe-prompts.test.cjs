@@ -27,10 +27,11 @@ function createForm(fields, owner = '') {
 const forms = new Map(['user', 'char', 'image'].map(owner => [`[data-template-owner="${owner}"]`, createForm(['single', 'wardrobe'], owner)]));
 const descriptionForm = createForm(['outfit', 'item']);
 forms.set('.tw-description-form', descriptionForm);
-const sendForm = createForm(['content_type', 'position', 'marker_mode']);
+const sendForm = createForm(['content_type', 'position', 'marker_mode', 'send_content_rating']);
 sendForm.elements.content_type.value = 'text';
 sendForm.elements.position.value = 'user_end';
 sendForm.elements.marker_mode.value = 'strip';
+sendForm.elements.send_content_rating.checked = true;
 const dataInput = { files: [], value: '', click() { this.opened = true; } };
 const dataStatus = { textContent: '', dataset: {} };
 const dataButtons = ['import-data', 'export-data'].map(action => ({ dataset: { action }, disabled: false }));
@@ -42,6 +43,7 @@ const controls = {
     '[name="description_mode"]': { value: 'outfit' },
     '[name="garment_name"]': { value: '手工填写的名称' },
     '[name="garment_category"]': { value: 'coats' },
+    '[name="garment_content_rating"]': { value: 'unrated' },
     '[name="garment_group"]': { disabled: false },
     '[name="garment_description"]': { value: '' },
     '.tw-garment-status': { textContent: '', dataset: {} },
@@ -69,6 +71,7 @@ let writesFail = false;
 let modelReply = '  生成的服装描述  ';
 let idSequence = 0;
 let confirmation = true;
+let confirmationEffect;
 const confirmations = [];
 const stoppedGenerations = [];
 let generationEffect;
@@ -84,7 +87,7 @@ const sandbox = {
         },
         matchMedia: () => ({ matches: false }), AbortController, Blob,
         crypto: { randomUUID: () => `test-${++idSequence}` },
-        confirm: message => { confirmations.push(message); return confirmation; },
+        confirm: message => { confirmations.push(message); return confirmationEffect ? confirmationEffect(message) : confirmation; },
         setTimeout: () => 0, clearTimeout() {},
         /** 返回文件原图以验证描述生成前的异步读取；无参数，返回图片响应。 */
         fetch: async () => { imageReads++; return { ok: true, blob: async () => new Blob(['hello']) }; },
@@ -304,7 +307,8 @@ async function main() {
     assert.deepEqual(Object.keys(backup).sort(), ['format', 'settings', 'version']);
     assert.equal(backup.format, 'tw-wardrobe-settings');
     assert.deepEqual(Object.keys(backup.settings).sort(), ['description_prompts', 'send', 'templates']);
-    assert.deepEqual(Object.keys(backup.settings.send).sort(), ['content_type', 'marker_mode', 'position']);
+    assert.deepEqual(Object.keys(backup.settings.send).sort(), ['content_type', 'marker_mode', 'position', 'send_content_rating']);
+    assert.equal(backup.settings.send.send_content_rating, true, '设置备份包含分级开关');
     assert.equal(backup.settings.send.marker_mode, 'strip', '导出包含默认换装记录模式');
     assert.deepEqual(Object.keys(backup.settings.description_prompts).sort(), ['item', 'outfit']);
     assert.deepEqual(Object.keys(backup.settings.templates).sort(), ['char', 'image', 'user']);
@@ -319,6 +323,7 @@ async function main() {
     const apiBefore = JSON.stringify(saved.wardrobe_api);
     backup.settings.send.position = 'context_end';
     backup.settings.send.marker_mode = 'keep';
+    backup.settings.send.send_content_rating = false;
     backup.settings.templates.user.single = '恢复的 USER 模板 {{name}}';
     backup.settings.description_prompts.outfit = '恢复的服装提示词';
     // 即使外部文件夹带 API 字段，导入也只能写入三个允许的脚本变量。
@@ -337,8 +342,15 @@ async function main() {
     assert.equal(sendForm.elements.position.value, 'context_end', '导入后刷新发送选项');
     assert.equal(saved.wardrobe_send.marker_mode, 'keep', '导入保存换装记录模式');
     assert.equal(sendForm.elements.marker_mode.value, 'keep', '导入后刷新换装记录选项');
+    assert.equal(saved.wardrobe_send.send_content_rating, false, '设置导入保留关闭分级');
+    assert.equal(sendForm.elements.send_content_rating.checked, false, '设置导入回填分级开关');
     const legacyBackup = structuredClone(backup);
     delete legacyBackup.settings.send.marker_mode;
+    delete legacyBackup.settings.send.send_content_rating;
+    assert.equal(api.parseWardrobeSettingsData(legacyBackup).send.send_content_rating, true, '旧设置备份默认开启分级');
+    const invalidRating = structuredClone(backup);
+    invalidRating.settings.send.send_content_rating = 'false';
+    assert.throws(() => api.parseWardrobeSettingsData(invalidRating), /发送内容设置无效/, '分级开关仅接受布尔值');
     assert.equal(api.parseWardrobeSettingsData(legacyBackup).send.marker_mode, 'strip', '旧备份缺失模式时使用默认值');
     const invalidMarker = structuredClone(backup);
     invalidMarker.settings.send.marker_mode = 'invalid';
@@ -382,7 +394,126 @@ async function main() {
     console.log('通过图片模板保存、旧模板兼容、描述提示词持久化、生成类型切换、实际请求及失败保留检查。');
     console.log('通过 JSON 名称与描述解析、AI 标签创建及复用、保存失败回滚、纯文本兼容及 USER/Char 模板继承检查。');
     console.log('通过设置导出字段白名单、API 零导出与零覆盖、设置恢复、错误文件及保存失败检查。');
+    await checkGeneratedOrganization();
+    await checkGeneratedTagApproval();
     await checkBulkDescriptions();
+}
+
+/**
+ * 验证识图携带全部标签、已有标签免确认、新标签同意或拒绝及批量识图的逐图授权。
+ * @returns {Promise<void>} 标签创建授权与结果保留断言通过后结束。
+ */
+async function checkGeneratedTagApproval() {
+    saved.wardrobe_selections = { user: [], char: [] };
+    saved.wardrobe_groups = [{ id: 'daily', name: '日常' }, { id: 'formal', name: '正式', filters: ['shoes'] }];
+    saved.wardrobe_items = [{ id: 'approval', name: '待识别', category: 'other', description: '', image: 'data:image/png;base64,aGVsbG8=', groupIds: ['daily'] }];
+    api.loadGarments();
+    controls['[name="garment_description"]'].value = '';
+    modelReply = JSON.stringify({ name: '外套', description: '外套描述', category: 'coats', tags: ['正式'] });
+    const beforeExisting = confirmations.length;
+    await api.generateGarmentDescription();
+    assert.equal(confirmations.length, beforeExisting, '只有已有标签时不弹创建确认');
+    assert.ok(requests.at(-1).user_input.includes('现有标签：["日常","正式"]'), '发送完整标签表，包括其他分类中的标签');
+    assert.ok(requests.at(-1).user_input.includes('用户确认后才能创建'), '请求明确新标签需要用户同意');
+    assert.deepEqual(saved.wardrobe_items[0].groupIds, ['daily', 'formal'], '直接匹配已有标签，保留手动标签');
+
+    modelReply = JSON.stringify({ name: '冬季外套', description: '冬季外套描述', category: 'coats', tags: ['日常', ' 冬季 ', '冬季', '保暖'] });
+    await api.generateGarmentDescription();
+    assert.equal(confirmations.length, beforeExisting + 1, '同张图片多个新标签只确认一次');
+    assert.match(confirmations.at(-1), /冬季外套.*建议新增以下标签：[\s\S]*冬季、保暖/);
+    assert.ok(!confirmations.at(-1).includes('日常'), '确认框只列新标签');
+    assert.deepEqual(saved.wardrobe_groups.map(group => group.name), ['日常', '正式', '冬季', '保暖'], '同意后创建且去重');
+    await api.generateGarmentDescription();
+    assert.equal(confirmations.length, beforeExisting + 1, '创建成功后再次匹配不重复确认');
+    assert.ok(requests.at(-1).user_input.includes('现有标签：["日常","正式","冬季","保暖"]'), '后续识图携带刚获准创建的标签');
+
+    confirmation = false;
+    // 旧版 category 标签字段同样必须获得授权，不能绕过新标签创建规则。
+    modelReply = JSON.stringify({ name: '夏季服装', description: '夏季描述', category: ['夏季', '日常'] });
+    await api.generateGarmentDescription();
+    assert.ok(!saved.wardrobe_groups.some(group => group.name === '夏季'), '拒绝后不创建旧格式提议的新标签');
+    assert.equal(controls['[name="garment_name"]'].value, '夏季服装', '拒绝新标签仍填入名称');
+    assert.equal(controls['[name="garment_description"]'].value, '夏季描述', '拒绝新标签仍填入描述');
+    assert.equal(controls['.tw-garment-status'].dataset.error, 'false', '拒绝新增不视为识图失败');
+
+    saved.wardrobe_items = saved.wardrobe_items.concat({ ...saved.wardrobe_items[0], id: 'second', name: '第二件', groupIds: [] });
+    api.loadGarments();
+    controls['[name="garment_description"]'].value = '';
+    confirmationEffect = message => !message.includes('建议新增以下标签');
+    modelReply = JSON.stringify({ name: '批量套装', description: '批量描述', category: 'outfits', tags: ['正式', '待批准'] });
+    const beforeBatch = confirmations.length;
+    await api.generateMissingGarmentDescriptions();
+    assert.equal(confirmations.length, beforeBatch + 3, '批次启动确认不代替每张图片的新标签确认');
+    assert.ok(!saved.wardrobe_groups.some(group => group.name === '待批准'), '批量拒绝新标签不创建空标签');
+    for (const item of saved.wardrobe_items) {
+        assert.equal(item.category, 'outfits', '批量拒绝新标签仍保存分类');
+        assert.equal(item.name, '批量套装');
+        assert.equal(item.description, '批量描述');
+        assert.ok(item.groupIds.includes('formal'), '批量拒绝新标签仍保存匹配到的已有标签');
+    }
+    assert.match(controls['.tw-library-status'].textContent, /已识别并保存 2 张/);
+    confirmationEffect = undefined;
+    confirmation = true;
+    console.log('通过全部标签发送、已有标签免确认、新标签创建授权、旧格式兼容与批量拒绝后继续保存检查。');
+}
+
+/**
+ * 验证单张与批量识图保存分类和标签，详情后续保存不回退分类，非法字段与存储失败不产生部分更新。
+ * @returns {Promise<void>} 分类、标签及旧格式兼容断言完成后结束。
+ */
+async function checkGeneratedOrganization() {
+    saved.wardrobe_selections = { user: [], char: [] };
+    saved.wardrobe_groups = [{ id: 'daily', name: '日常' }];
+    saved.wardrobe_items = [{ id: 'auto', name: '待识别', category: 'other', description: '', image: 'data:image/png;base64,aGVsbG8=', groupIds: ['daily'] }];
+    api.loadGarments();
+    controls['[name="garment_category"]'].value = 'other';
+    for (const [category, expected, tags] of [['coats', 'coats', ['日常', ' 冬季 ', '冬季']], ['鞋子', 'shoes', []]]) {
+        modelReply = JSON.stringify({ name: '识别名称', description: '识别描述', category, tags });
+        await api.generateGarmentDescription();
+        assert.equal(saved.wardrobe_items[0].category, expected, '识图支持分类标识和中文分类名');
+        assert.equal(controls['[name="garment_category"]'].value, expected, '详情分类同步识图结果');
+        assert.deepEqual(saved.wardrobe_items[0].groupIds.map(id => api.state().garmentGroups.get(id)), ['日常', '冬季'], '标签去重并复用已有标签，空数组保留手动标签');
+        assert.ok(api.saveSelectedGarment(), '可继续保存生成的名称与描述');
+        assert.equal(saved.wardrobe_items[0].category, expected, '后续保存不会写回原分类');
+    }
+    assert.equal(saved.wardrobe_groups.length, 2, '内置分类不会误创建为分组');
+    assert.ok(requests.at(-1).user_input.includes('最终输出格式') && requests.at(-1).user_input.includes('"id":"coats"') && requests.at(-1).user_input.includes('tags 为标签名称数组'), '自定义旧提示词后仍附带分类枚举与独立标签协议');
+
+    const original = JSON.stringify(saved);
+    const originalCategory = controls['[name="garment_category"]'].value;
+    for (const tags of [null, '冬季', [42], [' ']]) {
+        modelReply = JSON.stringify({ name: '不应更新', description: '不应更新', category: 'dresses', tags });
+        await api.generateGarmentDescription();
+        assert.equal(JSON.stringify(saved), original, '非法标签不得部分保存有效分类');
+        assert.equal(controls['[name="garment_category"]'].value, originalCategory, '非法回复保留详情分类');
+        assert.equal(controls['.tw-garment-status'].dataset.error, 'true');
+    }
+    modelReply = JSON.stringify({ name: '不应更新', description: '不应更新', category: 'dresses', tags: ['新分组'] });
+    writesFail = true;
+    await api.generateGarmentDescription();
+    writesFail = false;
+    assert.equal(JSON.stringify(saved), original, '保存失败保留分类、标签和描述');
+    assert.equal(api.state().garments.get('auto').category, originalCategory, '保存失败保留内存分类');
+    assert.equal(controls['[name="garment_category"]'].value, originalCategory, '保存失败不提前修改分类控件');
+
+    // 只有分类或只有标签的回复仍可各自生效，兼容旧 JSON 缺少新增字段的情况。
+    for (const fields of [{ category: 'tops' }, { tags: ['夏季'] }, { category: ['旧分组'], tags: ['夏季'] }]) {
+        modelReply = JSON.stringify({ name: '识别名称', description: '识别描述', ...fields });
+        await api.generateGarmentDescription();
+        assert.equal(saved.wardrobe_items[0].category, 'tops', '缺少分类或旧版 category 数组均保留现有分类');
+    }
+    assert.deepEqual(saved.wardrobe_items[0].groupIds.map(id => api.state().garmentGroups.get(id)), ['日常', '冬季', '夏季', '旧分组']);
+
+    saved.wardrobe_items[0].description = '';
+    api.loadGarments();
+    controls['[name="garment_description"]'].value = '';
+    modelReply = JSON.stringify({ name: '批量套装', description: '批量描述', category: 'outfits', tags: ['正式'] });
+    await api.generateMissingGarmentDescriptions();
+    assert.equal(saved.wardrobe_items[0].category, 'outfits', '批量识图同次保存内置分类');
+    assert.equal(controls['[name="garment_category"]'].value, 'outfits', '批量识图同步当前详情分类');
+    assert.equal(saved.wardrobe_items[0].description, '批量描述');
+    assert.ok(saved.wardrobe_items[0].groupIds.some(id => api.state().garmentGroups.get(id) === '正式'), '批量识图自动归入标签分组');
+    console.log('通过单张与批量识图自动分类、标签归组、详情同步、旧格式兼容及失败保留检查。');
 }
 
 /**
@@ -412,7 +543,7 @@ async function checkBulkDescriptions() {
     assert.equal(JSON.stringify(saved.wardrobe_items), original, '取消后不改存档');
 
     confirmation = true;
-    modelReply = JSON.stringify({ name: '识别名称', description: '识别描述', category: '日常' });
+    modelReply = JSON.stringify({ name: '识别名称', description: '识别描述', category: 'shoes', tags: ['日常'] });
     controls['[name="description_mode"]'].value = 'item';
     await api.generateMissingGarmentDescriptions();
     assert.equal(requests.length - start, 2, '只识别空描述和纯空白描述，不受分类或多选影响');
@@ -420,6 +551,7 @@ async function checkBulkDescriptions() {
         if (item.id === 'empty' || item.id === 'spaces') {
             assert.equal(item.name, '识别名称');
             assert.equal(item.description, '识别描述', '批量描述自动持久化');
+            assert.equal(item.category, 'shoes', '批量识图自动更新未选中服装的分类');
             assert.equal(item.groupIds[0], 'daily', '复用同名标签');
         }
     }
