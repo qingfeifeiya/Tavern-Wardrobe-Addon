@@ -6,6 +6,16 @@
  */
 (function runWardrobe() {
 const ICONS = {
+    layers: '<path d="m12 3 9 4.5-9 4.5-9-4.5L12 3Z"/><path d="m3 12 9 4.5 9-4.5M3 16.5 12 21l9-4.5"/>',
+    combine: '<rect x="3" y="3" width="11" height="11" rx="2"/><rect x="10" y="10" width="11" height="11" rx="2"/>',
+    sparkle: '<path d="M10 3c.8 5 2.8 7 8 8-5.2 1-7.2 3-8 8-.8-5-2.8-7-8-8 5.2-1 7.2-3 8-8Z"/><path d="M19 3v4M17 5h4"/>',
+    check: '<path d="m5 12.5 4.5 4.5L19 7"/>',
+    minus: '<path d="M6 12h12"/>',
+    checkCircle: '<circle cx="12" cy="12" r="9"/><path d="m8 12.5 3 3 5-6"/>',
+    user: '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/>',
+    smile: '<circle cx="12" cy="12" r="9"/><path d="M8 14c1 1.5 2.4 2.2 4 2.2s3-.7 4-2.2M9 9.5h.01M15 9.5h.01"/>',
+    dashed: '<circle cx="12" cy="12" r="9" stroke-dasharray="3 3"/>',
+    image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m21 16-5-5L6 20"/>',
     hanger: '<path d="M9 5a3 3 0 1 1 5.2 2L12 9v3l9 6a1.2 1.2 0 0 1-.7 2H3.7a1.2 1.2 0 0 1-.7-2l9-6"/>',
     grid: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
     list: '<path d="M9 5h12M9 12h12M9 19h12M3 5h1M3 12h1M3 19h1"/>',
@@ -39,16 +49,17 @@ const CATEGORIES = [
     ['all', '全部', 'grid'], ['tops', '上装', 'shirt'], ['bottoms', '下装', 'trousers'],
     ['dresses', '连衣裙', 'dress'], ['coats', '外套', 'coat'], ['underwear', '内衣', 'bra'],
     ['socks', '袜子', 'sock'], ['shoes', '鞋子', 'shoe'], ['accessories', '配饰', 'bow'],
-    ['outfits', '套装', 'star'], ['other', '其他', 'more'],
+    ['outfits', '套装', 'layers'], ['other', '其他', 'more'],
 ];
 const QUICK_FILTERS = [
-    ['combinations', '搭配', 'star'],
-    ['favorites', '收藏', 'heart'], ['recent', '最近使用', 'clock'], ['current', '当前穿着', 'star'],
-    ['assigned-user', '已分配 USER', 'hanger'], ['assigned-char', '已分配 Char', 'hanger'],
-    ['unassigned', '未分配', 'shirt'], ['missing-description', '缺描述', 'file'], ['missing-image', '无图片', 'info'],
+    ['combinations', '搭配', 'combine'],
+    ['favorites', '收藏', 'heart'], ['recent', '最近使用', 'clock'], ['current', '当前穿着', 'checkCircle'],
+    ['assigned-user', '已分配 USER', 'user'], ['assigned-char', '已分配 Char', 'smile'],
+    ['unassigned', '未分配', 'dashed'], ['missing-description', '缺描述', 'file'], ['missing-image', '无图片', 'image'],
 ];
 const CATEGORY_FILTERS = [...CATEGORIES, ...QUICK_FILTERS];
 const CATEGORY_LABELS = new Map(CATEGORY_FILTERS.map(([id, label]) => [id, label]));
+const CATEGORY_FILTER_MAP = new Map(CATEGORY_FILTERS.map(filter => [filter[0], filter]));
 const GARMENT_CATEGORIES = new Set(CATEGORIES.slice(1).map(([id]) => id));
 // 排序时复用中文比较器，避免为每一次名称比较重复创建格式化对象。
 const GARMENT_NAME_COLLATOR = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
@@ -78,9 +89,96 @@ const TEMPLATE_OWNERS = [...WEARERS, 'image'];
 const TEMPLATE_FIELDS = ['single', 'wardrobe'];
 const TEMPLATE_VARIABLES = /\{\{(user|char|wearer|name|description|outfits|count)\}\}/g;
 const DESCRIPTION_VARIABLES = /\{\{(name|category)\}\}/g;
+// 仅升级未编辑过的旧默认服装、单品提示词，避免覆盖用户保存的自定义内容。
+const PREVIOUS_DEFAULT_OUTFIT_PROMPT = '请只描述图片中可见的服装与配饰，说明款式、颜色、材质、版型、层次、搭配及装饰细节。忽略人物的身份、面容、发型、表情、姿势、身材、皮肤和身体特征，不描述背景，不续写剧情。只写能从图中看出的信息，无法判断的材质和被遮挡的细节不要猜测。仅输出包含 name（服装名称）、description（服装描述）、category（服装分类标识）和 tags（衣柜标签名称数组，可同时包含场景、季节、风格）的 JSON 对象。';
+const PREVIOUS_DEFAULT_ITEM_PROMPT = '请只描述当前服装单品“{{name}}”（分类：{{category}}）在图片中可见的款式、颜色、材质、剪裁、图案、装饰和穿着细节。忽略其他服装和配饰，不描述人物的身份、面容、发型、表情、姿势、身材、皮肤、身体特征及背景。无法辨认目标单品时请明确说明，不编造。仅输出包含 name（单品名称）、description（单品描述）、category（服装分类标识）和 tags（衣柜标签名称数组，可同时包含场景、季节、风格）的 JSON 对象。';
 const DEFAULT_DESCRIPTION_PROMPTS = {
-    outfit: '请只描述图片中可见的服装与配饰，说明款式、颜色、材质、版型、层次、搭配及装饰细节。忽略人物的身份、面容、发型、表情、姿势、身材、皮肤和身体特征，不描述背景，不续写剧情。只写能从图中看出的信息，无法判断的材质和被遮挡的细节不要猜测。仅输出包含 name（服装名称）、description（服装描述）、category（服装分类标识）和 tags（衣柜标签名称数组，可同时包含场景、季节、风格）的 JSON 对象。',
-    item: '请只描述当前服装单品“{{name}}”（分类：{{category}}）在图片中可见的款式、颜色、材质、剪裁、图案、装饰和穿着细节。忽略其他服装和配饰，不描述人物的身份、面容、发型、表情、姿势、身材、皮肤、身体特征及背景。无法辨认目标单品时请明确说明，不编造。仅输出包含 name（单品名称）、description（单品描述）、category（服装分类标识）和 tags（衣柜标签名称数组，可同时包含场景、季节、风格）的 JSON 对象。',
+    // 保留用户提供的静态版型还原规范；请求末尾继续追加与分类、标签开关一致的最终输出格式。
+    outfit: `你是一位擅长拆解服装结构的穿搭造型师与版型还原师，能够看着穿搭图片，逆向推导出该服装出厂时的【原始标准静态版型】，并用直观、准确、画面感极强的语言撰写服装结构描述。你的描述需同时适合小说剧情自然调用和直接转图片生成提示词。
+
+【核心铁律一：特殊情趣剪裁与暴露结构的100%直白还原（最高优先级！）】
+面对极简、镂空或情趣类服装，必须一针见血地写出其**【真实的布料遮挡范围、剪裁缺口与裸露部位】**，绝对禁止保守化修改或用晦涩词汇绕圈子！
+
+1.  直接点明敏感部位的挖空与暴露：若服装在胸部、乳头、乳晕、下胸、胯部或裆部有刻意挖空、剪裁缺口或敞开设计，必须用直白清晰的语言直接写明！
+      - 正确示范：“在三角胸片正下方对应乳头与乳晕的位置做了大面积半圆形挖空剪裁，直接将整个乳头、乳晕及下胸区域完全裸露在外”、“仅盖住乳房上半部，乳头从剪开的豁口中完全漏出”、“前胸大深V全敞开露出胸沟”、“两侧无侧缝超高开衩直达腰际，胯骨与大腿外侧完全暴露”、“裆部采用全开裆剪裁”。
+2.  严禁脑补完整布料：绝对禁止把“剪洞露乳的胸罩、乳贴、细绳”擅自修补脑补为完整的常规胸罩或常规内裤！
+
+【核心铁律二：区分“原本剪裁”与“穿着临时形变”】 在100%保留上述特殊挖空与暴露设计的前提下，执行【去形变还原】：
+
+1.  过滤动作折痕：严禁将人物弯腰、坐姿或挤压导致的临时布料折痕、穿歪偏移写成衣服原本的设计。
+2.  还原对称版型：若衣服原本是对称剪裁（包括对称的乳头挖空或对称绑带），仅因人物姿势扭转导致画面不对称，必须按其原本的【对称结构】描述。
+3.  保留设计感褶皱：对于胸下围、腰部明显的收拢褶皱，直接描述为“横向抓褶收拢”或“抽绳褶皱”。
+
+【核心铁律三：后背结构的合理补全】 当图片看不到后背时，严禁跳过后背或写“后背不可见/推测”！必须根据前片的布料多少，直接笃定地写出最匹配的后背结构：
+
+1.  情趣/露乳/高开衩/细带类：后背直接补全为“全露背结构，仅靠后颈系带与后腰细绳固定”或“后背交叉细绳系带”。
+2.  常规紧身裙/束腰类：补全为“后背隐形拉链闭合”或“后背交叉绑带收紧”。
+3.  日常衣服类：按常规补全后背拼缝、领口包边或后腰拉链。
+
+【核心描述规范（description 字段）】 请将以下6项内容自然融合成一段 200-280字 的直观描述（除第2项仅在有束腰/收腰时写之外，其余必写）：
+
+1.  上身与胸部剪裁：款式类型（如挂脖裙/抹胸等）、肩带与连接环（如金色圆环）、胸部具体的遮挡与挖空方式（必须直白写出哪里被剪开、乳头/乳晕/胸沟如何暴露）。
+2.  腰部与胸下围：胸下围或腰部的收拢、抓褶、绑带或镂空连接方式。
+3.  下摆与开衩结构：裙摆/裤装的形状（如一片式前裙摆/包臀裙/T字裤）、遮挡范围（如仅遮挡小腹与腿间）、开衩高度（如直达腰际的无侧缝超高开衩）及暴露部位（如两侧胯部及大腿完全暴露）。
+4.  后背与固定方式（必写）：后背露肤程度及系带/拉链固定方式。
+5.  面料与质感：面料材质（如高弹氨纶布/蕾丝/漆皮）、表面特征（如带细密闪粉/半透明/高光泽）。
+6.  颜色与配饰：服装主色、金属件颜色，以及耳环、手镯、发饰等配饰的颜色与款式。
+
+【语言与禁忌要求】
+
+  - 语言风格：客观、直白、精准、画面感强！用最容易听懂的服装结构词（如“三角胸罩轮廓”、“半圆形挖空”、“一片式前裙摆”），拒绝晦涩难懂的工业生僻词，禁止头尾总结句。
+  - 绝对禁忌：只通过描述“衣服怎么剪裁、遮了哪里、露了哪里”来体现性感，严禁描写人物的身材大小（如“巨乳”、“丰满”）、皮肤流汗、表情神态、身体挤压动作（如“肉被挤出”）以及背景环境、手拿的道具。
+
+【输出字段规范】 严格配合系统追加的最终输出格式，仅输出合法的 JSON 对象（不要包含任何 markdown 代码块、\`\`\`json 标记或额外解释）： {
+"name": "穿搭名称（6字以内，直观准确，如：挖空露乳挂脖裙）", "description":
+"融合上述要求、直白点出挖空与暴露部位、还原静态版型并补全后背的一段高画面感描述（200-280字）", "category": "必须严格从系统提供的固定分类
+id 中选择1个（如 tops, bottoms, dresses, coats, underwear, socks, shoes, accessories,
+outfits, other）", "tags": ["标签1", "标签2"] }`,
+    // 单品提示词只拆解目标本身，名称与预设分类继续通过现有占位符在发送时替换。
+    item: `你是一位擅长拆解服装结构的单品版型还原师，能够看着穿搭图片，精准锁定目标单品，逆向推导出该单品出厂时的【原始标准静态版型】，并用直观、准确、画面感极强的语言撰写单品结构描述。你的描述需同时适合小说剧情自然调用和直接转图片生成提示词。
+
+【当前任务目标】
+请只针对图片中的目标单品“{{name}}”（预设分类：{{category}}）进行深度结构拆解与描述。严格忽略画面中的其他非目标服装和配饰！若图片中完全无法辨认或不存在该目标单品，请在
+description 中明确说明，绝不编造。
+
+【核心铁律一：特殊情趣剪裁与暴露结构的100%直白还原（最高优先级！）】
+若目标单品为极简、镂空或情趣类款式，必须一针见血地写出其**【真实的布料遮挡范围、剪裁缺口与对应的身体裸露部位】**，绝对禁止保守化修改或用晦涩词汇绕圈子！
+
+1.  直接点明敏感部位的挖空与暴露：若该单品在胸部、乳头、乳晕、下胸、胯部、臀部或裆部有刻意挖空、剪裁缺口或敞开设计，必须用直白清晰的语言直接写明！
+      - 正确示范（视单品部位而定）：“在三角胸片正下方对应乳头与乳晕的位置做了大面积半圆形挖空剪裁，直接将整个乳头、乳晕及下胸区域完全裸露在外”、“仅盖住乳房上半部，乳头从剪开的豁口中完全漏出”、“两侧无侧缝超高开衩直达腰际，胯骨与大腿外侧完全暴露”、“裆部采用全开裆剪裁，仅靠两侧细绳连接”。
+2.  严禁脑补完整布料：绝对禁止把“剪洞露乳的胸罩、乳贴、开裆细绳内裤”擅自修补脑补为完整的常规内衣或常规服装！
+
+【核心铁律二：区分“原本剪裁”与“穿着临时形变”】 在100%保留上述特殊挖空与暴露设计的前提下，对该单品执行【去形变还原】：
+
+1.  过滤动作折痕：严禁将人物弯腰、坐姿、挤压或掀衣动作导致的临时布料折痕、穿歪偏移写成该单品原本的设计。
+2.  还原对称版型：若该单品原本是对称剪裁（包括对称的挖空或对称绑带），仅因人物姿势扭转导致画面不对称，必须按其原本的【对称结构】描述。
+3.  保留设计感褶皱：对于单品上原本设计的胸下围抓褶、腰部抽绳褶皱、木耳边等，直接描述为“横向抓褶收拢”或“抽绳褶皱”。
+
+【核心铁律三：不可见/后背结构的合理补全】
+当图片看不到该单品的背面或闭合处时，严禁跳过或写“后背不可见/推测”！必须根据单品正面的布料多少与款式特征，直接笃定地写出最匹配的背面与固定结构（仅针对该单品本身）：
+
+1.  情趣/露乳/高开衩/细带类单品：背面直接补全为“全露背结构，仅靠后颈系带与后腰细绳固定”、“后背交叉细绳系带”或“T字极细后带”。
+2.  常规紧身裙/上衣/下装类单品：补全为“后背/侧边隐形拉链闭合”、“后背交叉绑带收紧”或“松紧腰头”。
+3.  鞋袜/配饰类单品：补全鞋跟形状、搭扣固定方式、袜口防滑罗纹或吊袜带夹扣结构。
+
+【核心描述规范（description 字段）】 请根据目标单品的实际属性，将以下维度自然融合成一段 120-220字 的直观描述：
+
+1.  基础款式与主体剪裁：点明单品的具体款式名称、整体轮廓版型。
+2.  遮挡范围与挖空细节（核心）：按该单品所属部位（上装写领口/袖口/胸腰部；下装写腰头/裤腿/裙摆/裆部与开衩；连衣裙/连体衣写上下身连接与开衩；鞋袜配饰写局部结构），直白写出布料遮了哪里、哪里被剪开镂空、如何暴露。
+3.  背面与固定方式（必写）：该单品在背面、侧面或接口处的闭合与固定结构（系带/拉链/搭扣/金属连接环等）。
+4.  面料、颜色与装饰细节：单品的主副颜色、面料材质（如高弹氨纶/半透明蕾丝/漆皮/丝绒）、表面质感（如细密闪粉/高光泽/哑光）、图案及自带的五金装饰（如金色圆环、水钻链条、蕾丝花边）。
+
+【语言与禁忌要求】
+
+  - 语言风格：客观、直白、精准、画面感强！用最容易听懂的服装结构词，拒绝晦涩难懂的工业生僻词，禁止头尾总结句。
+  - 绝对禁忌：
+    1.  严禁跨界描述画面中的其他服装单品和独立配饰！
+    2.  只通过描述“单品怎么剪裁、遮了哪里、露了哪里”来体现版型，严禁描写人物的身份、面容、发型、表情神态、姿势动作、身材大小（如“巨乳”、“丰满”）、皮肤流汗、身体挤压（如“肉被挤出”）以及背景环境和手持道具。
+
+【输出字段规范】 严格配合系统追加的最终输出格式，仅输出合法的 JSON 对象（不要包含任何 markdown 代码块、\`\`\`json 标记或额外解释）： {
+"name": "单品名称（可沿用或优化输入的{{name}}，6字以内，直观准确，如：挖空露乳胸衣）", "description":
+"融合上述要求、只针对该单品直白点出剪裁与暴露部位、还原静态版型并补全背面固定方式的一段高画面感描述（120-220字）", "category":
+"{{category}}", "tags": ["风格标签", "适用场景", "季节标签", "材质或版型特征标签"] }`,
 };
 // 精确识别两代原始默认值，升级时保留用户实际编辑过的内容。
 const PREVIOUS_DEFAULT_TEMPLATES = {
@@ -165,6 +263,17 @@ function renderCategory([id, label, symbol]) {
 }
 
 /**
+ * 把筛选入口按用途分组，侧栏用小标题区分分类、视图、穿着和待整理。
+ * @param {string} title 分组标题。
+ * @param {string[]} ids 该分组包含的筛选标识。
+ * @param {string} extra 插入标题与入口之间的额外控件标记。
+ * @returns {string} 分组标记。
+ */
+function renderNavSection(title, ids, extra = '') {
+    return `<div class="tw-nav-section"><p class="tw-nav-heading">${title}</p>${extra}${ids.map(id => renderCategory(CATEGORY_FILTER_MAP.get(id))).join('')}</div>`;
+}
+
+/**
  * 为角色和图片提示词生成同结构的模板编辑页；实际模板在存档入口加载，不拼接用户文本。
  * @param {string} wearer 模板所属的 user、char 或 image。
  * @param {string} label 页面中显示的角色名称。
@@ -194,18 +303,13 @@ const PANEL_HTML = `
             </div>
             <div class="tw-library-switcher">
                 <nav class="tw-library-tabs" aria-label="衣柜大分类"></nav>
-                <button type="button" class="tw-add-library" data-action="add-library">${icon('plus')}<span>新增空衣柜</span></button>
+                <button type="button" class="tw-add-library" data-action="add-library" title="新增空衣柜" aria-label="新增空衣柜">${icon('plus')}</button>
             </div>
-            <label class="tw-search">${icon('search')}<input type="search" placeholder="搜索服装…" aria-label="搜索服装"></label>
-            <div class="tw-view-modes" role="group" aria-label="服装显示方式">
-                <button type="button" class="tw-icon-button" data-view="grid" aria-label="网格视图" aria-pressed="true">${icon('grid')}</button>
-                <button type="button" class="tw-icon-button" data-view="list" aria-label="列表视图" aria-pressed="false">${icon('list')}</button>
+            <label class="tw-search">${icon('search')}<input type="search" placeholder="搜索名称、描述、标签…" aria-label="搜索服装"></label>
+            <div class="tw-header-actions">
+                <button type="button" class="tw-icon-button tw-settings-button" data-action="open-settings" aria-label="衣柜设置" title="衣柜设置" aria-haspopup="dialog" aria-controls="tw-settings">${icon('settings')}</button>
+                <button type="button" class="tw-icon-button tw-close" data-action="close" aria-label="关闭衣柜" title="关闭">${icon('close')}</button>
             </div>
-            <label class="tw-sort">${icon('sliders')}<select aria-label="服装排序">
-                <option value="default">导入顺序</option><option value="name-asc">名称升序</option><option value="name-desc">名称降序</option><option value="recent">最近使用</option>
-            </select></label>
-            <button type="button" class="tw-icon-button tw-settings-button" data-action="open-settings" aria-label="衣柜设置" aria-haspopup="dialog" aria-controls="tw-settings">${icon('settings')}</button>
-            <button type="button" class="tw-icon-button tw-close" data-action="close" aria-label="关闭衣柜">${icon('close')}</button>
         </header>
 
         <div class="tw-body">
@@ -217,69 +321,111 @@ const PANEL_HTML = `
                     </select>
                 </label>
                 <nav class="tw-category-list" aria-label="服装分类">
-                    ${CATEGORIES.map(renderCategory).join('')}
-                    <hr class="tw-divider">
-                    ${QUICK_FILTERS.map(renderCategory).join('')}
+                    ${renderNavSection('分类', ['all', ...CATEGORIES.slice(1).map(([id]) => id)])}
+                    ${renderNavSection('视图', ['favorites', 'recent', 'combinations'])}
+                    ${renderNavSection('穿着', ['current', 'assigned-user', 'assigned-char', 'unassigned'], `<label class="tw-selection-scope" title="穿着归属与当前穿着保存在哪个范围"><span>归属范围</span><span class="tw-select-control"><select aria-label="穿搭范围">
+                        <option value="global">全局</option><option value="character">按角色卡</option><option value="chat">按聊天</option>
+                    </select>${icon('chevron')}</span></label>`)}
+                    ${renderNavSection('待整理', ['missing-description', 'missing-image'])}
                 </nav>
-                <label class="tw-selection-scope"><span>穿搭范围</span><select aria-label="穿搭范围">
-                    <option value="global">全局</option><option value="character">按角色卡</option><option value="chat">按聊天</option>
-                </select></label>
                 <div class="tw-import-footer">
                     <button type="button" class="tw-import" data-action="import">${icon('plus')}<span>导入服装</span></button>
-                    <button type="button" class="tw-export-all" data-action="export-all">${icon('download')}<span>导出服装</span></button>
+                    <button type="button" class="tw-export-all" data-action="export-all" title="导出整个衣柜（含空标签）">${icon('download')}<span>导出全部</span></button>
                 </div>
             </aside>
 
-            <main class="tw-library" aria-label="服装列表" data-layout="grid" data-multi-select="false">
+            <main class="tw-library" aria-label="服装列表" data-layout="grid" data-multi-select="false" data-has-items="false">
                 <div class="tw-group-bar">
-                    <button type="button" data-action="add-group">新增标签</button>
-                    <button type="button" data-action="manage-groups" aria-label="管理标签" title="重命名与排序">${icon('pencil')}</button>
                     <nav class="tw-group-tabs" aria-label="服装标签"></nav>
+                    <div class="tw-group-tools">
+                        <button type="button" data-action="add-group" title="新增标签">${icon('plus')}<span>标签</span></button>
+                        <button type="button" data-action="manage-groups" aria-label="管理标签" title="重命名与排序标签">${icon('pencil')}</button>
+                    </div>
                 </div>
                 <div class="tw-library-toolbar" role="group" aria-label="服装操作">
-                    <button type="button" data-action="toggle-multi" aria-pressed="false" aria-controls="tw-bulk-actions">多选</button>
-                    <button type="button" data-action="create-combination">${icon('plus')}<span>合并搭配</span></button>
-                    <button type="button" data-action="describe-all">一键识图</button>
+                    <div class="tw-toolbar-start">
+                        <button type="button" class="tw-toggle-multi" data-action="toggle-multi" aria-pressed="false" aria-controls="tw-bulk-actions">${icon('checkCircle')}<span>多选</span></button>
+                        <button type="button" data-action="create-combination" title="用勾选的服装合并为一套搭配">${icon('combine')}<span>合并搭配</span></button>
+                        <button type="button" data-action="describe-all" title="为所有尚未描述的图片生成 AI 描述">${icon('sparkle')}<span>一键识图</span></button>
+                    </div>
+                    <span class="tw-result-count" role="status"></span>
+                    <div class="tw-toolbar-end">
+                        <label class="tw-sort" title="排序">${icon('sliders')}<span class="tw-select-control"><select aria-label="服装排序">
+                            <option value="default">导入顺序</option><option value="name-asc">名称升序</option><option value="name-desc">名称降序</option><option value="recent">最近使用</option>
+                        </select>${icon('chevron')}</span></label>
+                        <label class="tw-density" title="卡片大小"><input type="range" min="128" max="288" step="8" value="176" aria-label="卡片大小"></label>
+                        <div class="tw-view-modes" role="group" aria-label="服装显示方式">
+                            <button type="button" class="tw-icon-button" data-view="grid" aria-label="网格视图" title="网格视图" aria-pressed="true">${icon('grid')}</button>
+                            <button type="button" class="tw-icon-button" data-view="list" aria-label="列表视图" title="列表视图" aria-pressed="false">${icon('list')}</button>
+                        </div>
+                    </div>
                 </div>
+                <div class="tw-content-frame">
+                <p class="tw-library-status" role="status" aria-live="polite"></p>
                 <div class="tw-library-content">
-                    <p class="tw-library-status" role="status" aria-live="polite"></p>
                     <div class="tw-items" hidden></div>
-                    <div class="tw-empty" role="status" aria-live="polite">
+                    <div class="tw-empty" role="status" aria-live="polite" data-kind="none">
                         ${icon('box')}
                         <h2 id="tw-empty-title">这里还没有服装</h2>
+                        <p class="tw-empty-hint">导入图片即可创建服装，也可以直接把图片拖进来或粘贴。</p>
+                        <button type="button" class="tw-empty-action" data-action="import">${icon('plus')}<span>导入服装</span></button>
                     </div>
+                </div>
                 </div>
                 <div id="tw-bulk-actions" class="tw-bulk-actions" aria-label="服装批量操作" hidden>
                     <div class="tw-bulk-main">
                         <label class="tw-bulk-selection" title="全选当前列表"><input type="checkbox" class="tw-select-all" aria-label="全选当前列表"><span class="tw-selection-count">已选 0 件</span></label>
-                        <label class="tw-bulk-picker tw-bulk-apply-picker">${icon('hanger')}<select class="tw-bulk-apply" aria-label="批量应用到角色" disabled>
-                            <option value="" disabled selected>应用到…</option>
-                            <optgroup label="应用到"><option value="apply-user">USER</option><option value="apply-char">Char</option></optgroup>
-                            <optgroup label="取消应用"><option value="unapply-user">USER</option><option value="unapply-char">Char</option></optgroup>
-                        </select></label>
-                        <label class="tw-bulk-picker tw-bulk-group-picker">${icon('tag')}<select class="tw-bulk-group" aria-label="批量添加或移除标签" disabled></select></label>
-                        <label class="tw-bulk-picker tw-bulk-category-picker">${icon('shirt')}<select class="tw-bulk-category" aria-label="批量修改分类" disabled>
-                            <option value="" disabled selected>修改分类…</option>${CATEGORIES.slice(1).map(([id, label]) => `<option value="${id}">${label}</option>`).join('')}
-                        </select></label>
-                        <label class="tw-bulk-picker tw-bulk-favorite-picker">${icon('heart')}<select class="tw-bulk-favorite" aria-label="批量收藏" disabled>
-                            <option value="" disabled selected>收藏…</option><option value="favorite">收藏</option><option value="unfavorite">取消收藏</option>
-                        </select></label>
-                        <button type="button" data-bulk="export" disabled>${icon('download')}<span>导出</span></button>
+                        <span class="tw-bulk-sep" aria-hidden="true"></span>
+                        <div class="tw-menu-wrap"><button type="button" class="tw-bulk-trigger" data-bulk-menu="apply" aria-haspopup="menu" aria-expanded="false" disabled>${icon('hanger')}<span>应用到</span>${icon('chevron')}</button><div class="tw-menu" data-menu="apply" role="menu" aria-label="应用到角色" hidden></div></div>
+                        <div class="tw-menu-wrap"><button type="button" class="tw-bulk-trigger" data-bulk-menu="tags" aria-haspopup="menu" aria-expanded="false" disabled>${icon('tag')}<span>标签</span>${icon('chevron')}</button><div class="tw-menu tw-menu-wide" data-menu="tags" role="menu" aria-label="批量标签" hidden></div></div>
+                        <div class="tw-menu-wrap"><button type="button" class="tw-bulk-trigger" data-bulk-menu="category" aria-haspopup="menu" aria-expanded="false" disabled>${icon('shirt')}<span>分类</span>${icon('chevron')}</button><div class="tw-menu" data-menu="category" role="menu" aria-label="修改分类" hidden></div></div>
+                        <button type="button" class="tw-bulk-favorite-button" data-bulk-favorite aria-pressed="false" disabled>${icon('heart')}<span>收藏</span></button>
+                        <button type="button" data-bulk="export" disabled>${icon('download')}<span>导出所选</span></button>
+                        <span class="tw-bulk-sep" aria-hidden="true"></span>
+                        <button type="button" class="tw-bulk-delete" data-bulk="delete" disabled>${icon('trash')}<span>删除</span></button>
+                        <button type="button" class="tw-bulk-done" data-action="toggle-multi" aria-label="退出多选" title="退出多选">${icon('close')}</button>
                     </div>
-                    <button type="button" class="tw-bulk-delete" data-bulk="delete" disabled>${icon('trash')}<span>删除</span></button>
+                    <!-- 批量操作沿用原有的选择器逻辑：菜单只负责设置值并触发 change，不复制业务代码。 -->
+                    <select class="tw-bulk-apply" aria-label="批量应用到角色" hidden disabled>
+                        <option value="" disabled selected>应用到…</option>
+                        <optgroup label="应用到"><option value="apply-user">USER</option><option value="apply-char">Char</option></optgroup>
+                        <optgroup label="取消应用"><option value="unapply-user">USER</option><option value="unapply-char">Char</option></optgroup>
+                    </select>
+                    <select class="tw-bulk-group" aria-label="批量添加或移除标签" hidden disabled></select>
+                    <select class="tw-bulk-category" aria-label="批量修改分类" hidden disabled>
+                        <option value="" disabled selected>修改分类…</option>${CATEGORIES.slice(1).map(([id, label]) => `<option value="${id}">${label}</option>`).join('')}
+                    </select>
+                    <select class="tw-bulk-favorite" aria-label="批量收藏" hidden disabled>
+                        <option value="" disabled selected>收藏…</option><option value="favorite">收藏</option><option value="unfavorite">取消收藏</option>
+                    </select>
                 </div>
             </main>
 
-            <aside id="tw-details" class="tw-details" aria-label="服装预览与详情">
-                <div class="tw-wearer-modes" role="group" aria-label="允许穿这件服装的角色">
-                    <label><input type="checkbox" data-wearer="user" disabled>USER</label>
-                    <label><input type="checkbox" data-wearer="char" disabled>Char</label>
+            <aside id="tw-details" class="tw-details" aria-label="服装预览与详情" data-empty="true">
+                <div class="tw-preview-wrap">
+                    <div class="tw-preview">${icon('hanger')}<span>未选择服装</span></div>
+                    <div class="tw-image-actions">
+                        <span id="tw-garment-image-state">—</span>
+                        <button type="button" data-action="replace-image" disabled>替换图片</button>
+                        <button type="button" data-action="remove-image" disabled>删除图片</button>
+                    </div>
                 </div>
-                <div class="tw-current-modes" role="group" aria-label="调整当前穿着">
-                    <button type="button" data-current="user" aria-pressed="false" disabled>USER 加入当前穿着</button>
-                    <button type="button" data-current="char" aria-pressed="false" disabled>Char 加入当前穿着</button>
-                </div>
-                <div class="tw-preview">${icon('hanger')}<span>未选择服装</span></div>
+                <section class="tw-wearer-card" aria-label="穿着设置">
+                    <div class="tw-wearer-row">
+                        <span class="tw-wearer-label">可穿者<small>谁可以穿这件</small></span>
+                        <div class="tw-wearer-modes" role="group" aria-label="允许穿这件服装的角色">
+                            <label><input type="checkbox" data-wearer="user" disabled><span>USER</span></label>
+                            <label><input type="checkbox" data-wearer="char" disabled><span>Char</span></label>
+                        </div>
+                    </div>
+                    <div class="tw-wearer-row">
+                        <span class="tw-wearer-label">当前穿着<small>此刻穿在身上</small></span>
+                        <div class="tw-current-modes" role="group" aria-label="调整当前穿着">
+                            <button type="button" data-current="user" aria-pressed="false" disabled>USER 加入当前穿着</button>
+                            <button type="button" data-current="char" aria-pressed="false" disabled>Char 加入当前穿着</button>
+                        </div>
+                    </div>
+                </section>
                 <nav class="tw-detail-tabs" aria-label="详情分组">
                     <button type="button" data-detail="info" aria-pressed="true">${icon('info')}<span>信息</span></button>
                     <button type="button" data-detail="description" aria-pressed="false">${icon('file')}<span>描述</span></button>
@@ -287,44 +433,43 @@ const PANEL_HTML = `
                 </nav>
                 <div class="tw-detail-content">
                     <section data-detail-page="info" aria-label="服装信息">
-                        <dl class="tw-properties">
-                            <dt>名称</dt><dd><input name="garment_name" aria-label="服装名称" required disabled></dd>
-                            <dt>分类</dt><dd><span class="tw-select-control"><select name="garment_category" aria-label="服装分类" disabled>${CATEGORIES.slice(1).map(([id, label]) => `<option value="${id}">${label}</option>`).join('')}</select>${icon('chevron')}</span></dd>
-                            <dt>分级</dt><dd><span class="tw-select-control"><select name="garment_content_rating" aria-label="服装内容分级" disabled><option value="unrated">未标注</option><option value="sfw">SFW（日常／非色情）</option><option value="nsfw">NSFW（色情／成人）</option></select>${icon('chevron')}</span></dd>
-                            <dt>图片</dt><dd class="tw-image-actions"><span id="tw-garment-image-state">—</span><button type="button" data-action="replace-image" disabled>替换图片</button><button type="button" data-action="remove-image" disabled>删除图片</button></dd>
-                        </dl>
+                        <div class="tw-properties">
+                            <label class="tw-field"><span>名称</span><input name="garment_name" aria-label="服装名称" placeholder="服装名称" required disabled></label>
+                            <label class="tw-field"><span>分类</span><span class="tw-select-control"><select name="garment_category" aria-label="服装分类" disabled>${CATEGORIES.slice(1).map(([id, label]) => `<option value="${id}">${label}</option>`).join('')}</select>${icon('chevron')}</span></label>
+                            <label class="tw-field"><span>分级</span><span class="tw-select-control"><select name="garment_content_rating" aria-label="服装内容分级" disabled><option value="unrated">未标注</option><option value="sfw">SFW（日常／非色情）</option><option value="nsfw">NSFW（色情／成人）</option></select>${icon('chevron')}</span></label>
+                        </div>
                     </section>
                     <section data-detail-page="description" aria-label="服装描述" hidden>
-                        <div class="tw-combination-details" hidden><button type="button" data-action="edit-combination">编辑搭配</button></div>
-                        <dl class="tw-properties tw-description-options">
-                            <dt>AI 分类</dt><dd><span class="tw-select-control"><select name="description_category" aria-label="AI 分类" disabled><option value="on">开启</option><option value="off">关闭</option></select>${icon('chevron')}</span></dd>
-                            <dt>AI 标签</dt><dd><span class="tw-select-control"><select name="description_tags" aria-label="AI 标签" disabled><option value="on">开启</option><option value="off">关闭</option></select>${icon('chevron')}</span></dd>
-                        </dl>
+                        <div class="tw-combination-details" hidden><span>搭配的描述由成员组合而成，也可以直接编辑。</span><button type="button" data-action="edit-combination">编辑搭配成员</button></div>
+                        <div class="tw-properties tw-description-options">
+                            <label class="tw-field"><span>AI 分类</span><span class="tw-select-control"><select name="description_category" aria-label="AI 分类" disabled><option value="on">开启</option><option value="off">关闭</option></select>${icon('chevron')}</span></label>
+                            <label class="tw-field"><span>AI 标签</span><span class="tw-select-control"><select name="description_tags" aria-label="AI 标签" disabled><option value="on">开启</option><option value="off">关闭</option></select>${icon('chevron')}</span></label>
+                        </div>
                         <div class="tw-description-actions">
                             <span class="tw-select-control"><select name="description_mode" aria-label="描述生成类型" disabled><option value="outfit">服装描述</option><option value="item">单品描述</option></select>${icon('chevron')}</span>
-                            <button type="button" class="tw-describe" data-action="describe" disabled>AI 生成描述</button>
+                            <button type="button" class="tw-describe" data-action="describe" disabled>${icon('sparkle')}<span>AI 生成描述</span></button>
                         </div>
                         <textarea name="garment_description" aria-label="服装描述" placeholder="填写款式、颜色、材质等服装描述" disabled></textarea>
                     </section>
                     <section data-detail-page="tags" aria-label="服装标签" hidden>
-                        <details class="tw-tag-picker">
-                            <summary aria-label="选择服装标签"><span class="tw-tag-summary">选择标签</span>${icon('chevron')}</summary>
+                        <div class="tw-tag-picker">
+                            <p class="tw-tag-summary">选择标签</p>
                             <div class="tw-tag-dropdown">
                                 <div class="tw-tag-search-row">
                                     <input class="tw-tag-search" type="search" placeholder="搜索标签…" aria-label="搜索标签" autocomplete="off" disabled>
-                                    <button type="button" data-action="add-garment-group" disabled>新增标签</button>
+                                    <button type="button" data-action="add-garment-group" disabled>${icon('plus')}<span>新标签</span></button>
                                 </div>
                                 <fieldset class="tw-garment-tag" name="garment_group" aria-label="服装标签" disabled></fieldset>
                                 <p class="tw-tag-empty" role="status" hidden>没有匹配的标签</p>
                             </div>
-                        </details>
+                        </div>
                     </section>
                 </div>
                 <div class="tw-detail-actions">
                     <div class="tw-action-row">
-                        <button type="button" data-action="save-garment" disabled>${icon('pencil')}<span>保存修改</span></button>
-                        <button type="button" data-action="export-one" disabled>${icon('download')}<span>导出</span></button>
-                        <button type="button" class="tw-delete" data-action="delete-one" disabled>${icon('trash')}<span>删除</span></button>
+                        <button type="button" class="tw-save" data-action="save-garment" disabled>${icon('check')}<span>保存修改</span></button>
+                        <button type="button" data-action="export-one" title="导出这一件" disabled>${icon('download')}<span>导出</span></button>
+                        <button type="button" class="tw-delete" data-action="delete-one" title="删除这件服装" disabled>${icon('trash')}<span>删除</span></button>
                     </div>
                     <p class="tw-garment-status" role="status" aria-live="polite"></p>
                 </div>
@@ -339,6 +484,14 @@ const PANEL_HTML = `
         <input class="tw-folder-import" type="file" accept="image/png,image/jpeg,image/webp" webkitdirectory multiple hidden>
         <input class="tw-image-replace" type="file" accept="image/png,image/jpeg,image/webp" hidden>
     </div>
+    <dialog id="tw-ask" aria-labelledby="tw-ask-title" data-danger="false">
+        <form method="dialog" class="tw-ask-form">
+            <h2 id="tw-ask-title"></h2>
+            <p class="tw-ask-message"></p>
+            <input class="tw-ask-input" type="text" autocomplete="off" spellcheck="false" hidden>
+            <div class="tw-ask-actions"><button type="button" class="tw-ask-cancel">取消</button><button type="submit" value="ok" class="tw-ask-ok">确定</button></div>
+        </form>
+    </dialog>
     <dialog id="tw-import-picker" aria-labelledby="tw-import-picker-title">
         <header><h2 id="tw-import-picker-title">导入服装</h2><button type="button" data-action="cancel-import" aria-label="关闭导入">${icon('close')}</button></header>
         <div class="tw-import-tools">
@@ -514,33 +667,38 @@ const PANEL_CSS = `
     touch-action: manipulation;
 }
 
+/* ───────── 设计令牌 ───────── */
 #tw-panel {
-    --tw-bg-base: #0d0e14;
-    --tw-bg-surface: #13151f;
-    --tw-bg-elevated: #191c28;
-    --tw-bg-card: #171a26;
-    --tw-bg-hover: #212536;
-    --tw-bg-input: #0f1119;
-    --tw-ink: #f2f3f8;
-    --tw-ink-secondary: #c2c5d6;
-    --tw-muted: #7f849c;
-    --tw-line: rgba(255, 255, 255, 0.075);
-    --tw-line-strong: rgba(255, 255, 255, 0.14);
+    --tw-bg-base: #0b0c11;
+    --tw-bg-surface: #11131b;
+    --tw-bg-elevated: #181b27;
+    --tw-bg-card: #141722;
+    --tw-bg-hover: #202436;
+    --tw-bg-input: #0c0e15;
+    --tw-ink: #f1f2f7;
+    --tw-ink-secondary: #c6c9d9;
+    --tw-muted: #8d92a9;
+    --tw-line: rgba(255, 255, 255, 0.07);
+    --tw-line-strong: rgba(255, 255, 255, 0.15);
     --tw-accent: #c084fc;
     --tw-accent-strong: #9333ea;
-    --tw-accent-glow: rgba(192, 132, 252, 0.22);
+    --tw-accent-ink: #f3e8ff;
     --tw-selected: rgba(168, 85, 247, 0.16);
-    --tw-selected-border: rgba(192, 132, 252, 0.45);
+    --tw-selected-border: rgba(192, 132, 252, 0.5);
     --tw-danger: #fb7185;
     --tw-danger-bg: rgba(244, 63, 94, 0.12);
-    --tw-danger-border: rgba(244, 63, 94, 0.32);
+    --tw-danger-border: rgba(244, 63, 94, 0.36);
+    --tw-ok: #4ade80;
+    --tw-radius: 10px;
+    --tw-card-min: 176px;
+    --tw-accent-glow: rgba(192, 132, 252, 0.22);
+    --tw-pop-shadow: 0 18px 44px -12px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.06);
 
-    /* 主面板铺满酒馆视口，不再受桌面尺寸上限限制；动态高度随移动端浏览器工具栏变化。 */
+    /* 占满酒馆视口：用 100% 而不是 100vw，避免页面滚动条的宽度把右栏挤出屏幕。 */
     position: fixed;
     inset: 0;
-    width: 100vw;
-    height: 100vh;
-    height: 100dvh;
+    width: 100%;
+    height: 100%;
     min-width: 0;
     min-height: 0;
     max-width: none;
@@ -554,7 +712,7 @@ const PANEL_CSS = `
     color: var(--tw-ink);
     color-scheme: dark;
     box-shadow: none;
-    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font: 14px/1.5 "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
     text-align: left;
     text-shadow: none;
     -webkit-text-size-adjust: 100%;
@@ -562,61 +720,67 @@ const PANEL_CSS = `
 }
 
 #tw-panel::backdrop {
-    background: rgba(5, 6, 11, 0.68);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
+    background: rgba(5, 6, 11, 0.7);
 }
 
 #tw-panel, #tw-panel *, #tw-panel *::before, #tw-panel *::after {
     box-sizing: border-box;
 }
 
-/* 隐藏状态优先于组件的网格布局，确保收起的模型列表和未启用的 API 分组不占位。 */
+/* 隐藏状态优先于组件的布局，收起的菜单、分组和空状态不占位。 */
 #tw-panel [hidden] {
     display: none !important;
 }
 
-#tw-panel :is(h1, h2, h3, button, input, select, textarea, dl, dt, dd) {
+/* ───────── 抗污染基础：酒馆全局样式会改写按钮、输入框、复选框和标题，这里全部自行接管 ───────── */
+#tw-panel :is(h1, h2, h3, p, button, input, select, textarea, dl, dt, dd, fieldset, legend, label, small) {
     margin: 0;
     color: inherit;
     font: inherit;
     text-shadow: none;
     letter-spacing: normal;
+    text-transform: none;
 }
 
 #tw-panel button {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 8px;
+    gap: 7px;
     width: auto;
     min-width: 0;
+    height: auto;
     padding: 0;
     border: 1px solid transparent;
-    border-radius: 10px;
+    border-radius: var(--tw-radius);
     background: transparent;
+    color: inherit;
     box-shadow: none;
+    font-size: 13px;
+    line-height: 1.2;
+    white-space: nowrap;
     cursor: pointer;
-    transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease, transform 0.12s ease, box-shadow 0.16s ease;
+    -webkit-appearance: none;
+    appearance: none;
+    transition: background-color 0.14s ease, border-color 0.14s ease, color 0.14s ease, transform 0.1s ease, opacity 0.14s ease;
 }
 
 #tw-panel button:active:not(:disabled) {
-    transform: scale(0.98);
+    transform: scale(0.975);
 }
 
 #tw-panel button:disabled {
-    opacity: 0.42;
-    color: var(--tw-muted);
+    opacity: 0.4;
     cursor: not-allowed;
     transform: none;
 }
 
-#tw-panel button, #tw-panel .tw-brand {
+#tw-panel button, #tw-panel .tw-brand, #tw-panel .tw-nav-heading {
     -webkit-user-select: none;
     user-select: none;
 }
 
-#tw-panel :is(button, input, select, textarea):focus-visible {
+#tw-panel :is(button, input, select, textarea, summary, [tabindex]):focus-visible {
     outline: 2px solid var(--tw-accent);
     outline-offset: 2px;
 }
@@ -632,255 +796,402 @@ const PANEL_CSS = `
     stroke-linejoin: round;
 }
 
-/* 顶部工具栏独占一行；分类、列表和详情分别在自己的区域内滚动。 */
+/* 文本输入、下拉与多行框 */
+#tw-panel :is(input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="submit"]), select, textarea) {
+    width: 100%;
+    min-width: 0;
+    min-height: 38px;
+    margin: 0;
+    padding: 8px 12px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: var(--tw-radius);
+    background-color: var(--tw-bg-input);
+    background-image: none;
+    box-shadow: none;
+    color: var(--tw-ink);
+    font-size: 13.5px;
+    line-height: 1.4;
+    -webkit-appearance: none;
+    appearance: none;
+    transition: border-color 0.14s ease, box-shadow 0.14s ease, background-color 0.14s ease;
+}
+
+#tw-panel :is(input, select, textarea)::placeholder {
+    color: var(--tw-muted);
+    opacity: 0.8;
+}
+
+#tw-panel :is(input:not([type="checkbox"], [type="radio"], [type="range"]), select, textarea):hover:not(:disabled) {
+    border-color: rgba(255, 255, 255, 0.26);
+}
+
+#tw-panel :is(input:not([type="checkbox"], [type="radio"], [type="range"]), select, textarea):focus {
+    border-color: var(--tw-selected-border);
+    box-shadow: 0 0 0 3px rgba(192, 132, 252, 0.14);
+    outline: none;
+}
+
+#tw-panel :is(input, select, textarea):disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+#tw-panel input[type="search"]::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+}
+
+/* 原生下拉弹层跟随深色主题，避免出现灰底白字的系统样式 */
+#tw-panel select {
+    padding-right: 34px;
+    cursor: pointer;
+}
+
+#tw-panel option, #tw-panel optgroup {
+    background: #1b1e2b;
+    color: #f1f2f7;
+}
+
+#tw-panel .tw-select-control {
+    position: relative;
+    display: block;
+    min-width: 0;
+}
+
+#tw-panel .tw-select-control > .tw-icon {
+    position: absolute;
+    top: 50%;
+    right: 11px;
+    width: 15px;
+    height: 15px;
+    color: var(--tw-muted);
+    pointer-events: none;
+    transform: translateY(-50%);
+}
+
+/* 复选框、单选框：自绘，不依赖也不受酒馆主题影响 */
+#tw-panel input:is([type="checkbox"], [type="radio"]) {
+    position: relative;
+    display: inline-block;
+    flex: 0 0 auto;
+    width: 18px;
+    height: 18px;
+    min-width: 18px;
+    min-height: 18px;
+    margin: 0;
+    padding: 0;
+    border: 1.5px solid rgba(255, 255, 255, 0.34);
+    border-radius: 5px;
+    background-color: rgba(8, 9, 14, 0.55);
+    background-repeat: no-repeat;
+    background-position: center;
+    background-size: 13px;
+    box-shadow: none;
+    cursor: pointer;
+    vertical-align: middle;
+    -webkit-appearance: none;
+    appearance: none;
+    transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+#tw-panel input:is([type="checkbox"], [type="radio"])::before,
+#tw-panel input:is([type="checkbox"], [type="radio"])::after {
+    content: none !important;
+    display: none !important;
+}
+
+#tw-panel input[type="radio"] {
+    border-radius: 50%;
+}
+
+#tw-panel input[type="checkbox"]:checked {
+    border-color: var(--tw-accent);
+    background-color: var(--tw-accent-strong);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m5 12.5 4.5 4.5L19 7'/%3E%3C/svg%3E");
+}
+
+#tw-panel input[type="checkbox"]:indeterminate {
+    border-color: var(--tw-accent);
+    background-color: var(--tw-accent-strong);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3.4' stroke-linecap='round'%3E%3Cpath d='M6 12h12'/%3E%3C/svg%3E");
+}
+
+#tw-panel input[type="radio"]:checked {
+    border-color: var(--tw-accent);
+    background-color: var(--tw-accent-strong);
+    background-image: radial-gradient(circle, #fff 0 32%, transparent 36%);
+    background-size: 100% 100%;
+}
+
+#tw-panel input:is([type="checkbox"], [type="radio"]):disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+#tw-panel input[type="range"] {
+    width: 100%;
+    min-width: 0;
+    height: 18px;
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    accent-color: var(--tw-accent-strong);
+    cursor: pointer;
+}
+
+/* 滚动条 */
+#tw-panel :is(.tw-category-list, .tw-library-content, .tw-details, .tw-menu, .tw-tag-dropdown, .tw-import-grid, .tw-combination-items, .tw-settings-content, .tw-settings-nav, .tw-group-tabs, #tw-combination-editor, #tw-group-manager, #tw-import-picker) {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+#tw-panel ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+#tw-panel ::-webkit-scrollbar-thumb {
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.16);
+}
+
+#tw-panel ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.28);
+}
+
+#tw-panel ::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+/* 通用按钮层级：主按钮实心；次按钮描边；图标按钮方形 */
+#tw-panel .tw-icon-button {
+    width: 36px;
+    height: 36px;
+    border-color: var(--tw-line);
+    background: var(--tw-bg-elevated);
+    color: var(--tw-ink-secondary);
+}
+
+#tw-panel .tw-icon-button:not(:disabled):hover {
+    border-color: var(--tw-line-strong);
+    background: var(--tw-bg-hover);
+    color: #fff;
+}
+
+#tw-panel .tw-close:not(:disabled):hover {
+    border-color: var(--tw-danger-border);
+    background: var(--tw-danger-bg);
+    color: var(--tw-danger);
+}
+
+/* ───────── 外壳与顶栏 ───────── */
 #tw-panel .tw-shell {
     display: grid;
-    grid-template-rows: 66px minmax(0, 1fr);
+    grid-template-rows: 58px minmax(0, 1fr);
+    width: 100%;
     height: 100%;
     min-height: 0;
 }
 
-/* 顶部导航栏 */
 #tw-panel .tw-header {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 16px;
     min-width: 0;
-    padding: 0 20px;
+    padding: 0 16px;
     border-bottom: 1px solid var(--tw-line);
-    background: linear-gradient(180deg, rgba(28, 31, 46, 0.85) 0%, rgba(19, 21, 31, 0.9) 100%);
+    background: var(--tw-bg-surface);
 }
 
 #tw-panel .tw-brand {
     display: flex;
+    flex: 0 0 auto;
     align-items: center;
-    gap: 12px;
-    flex-shrink: 0;
-}
-
-/* 大分类占用品牌和搜索之间的空间；数量增加时只横向滚动页签，不挤出右侧操作。 */
-#tw-panel .tw-library-switcher {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex: 1;
-    min-width: 0;
-}
-
-#tw-panel .tw-library-tabs {
-    display: flex;
-    gap: 6px;
-    min-width: 0;
-    overflow-x: auto;
-    padding: 4px;
-}
-
-#tw-panel .tw-library-tabs button,
-#tw-panel .tw-add-library {
-    flex-shrink: 0;
-    min-height: 36px;
-    padding: 6px 10px;
-    border-color: var(--tw-line);
-    white-space: nowrap;
-}
-
-#tw-panel .tw-library-tabs button[aria-pressed="true"] {
-    border-color: var(--tw-selected-border);
-    background: var(--tw-selected);
-    color: #e9d5ff;
-}
-
-#tw-panel .tw-library-switcher button:hover {
-    background: var(--tw-bg-hover);
+    gap: 11px;
 }
 
 #tw-panel .tw-brand > .tw-icon {
-    width: 36px;
-    height: 36px;
+    width: 34px;
+    height: 34px;
     padding: 7px;
-    border: 1px solid rgba(192, 132, 252, 0.35);
+    border: 1px solid var(--tw-selected-border);
     border-radius: 11px;
-    background: linear-gradient(135deg, rgba(168, 85, 247, 0.24), rgba(99, 102, 241, 0.12));
-    color: #e9d5ff;
-    box-shadow: 0 4px 14px -2px rgba(168, 85, 247, 0.25);
-    stroke-width: 1.85;
+    background: linear-gradient(145deg, rgba(168, 85, 247, 0.3), rgba(99, 102, 241, 0.14));
+    color: var(--tw-accent-ink);
 }
 
 #tw-panel h1 {
-    font-size: 16px;
-    font-weight: 600;
-    line-height: 1.2;
-    letter-spacing: 0.01em;
     color: #fff;
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 1.1;
+    outline: none;
 }
 
 #tw-panel .tw-brand-subtitle {
     display: block;
     margin-top: 2px;
     color: var(--tw-muted);
-    font-size: 11px;
-    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.14em;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
 }
 
-#tw-panel .tw-search {
+/* 大分类：分段页签，新增入口收成末尾的小图标 */
+#tw-panel .tw-library-switcher {
     display: flex;
+    flex: 0 1 auto;
     align-items: center;
-    gap: 8px;
-    width: clamp(190px, 18vw, 270px);
-    height: 36px;
-    padding: 0 12px;
+    gap: 6px;
+    min-width: 0;
+}
+
+#tw-panel .tw-library-tabs {
+    display: flex;
+    gap: 2px;
+    min-width: 0;
+    max-width: 46vw;
+    padding: 3px;
+    overflow-x: auto;
     border: 1px solid var(--tw-line);
-    border-radius: 10px;
-    background: var(--tw-bg-input);
-    color: var(--tw-muted);
-    transition: border-color 0.16s ease, box-shadow 0.16s ease;
+    border-radius: 12px;
+    background: var(--tw-bg-base);
+    scrollbar-width: none;
 }
 
-#tw-panel .tw-search:focus-within {
+#tw-panel .tw-library-tabs::-webkit-scrollbar {
+    display: none;
+}
+
+#tw-panel .tw-library-tabs button {
+    flex: 0 0 auto;
+    height: 30px;
+    padding: 0 14px;
+    border-radius: 9px;
+    color: var(--tw-ink-secondary);
+    font-weight: 600;
+}
+
+#tw-panel .tw-library-tabs button:hover {
+    background: rgba(255, 255, 255, 0.06);
+    color: #fff;
+}
+
+#tw-panel .tw-library-tabs button[aria-pressed="true"] {
     border-color: var(--tw-selected-border);
-    box-shadow: 0 0 0 3px rgba(192, 132, 252, 0.12);
+    background: var(--tw-selected);
+    color: var(--tw-accent-ink);
 }
 
-#tw-panel .tw-search .tw-icon {
+#tw-panel .tw-add-library {
+    width: 32px;
+    height: 32px;
+    border: 1px dashed var(--tw-line-strong);
+    border-radius: 10px;
+    color: var(--tw-muted);
+}
+
+#tw-panel .tw-add-library:hover {
+    border-color: var(--tw-selected-border);
+    background: var(--tw-selected);
+    color: var(--tw-accent-ink);
+}
+
+#tw-panel .tw-add-library .tw-icon {
     width: 16px;
     height: 16px;
 }
 
+#tw-panel .tw-search {
+    position: relative;
+    display: block;
+    flex: 1 1 280px;
+    min-width: 140px;
+    max-width: 460px;
+    margin-left: auto;
+}
+
+#tw-panel .tw-search > .tw-icon {
+    position: absolute;
+    top: 50%;
+    left: 12px;
+    width: 16px;
+    height: 16px;
+    color: var(--tw-muted);
+    pointer-events: none;
+    transform: translateY(-50%);
+}
+
 #tw-panel .tw-search input {
-    width: 100%;
-    min-width: 0;
-    padding: 0;
-    border: 0;
-    background: transparent;
-    box-shadow: none;
-    font-size: 13px;
+    height: 38px;
+    padding-left: 36px;
+    border-radius: 999px;
+    background-color: var(--tw-bg-base);
 }
 
-#tw-panel .tw-search input::placeholder {
-    color: var(--tw-muted);
-    opacity: 0.75;
-}
-
-/* 使用原生排序菜单，键盘和触屏共用同一入口，无需额外管理弹层及焦点。 */
-#tw-panel .tw-sort {
+#tw-panel .tw-header-actions {
     display: flex;
-    align-items: center;
-    gap: 6px;
-    height: 36px;
-    padding: 0 8px;
-    border: 1px solid var(--tw-line);
-    border-radius: 10px;
-    background: var(--tw-bg-input);
-    color: var(--tw-muted);
+    flex: 0 0 auto;
+    gap: 8px;
 }
 
-#tw-panel .tw-sort select {
-    width: auto;
-    min-width: 0;
-    padding: 0;
-    border: 0;
-    background: transparent;
-    box-shadow: none;
-    font-size: 12px;
-}
-
-#tw-panel .tw-view-modes {
-    display: flex;
-    gap: 2px;
-    padding: 3px;
-    border: 1px solid var(--tw-line);
-    border-radius: 10px;
-    background: var(--tw-bg-input);
-}
-
-#tw-panel .tw-icon-button {
-    width: 36px;
-    height: 36px;
-    border-radius: 9px;
-    color: var(--tw-ink-secondary);
-}
-
-#tw-panel .tw-view-modes .tw-icon-button {
-    width: 30px;
-    height: 28px;
-    border-radius: 7px;
-}
-
-#tw-panel .tw-icon-button:not(:disabled):hover {
-    background: var(--tw-bg-hover);
-    color: #fff;
-}
-
-#tw-panel .tw-view-modes button[aria-pressed="true"] {
-    background: var(--tw-bg-elevated);
-    color: var(--tw-accent);
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
-}
-
-#tw-panel .tw-close:not(:disabled):hover {
-    background: var(--tw-danger-bg);
-    border-color: var(--tw-danger-border);
-    color: var(--tw-danger);
-}
-
-/* 主体三栏工作区 */
+/* ───────── 主体三栏 ───────── */
 #tw-panel .tw-body {
     display: grid;
-    grid-template-columns: clamp(205px, 16.5vw, 248px) minmax(0, 1fr) clamp(310px, 26vw, 390px);
-    min-width: 0;
+    grid-template-columns: clamp(208px, 15vw, 260px) minmax(0, 1fr) clamp(340px, 24vw, 440px);
     min-height: 0;
-    background: var(--tw-bg-base);
+    min-width: 0;
 }
 
-/* 左侧分类边栏 */
+#tw-panel .tw-mobile-actions,
+#tw-panel .tw-mobile-filter {
+    display: none;
+}
+
+/* ───────── 左栏：分组导航 ───────── */
 #tw-panel .tw-sidebar {
     display: flex;
     flex-direction: column;
     min-width: 0;
     min-height: 0;
-    padding: 14px 12px 16px;
     border-right: 1px solid var(--tw-line);
     background: var(--tw-bg-surface);
-    font-size: 13px;
-}
-
-#tw-panel .tw-mobile-filter,
-#tw-panel .tw-mobile-actions {
-    display: none;
 }
 
 #tw-panel .tw-category-list {
     display: flex;
-    flex-direction: column;
-    gap: 3px;
     flex: 1 1 auto;
+    flex-direction: column;
+    gap: 14px;
     min-height: 0;
+    padding: 14px 10px;
+    overflow-x: hidden;
     overflow-y: auto;
-    /* 新增快捷筛选后侧栏需要滚动，保留细滚动条让桌面用户能发现下方入口。 */
-    scrollbar-width: thin;
-    scrollbar-color: var(--tw-line-strong) transparent;
+    overscroll-behavior: contain;
 }
 
-#tw-panel .tw-category-list::-webkit-scrollbar {
-    width: 5px;
+#tw-panel .tw-nav-section {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
 }
-#tw-panel .tw-category-list::-webkit-scrollbar-thumb { background: var(--tw-line-strong); border-radius: 5px; }
+
+#tw-panel .tw-nav-heading {
+    padding: 0 10px 4px;
+    color: var(--tw-muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+}
 
 #tw-panel .tw-category {
-    display: grid;
-    grid-template-columns: 18px minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 10px;
-    flex: 0 0 auto;
+    justify-content: flex-start;
+    gap: 11px;
     width: 100%;
-    min-height: 36px;
-    padding: 6px 10px;
+    height: 36px;
+    padding: 0 8px 0 10px;
     border-radius: 9px;
     color: var(--tw-ink-secondary);
-    font-size: 13px;
-    font-weight: 500;
+    font-size: 13.5px;
     text-align: left;
 }
 
@@ -888,29 +1199,30 @@ const PANEL_CSS = `
     width: 17px;
     height: 17px;
     color: var(--tw-muted);
-    transition: color 0.16s ease;
 }
 
 #tw-panel .tw-category-label {
+    flex: 1 1 auto;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
 #tw-panel .tw-category:hover {
-    background: rgba(255, 255, 255, 0.045);
+    background: rgba(255, 255, 255, 0.05);
     color: #fff;
 }
 
 #tw-panel .tw-category:hover > .tw-icon {
-    color: var(--tw-ink-secondary);
+    color: var(--tw-accent);
 }
 
 #tw-panel .tw-category[aria-pressed="true"] {
     border-color: var(--tw-selected-border);
-    background: linear-gradient(90deg, rgba(168, 85, 247, 0.2) 0%, rgba(168, 85, 247, 0.08) 100%);
-    color: #fff;
-    box-shadow: 0 2px 10px -2px rgba(147, 51, 234, 0.22);
+    background: var(--tw-selected);
+    color: var(--tw-accent-ink);
+    font-weight: 600;
 }
 
 #tw-panel .tw-category[aria-pressed="true"] > .tw-icon {
@@ -918,135 +1230,73 @@ const PANEL_CSS = `
 }
 
 #tw-panel .tw-count {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 22px;
-    height: 20px;
-    padding: 0 6px;
+    min-width: 26px;
+    padding: 1px 7px;
     border-radius: 999px;
-    background: rgba(255, 255, 255, 0.055);
+    background: rgba(255, 255, 255, 0.06);
     color: var(--tw-muted);
-    font-size: 11px;
-    font-weight: 600;
+    font-size: 11.5px;
     font-variant-numeric: tabular-nums;
+    text-align: center;
 }
 
 #tw-panel .tw-category[aria-pressed="true"] .tw-count {
-    background: rgba(192, 132, 252, 0.24);
-    color: #f3e8ff;
+    background: rgba(192, 132, 252, 0.25);
+    color: #fff;
 }
 
-#tw-panel .tw-divider {
-    flex-shrink: 0;
-    width: 100%;
-    margin: 8px 0;
-    border: 0;
-    border-top: 1px solid var(--tw-line);
-}
-
-/* 左下角导入导出区 */
 #tw-panel .tw-selection-scope {
     display: grid;
-    gap: 8px;
-    flex: 0 0 auto;
-    padding: 12px 0;
-    color: var(--tw-ink-secondary);
+    gap: 5px;
+    margin: 0 0 6px;
+    padding: 0 2px 4px;
+}
+
+#tw-panel .tw-selection-scope > span:first-child {
+    color: var(--tw-muted);
+    font-size: 11.5px;
 }
 
 #tw-panel .tw-selection-scope select {
-    width: 100%;
-    min-height: 38px;
-    padding: 0 10px;
-    border: 1px solid var(--tw-line-strong);
-    border-radius: 10px;
-    background: var(--tw-bg-elevated);
-    color: var(--tw-ink);
+    min-height: 34px;
+    padding: 5px 30px 5px 10px;
+    font-size: 13px;
 }
-
-#tw-panel .tw-import-conflict {
-    width: min(420px, calc(100% - 32px));
-    padding: 20px;
-    border: 1px solid var(--tw-line-strong);
-    border-radius: 14px;
-    background: var(--tw-bg-surface);
-    color: var(--tw-ink);
-}
-
-#tw-panel .tw-import-conflict::backdrop { background: rgb(0 0 0 / 55%); }
-#tw-panel .tw-import-conflict p { overflow-wrap: anywhere; }
-#tw-panel .tw-import-conflict form { display: flex; flex-wrap: wrap; gap: 8px; }
-#tw-panel .tw-import-conflict button { flex: 1; justify-content: center; padding: 10px; }
-
-/* 文件夹只授予本地文件读取权限，缩略图在插件内直接勾选，确认前不上传。 */
-#tw-panel #tw-import-picker {
-    width: min(820px, calc(100vw - 24px));
-    max-height: calc(100dvh - 32px);
-    margin: auto;
-    padding: 18px;
-    overflow-y: auto;
-    border: 1px solid var(--tw-line-strong);
-    border-radius: 14px;
-    background: var(--tw-bg-surface);
-    color: var(--tw-ink);
-}
-#tw-panel #tw-import-picker::backdrop { background: rgb(0 0 0 / 65%); }
-#tw-panel #tw-import-picker header, #tw-panel #tw-import-picker footer, #tw-panel .tw-import-tools {
-    display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
-}
-#tw-panel #tw-import-picker header, #tw-panel #tw-import-picker footer { justify-content: space-between; }
-#tw-panel #tw-import-picker button { min-height: 38px; padding: 8px 12px; border-color: var(--tw-line-strong); background: var(--tw-bg-elevated); }
-#tw-panel .tw-import-tools { margin: 14px 0; }
-/* 文件夹可能包含大量图片，只让缩略图区滚动，保留全选和确认按钮在可见范围。 */
-#tw-panel .tw-import-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(125px, 1fr)); gap: 10px; max-height: min(55dvh, 480px); overflow-y: auto; }
-#tw-panel .tw-import-card {
-    position: relative; display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 8px;
-    border: 1px solid var(--tw-line-strong); border-radius: 10px; cursor: pointer;
-}
-#tw-panel .tw-import-card:has(:checked) { border-color: var(--tw-selected-border); background: var(--tw-selected); }
-#tw-panel .tw-import-card input { position: absolute; top: 12px; right: 12px; width: 18px; height: 18px; accent-color: var(--tw-accent-strong); }
-#tw-panel .tw-import-card img { width: 100%; height: 120px; object-fit: contain; border-radius: 6px; }
-#tw-panel .tw-import-card > .tw-icon { width: 100%; height: 120px; }
-#tw-panel .tw-import-card span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-#tw-panel .tw-import-status { color: var(--tw-danger); }
-#tw-panel #tw-import-picker footer { margin-top: 14px; }
-#tw-panel [data-action="confirm-import"] { background: var(--tw-accent-strong); }
 
 #tw-panel .tw-import-footer {
     display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 8px;
     flex: 0 0 auto;
-    padding-top: 12px;
-    margin-top: 6px;
+    gap: 8px;
+    padding: 12px 12px 14px;
     border-top: 1px solid var(--tw-line);
+    background: var(--tw-bg-surface);
 }
 
-#tw-panel .tw-import-footer button {
-    justify-content: center;
+#tw-panel .tw-import-footer button,
+#tw-panel .tw-empty-action {
     height: 38px;
     padding: 0 14px;
-    border-radius: 10px;
-    font-size: 13px;
+    border-radius: var(--tw-radius);
+    font-size: 13.5px;
     font-weight: 600;
 }
 
-#tw-panel .tw-import-footer .tw-import {
-    border-color: rgba(192, 132, 252, 0.45);
+#tw-panel .tw-import-footer .tw-import,
+#tw-panel .tw-empty-action {
+    border-color: rgba(192, 132, 252, 0.5);
     background: linear-gradient(135deg, #9333ea 0%, #6366f1 100%);
     color: #fff;
-    box-shadow: 0 6px 16px -4px rgba(147, 51, 234, 0.5);
+    box-shadow: 0 6px 18px -6px rgba(147, 51, 234, 0.6);
 }
 
-#tw-panel .tw-import-footer .tw-import:not(:disabled):hover {
-    filter: brightness(1.08);
-    box-shadow: 0 8px 20px -4px rgba(147, 51, 234, 0.65);
+#tw-panel .tw-import-footer .tw-import:not(:disabled):hover,
+#tw-panel .tw-empty-action:hover {
+    filter: brightness(1.1);
 }
 
 #tw-panel .tw-import-footer .tw-export-all {
-    margin-top: 0;
     border-color: var(--tw-line-strong);
-    background: var(--tw-bg-elevated);
+    background: transparent;
     color: var(--tw-ink-secondary);
 }
 
@@ -1055,362 +1305,318 @@ const PANEL_CSS = `
     color: #fff;
 }
 
-/* 中栏不留外边距，标签栏贴齐左右和顶部；卡片内容单独保留阅读留白。 */
+/* ───────── 中栏：标签、工具栏、服装列表 ───────── */
 #tw-panel .tw-library {
+    position: relative;
     display: flex;
     flex-direction: column;
-    container-type: inline-size;
     min-width: 0;
     min-height: 0;
-    padding: 0;
-    overflow: hidden;
     background: var(--tw-bg-base);
 }
 
-#tw-panel .tw-library-content {
-    flex: 1;
-    min-height: 0;
-    overflow: auto;
-    padding: 16px 22px 18px;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+#tw-panel .tw-group-bar {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--tw-line);
+    background: var(--tw-bg-surface);
 }
 
-#tw-panel .tw-group-bar,
-#tw-panel .tw-library-toolbar,
-#tw-panel .tw-group-tabs,
-#tw-panel .tw-bulk-actions {
+/* 仅标签列表横向滚动，新增与管理按钮固定在右侧，不会被长列表推走。 */
+#tw-panel .tw-group-tabs {
     display: flex;
+    flex: 1 1 0;
     align-items: center;
     gap: 6px;
-}
-
-#tw-panel .tw-group-bar,
-#tw-panel .tw-library-toolbar {
-    flex-shrink: 0;
-    padding: 8px 12px;
-    border: 0;
-    border-bottom: 1px solid var(--tw-line);
-    border-radius: 0;
-    background: var(--tw-bg-surface);
-    font-size: 13px;
-}
-
-/* 仅标签列表横向滚动，新增与管理按钮留在滚动区域外，避免被长列表推走。 */
-#tw-panel .tw-group-bar,
-#tw-panel .tw-library-toolbar {
     min-width: 0;
+    padding: 2px 0;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
 }
 
-#tw-panel .tw-group-tabs,
-#tw-panel .tw-library-toolbar {
-    overflow-x: auto;
-    scrollbar-width: thin;
-    scrollbar-color: var(--tw-line-strong) transparent;
+#tw-panel .tw-group-tabs::-webkit-scrollbar {
+    display: none;
 }
 
 #tw-panel .tw-group-tabs {
-    flex: 1;
-    min-width: 0;
+    scrollbar-width: none;
 }
 
-#tw-panel .tw-group-tabs::-webkit-scrollbar,
-#tw-panel .tw-library-toolbar::-webkit-scrollbar {
-    height: 6px;
-}
-
-#tw-panel .tw-group-tabs::-webkit-scrollbar-thumb,
-#tw-panel .tw-library-toolbar::-webkit-scrollbar-thumb {
-    background: var(--tw-line-strong);
-    border-radius: 6px;
-}
-
-#tw-panel .tw-group-bar > button,
-#tw-panel .tw-library-toolbar > button,
-#tw-panel .tw-group-tabs > button {
-    flex-shrink: 0;
-    min-height: 32px;
-    padding: 4px 12px;
-    border-radius: 8px;
-    border-color: transparent;
-    color: var(--tw-ink-secondary);
-    font-size: 12.5px;
-    font-weight: 500;
-}
-
-#tw-panel .tw-group-bar > button,
-#tw-panel .tw-library-toolbar > button {
-    border-color: var(--tw-line);
+#tw-panel .tw-group-tabs > button,
+#tw-panel .tw-group-tab {
+    flex: 0 0 auto;
+    height: 30px;
+    border: 1px solid var(--tw-line);
+    border-radius: 999px;
     background: var(--tw-bg-elevated);
+    color: var(--tw-ink-secondary);
+    font-size: 13px;
 }
 
-#tw-panel .tw-group-bar > button:hover,
-#tw-panel .tw-library-toolbar > button:hover,
-#tw-panel .tw-group-tabs > button:hover {
+#tw-panel .tw-group-tabs > button {
+    padding: 0 13px;
+}
+
+#tw-panel .tw-group-tab {
+    display: inline-flex;
+    align-items: center;
+    overflow: hidden;
+}
+
+#tw-panel .tw-group-tab > button:first-child {
+    height: 100%;
+    padding: 0 6px 0 13px;
+    border: 0;
+    border-radius: 0;
+    color: inherit;
+}
+
+#tw-panel .tw-group-tab [data-delete-group] {
+    width: 0;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    color: var(--tw-muted);
+    opacity: 0;
+    overflow: hidden;
+    transition: width 0.12s ease, opacity 0.12s ease, color 0.12s ease, background-color 0.12s ease;
+}
+
+#tw-panel .tw-group-tab:hover [data-delete-group],
+#tw-panel .tw-group-tab[data-active="true"] [data-delete-group],
+#tw-panel .tw-group-tab:focus-within [data-delete-group] {
+    width: 26px;
+    opacity: 1;
+}
+
+#tw-panel .tw-group-tab > button:first-child {
+    padding-right: 13px;
+}
+
+#tw-panel .tw-group-tab:hover > button:first-child,
+#tw-panel .tw-group-tab[data-active="true"] > button:first-child,
+#tw-panel .tw-group-tab:focus-within > button:first-child {
+    padding-right: 4px;
+}
+
+#tw-panel .tw-group-tab [data-delete-group]:hover {
+    background: var(--tw-danger-bg);
+    color: var(--tw-danger);
+}
+
+#tw-panel [data-delete-group] .tw-icon {
+    width: 13px;
+    height: 13px;
+}
+
+#tw-panel .tw-group-tabs > button:hover,
+#tw-panel .tw-group-tab:hover {
+    border-color: var(--tw-line-strong);
     background: var(--tw-bg-hover);
     color: #fff;
 }
 
-#tw-panel .tw-group-tabs button {
-    max-width: 200px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-#tw-panel .tw-group-tabs > button[aria-pressed="true"] {
-    border-color: var(--tw-selected-border);
-    background: var(--tw-selected);
-    color: #f3e8ff;
-}
-
-#tw-panel [data-action="toggle-multi"][aria-pressed="true"] {
-    border-color: var(--tw-selected-border);
-    background: var(--tw-selected);
-    color: var(--tw-accent);
-}
-
-/* 自定义标签胶囊 */
-#tw-panel .tw-group-tab {
-    display: inline-flex;
-    align-items: center;
-    flex-shrink: 0;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    background: rgba(255, 255, 255, 0.03);
-    transition: background-color 0.16s ease, border-color 0.16s ease;
-}
-
-#tw-panel .tw-group-tab:hover {
-    background: var(--tw-bg-hover);
-}
-
+#tw-panel .tw-group-tabs > button[aria-pressed="true"],
 #tw-panel .tw-group-tab[data-active="true"] {
     border-color: var(--tw-selected-border);
     background: var(--tw-selected);
-    color: #f3e8ff;
+    color: var(--tw-accent-ink);
+    font-weight: 600;
 }
 
-#tw-panel .tw-group-tab button {
-    min-height: 30px;
-    padding: 4px 8px 4px 10px;
-    border: 0;
-    font-size: 12.5px;
-}
-
-#tw-panel .tw-group-tab [data-delete-group] {
-    min-height: 26px;
-    padding: 4px 6px;
-    border-radius: 6px;
-    color: var(--tw-muted);
-}
-
-#tw-panel .tw-group-tab [data-delete-group]:hover {
-    color: var(--tw-danger);
-    background: var(--tw-danger-bg);
-}
-
-#tw-panel [data-delete-group] .tw-icon {
-    width: 14px;
-    height: 14px;
-}
-
-/* 批量操作悬浮底栏 */
-#tw-panel .tw-bulk-actions {
-    flex-shrink: 0;
-    margin: 10px 20px 18px;
-    padding: 6px;
-    border: 1px solid var(--tw-line-strong);
-    border-radius: 14px;
-    background: rgba(25, 28, 40, 0.92);
-    backdrop-filter: blur(12px);
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
-    font-size: 12.5px;
-}
-
-#tw-panel .tw-bulk-main {
-    /* 批量控件增加后按可用宽度换行，桌面和窄屏都保留完整操作入口。 */
+#tw-panel .tw-group-tools {
     display: flex;
-    flex-wrap: wrap;
+    flex: 0 0 auto;
     align-items: center;
     gap: 6px;
-    flex: 1;
+    padding-left: 10px;
+    border-left: 1px solid var(--tw-line);
+}
+
+#tw-panel .tw-group-tools button {
+    height: 30px;
+    padding: 0 11px;
+    border-color: var(--tw-line);
+    border-radius: 999px;
+    color: var(--tw-ink-secondary);
+}
+
+#tw-panel .tw-group-tools button[data-action="manage-groups"] {
+    width: 30px;
+    padding: 0;
+}
+
+#tw-panel .tw-group-tools button:not(:disabled):hover {
+    border-color: var(--tw-line-strong);
+    background: var(--tw-bg-hover);
+    color: #fff;
+}
+
+#tw-panel .tw-group-tools .tw-icon {
+    width: 15px;
+    height: 15px;
+}
+
+#tw-panel .tw-library-toolbar {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    padding: 9px 16px;
+    border-bottom: 1px solid var(--tw-line);
+}
+
+#tw-panel .tw-toolbar-start,
+#tw-panel .tw-toolbar-end {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     min-width: 0;
 }
 
-#tw-panel .tw-bulk-selection {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    min-height: 36px;
-    padding: 0 10px;
-    white-space: nowrap;
-    cursor: pointer;
+#tw-panel .tw-toolbar-end {
+    margin-left: auto;
+}
+
+#tw-panel .tw-toolbar-start button {
+    height: 34px;
+    padding: 0 13px;
+    border-color: var(--tw-line);
+    background: var(--tw-bg-elevated);
+    color: var(--tw-ink-secondary);
     font-weight: 500;
 }
 
-#tw-panel .tw-bulk-actions :is(button, select),
-#tw-panel [data-action="remove-image"],
-#tw-panel [data-action="replace-image"] {
-    min-height: 36px;
-    padding: 6px 12px;
-    border: 1px solid var(--tw-line-strong);
-    border-radius: 9px;
-    background: var(--tw-bg-elevated);
-    font-size: 12.5px;
-}
-
-#tw-panel .tw-bulk-actions button:not(:disabled):hover,
-#tw-panel [data-action="remove-image"]:not(:disabled):hover,
-#tw-panel [data-action="replace-image"]:not(:disabled):hover {
+#tw-panel .tw-toolbar-start button:not(:disabled):hover {
+    border-color: var(--tw-line-strong);
     background: var(--tw-bg-hover);
+    color: #fff;
 }
 
-#tw-panel .tw-bulk-actions select {
-    width: 100%;
-    min-width: 0;
-    text-overflow: ellipsis;
-}
-
-#tw-panel .tw-bulk-actions button {
-    gap: 6px;
-    white-space: nowrap;
-}
-
-#tw-panel .tw-bulk-picker {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-    flex: 1 1 115px;
-    padding: 0 10px;
-    border: 1px solid var(--tw-line-strong);
-    border-radius: 9px;
-    background: var(--tw-bg-elevated);
-}
-
-/* 标签和搭配编辑复用原生模态框，保存前不改变存档，Escape 保留原数据。 */
-#tw-panel #tw-group-manager,
-#tw-panel #tw-combination-editor {
-    width: min(480px, calc(100vw - 24px));
-    max-height: calc(100dvh - 40px);
-    margin: auto;
-    padding: 20px;
-    overflow-y: auto;
-    border: 1px solid var(--tw-line-strong);
-    border-radius: 14px;
-    background: var(--tw-bg-surface);
-    color: var(--tw-ink);
-}
-#tw-panel #tw-group-manager::backdrop { background: rgba(5, 6, 11, 0.68); }
-#tw-panel #tw-combination-editor::backdrop { background: rgba(5, 6, 11, 0.68); }
-/* 搭配复用原服装，不生成拼接图片；可滚动成员列表同时适配手机和键盘选择。 */
-#tw-panel .tw-combination-name { display: grid; gap: 8px; }
-#tw-panel .tw-combination-name input { width: 100%; padding: 8px; background: var(--tw-bg-input); border: 1px solid var(--tw-line-strong); border-radius: 8px; }
-#tw-panel .tw-combination-items { display: grid; gap: 8px; margin: 16px 0; max-height: 50dvh; overflow-y: auto; }
-#tw-panel .tw-combination-item { display: flex; align-items: center; gap: 10px; min-height: 44px; cursor: pointer; }
-#tw-panel .tw-combination-item img { width: 44px; height: 52px; object-fit: contain; }
-#tw-panel .tw-combination-status { color: var(--tw-danger); }
-/* 编辑成员属于描述页的独立操作区，与整套正文编辑框保持清晰间距。 */
-#tw-panel .tw-combination-details {
-    margin-bottom: 12px;
-    padding: 12px;
-    border: 1px solid var(--tw-line-strong);
-    border-radius: 10px;
-    background: var(--tw-bg-elevated);
-}
-#tw-panel .tw-combination-details button { width: 100%; min-height: 38px; }
-#tw-panel .tw-group-rows { display: grid; gap: 8px; margin: 16px 0; }
-#tw-panel .tw-group-row { display: flex; align-items: center; gap: 8px; }
-#tw-panel .tw-group-row input {
-    flex: 1;
-    min-width: 0;
-    padding: 8px;
-    border: 1px solid var(--tw-line-strong);
-    border-radius: 8px;
-    background: var(--tw-bg-input);
-}
-#tw-panel .tw-group-row button { min-width: 36px; min-height: 36px; border-color: var(--tw-line-strong); }
-#tw-panel .tw-group-status { color: var(--tw-danger); }
-
-#tw-panel .tw-bulk-picker select {
-    padding: 6px 0;
-    border: 0;
-    background: transparent;
-    cursor: pointer;
-}
-
-#tw-panel .tw-bulk-actions .tw-bulk-delete {
-    flex-shrink: 0;
-    gap: 6px;
-    border-color: var(--tw-danger-border);
-    background: var(--tw-danger-bg);
-    color: var(--tw-danger);
-}
-
-#tw-panel .tw-bulk-actions .tw-bulk-delete:not(:disabled):hover {
-    background: rgba(244, 63, 94, 0.22);
-}
-
-#tw-panel .tw-bulk-actions .tw-icon {
+#tw-panel .tw-toolbar-start .tw-icon {
     width: 16px;
     height: 16px;
 }
 
-#tw-panel .tw-bulk-apply-picker {
+/* 多选是模式开关：开启后高亮，文字由状态表达 */
+#tw-panel .tw-toggle-multi[aria-pressed="true"] {
     border-color: var(--tw-selected-border);
     background: var(--tw-selected);
-    color: #f3e8ff;
+    color: var(--tw-accent-ink);
 }
 
-@container (max-width: 480px) {
-    #tw-panel .tw-bulk-actions {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
-        gap: 6px;
-    }
-    #tw-panel .tw-bulk-main {
-        display: contents;
-    }
-    #tw-panel .tw-bulk-selection {
-        grid-column: 1;
-        grid-row: 1;
-    }
-    #tw-panel .tw-bulk-apply-picker {
-        grid-column: 2 / 4;
-        grid-row: 1;
-    }
-    #tw-panel .tw-bulk-group-picker {
-        grid-column: 1;
-        grid-row: 2;
-    }
-    #tw-panel .tw-bulk-category-picker {
-        grid-column: 2 / 4;
-        grid-row: 2;
-    }
-    #tw-panel .tw-bulk-favorite-picker {
-        grid-column: 1;
-        grid-row: 3;
-    }
-    #tw-panel [data-bulk="export"] {
-        grid-column: 2;
-        grid-row: 3;
-    }
-    #tw-panel .tw-bulk-delete {
-        grid-column: 3;
-        grid-row: 3;
-    }
+#tw-panel .tw-result-count {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--tw-muted);
+    font-size: 12.5px;
+    font-variant-numeric: tabular-nums;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#tw-panel .tw-sort {
+    position: relative;
+    display: block;
+    width: 148px;
+}
+
+#tw-panel .tw-sort > .tw-icon {
+    position: absolute;
+    top: 50%;
+    left: 11px;
+    z-index: 1;
+    width: 15px;
+    height: 15px;
+    color: var(--tw-muted);
+    pointer-events: none;
+    transform: translateY(-50%);
+}
+
+#tw-panel .tw-sort select {
+    min-height: 34px;
+    padding: 5px 30px 5px 32px;
+    font-size: 13px;
+}
+
+#tw-panel .tw-density {
+    display: block;
+    width: 92px;
+}
+
+#tw-panel .tw-view-modes {
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--tw-line);
+    border-radius: 11px;
+    background: var(--tw-bg-base);
+}
+
+#tw-panel .tw-view-modes .tw-icon-button {
+    width: 32px;
+    height: 30px;
+    border: 0;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--tw-muted);
+}
+
+#tw-panel .tw-view-modes .tw-icon-button[aria-pressed="true"] {
+    background: var(--tw-selected);
+    color: var(--tw-accent-ink);
+}
+
+#tw-panel .tw-library[data-layout="list"] .tw-density {
+    display: none;
+}
+
+#tw-panel .tw-library-content {
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 18px 18px 28px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+#tw-panel .tw-library[data-multi-select="true"] .tw-library-content {
+    padding-bottom: 104px;
+}
+
+/* 操作结果浮在列表顶部且可点击穿透，不遮挡批量菜单；成功提示自动消失，错误保留到下一次操作。 */
+#tw-panel .tw-content-frame {
+    position: relative;
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
 }
 
 #tw-panel .tw-library-status {
-    margin: 0 0 12px;
-    padding: 8px 12px;
-    border-radius: 9px;
-    border: 1px solid rgba(192, 132, 252, 0.25);
-    background: rgba(168, 85, 247, 0.1);
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    z-index: 30;
+    max-width: min(560px, calc(100% - 32px));
+    padding: 10px 16px;
+    border: 1px solid var(--tw-selected-border);
+    border-radius: 12px;
+    background: #231a38;
+    box-shadow: var(--tw-pop-shadow);
+    color: var(--tw-accent-ink);
+    font-size: 13px;
     overflow-wrap: anywhere;
-    color: #e9d5ff;
-    font-size: 12.5px;
+    pointer-events: none;
+    transform: translateX(-50%);
 }
 
 #tw-panel .tw-library-status:empty {
@@ -1419,113 +1625,53 @@ const PANEL_CSS = `
 
 #tw-panel .tw-library-status[data-error="true"] {
     border-color: var(--tw-danger-border);
-    background: var(--tw-danger-bg);
-    color: #fda4af;
+    background: #35151d;
+    color: #ffd7de;
 }
 
-#tw-panel .tw-selection-count {
-    color: var(--tw-ink-secondary);
+/* ───────── 服装卡片：卡片较多时只绘制可见部分，滚动更流畅 ───────── */
+#tw-panel .tw-items {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(var(--tw-card-min), 100%), 1fr));
+    gap: 14px;
+    width: 100%;
 }
 
-/* 服装卡片与网格 */
 #tw-panel .tw-garment-entry {
     position: relative;
     min-width: 0;
-}
-
-#tw-panel .tw-item-check,
-#tw-panel .tw-favorite {
-    position: absolute;
-    z-index: 2;
-    top: 8px;
-    right: 8px;
-    place-items: center;
-    width: 32px;
-    height: 32px;
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    border-radius: 9px;
-    background: rgba(13, 14, 20, 0.78);
-    backdrop-filter: blur(6px);
-    cursor: pointer;
-}
-
-/* 普通模式彻底隐藏勾选框，鼠标悬停和键盘聚焦都不会意外进入多选。 */
-#tw-panel .tw-item-check {
-    display: none;
-}
-
-#tw-panel .tw-library[data-multi-select="true"] .tw-item-check {
-    display: grid;
-}
-
-#tw-panel .tw-favorite {
-    display: grid;
-    border: 0;
-    border-radius: 50%;
-    padding: 0;
-    color: var(--tw-ink-secondary);
-}
-
-#tw-panel .tw-favorite:hover,
-#tw-panel .tw-favorite[aria-pressed="true"] {
-    color: #f472b6;
-}
-
-#tw-panel .tw-favorite[aria-pressed="true"] .tw-icon {
-    fill: currentColor;
-}
-
-#tw-panel .tw-library[data-multi-select="true"] .tw-favorite {
-    display: none;
-}
-
-#tw-panel :is(.tw-item-check, .tw-bulk-actions) input {
-    width: 17px;
-    height: 17px;
-    accent-color: var(--tw-accent-strong);
-    cursor: pointer;
-}
-
-#tw-panel .tw-garment-entry[data-checked="true"] .tw-garment-card {
-    border-color: var(--tw-accent);
-    box-shadow: 0 0 0 2px var(--tw-accent-glow);
-}
-
-#tw-panel .tw-items {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(min(156px, 100%), 1fr));
-    gap: 14px;
-    width: 100%;
+    content-visibility: auto;
+    contain-intrinsic-size: auto calc(var(--tw-card-min) + 86px);
 }
 
 #tw-panel .tw-garment-card {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
-    justify-content: stretch;
-    justify-items: stretch;
     align-content: start;
-    gap: 8px;
+    gap: 9px;
     width: 100%;
-    padding: 10px;
+    padding: 8px 8px 10px;
     overflow: hidden;
     border: 1px solid var(--tw-line);
     border-radius: 14px;
     background: var(--tw-bg-card);
+    color: var(--tw-ink);
     text-align: left;
-    transition: transform 0.18s ease, border-color 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease;
 }
 
 #tw-panel .tw-garment-card:hover {
-    transform: translateY(-2px);
-    border-color: rgba(255, 255, 255, 0.16);
+    border-color: rgba(255, 255, 255, 0.2);
     background: var(--tw-bg-elevated);
-    box-shadow: 0 10px 24px -8px rgba(0, 0, 0, 0.55);
+}
+
+#tw-panel .tw-garment-card:focus-visible {
+    outline-offset: -2px;
 }
 
 #tw-panel .tw-garment-card[aria-pressed="true"] {
-    border-color: var(--tw-selected-border);
-    background: linear-gradient(180deg, rgba(168, 85, 247, 0.18) 0%, rgba(25, 28, 40, 0.95) 100%);
-    box-shadow: 0 0 0 1px rgba(192, 132, 252, 0.3), 0 10px 24px -6px rgba(147, 51, 234, 0.28);
+    border-color: var(--tw-accent);
+    background: linear-gradient(180deg, rgba(168, 85, 247, 0.2) 0%, var(--tw-bg-card) 100%);
+    box-shadow: inset 0 0 0 1px rgba(192, 132, 252, 0.55);
 }
 
 #tw-panel .tw-garment-card img {
@@ -1534,35 +1680,38 @@ const PANEL_CSS = `
     object-fit: contain;
     padding: 6px;
     border-radius: 10px;
-    background: radial-gradient(circle at 50% 42%, #23273a 0%, #10121b 100%);
+    background: radial-gradient(circle at 50% 40%, #252a3d 0%, #0f111a 100%);
 }
 
 #tw-panel .tw-garment-card > .tw-icon {
     width: 100%;
     height: auto;
     aspect-ratio: 1;
-    padding: 34px;
+    padding: 34%;
     border-radius: 10px;
-    background: radial-gradient(circle at 50% 42%, #202436 0%, #10121b 100%);
-    color: var(--tw-muted);
+    background: radial-gradient(circle at 50% 40%, #222639 0%, #0f111a 100%);
+    color: rgba(141, 146, 169, 0.7);
+    stroke-width: 1.4;
 }
 
-#tw-panel .tw-garment-card span {
+#tw-panel .tw-garment-card > span {
+    padding: 0 3px;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    color: var(--tw-ink);
     font-size: 13.5px;
     font-weight: 600;
-    color: var(--tw-ink);
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
-/* 穿着状态与标签保持单行，标签在剩余宽度内省略，避免多标签或长名称撑高卡片。 */
+/* 穿着状态与标签保持单行，避免多标签或长名称撑高卡片。 */
 #tw-panel .tw-card-meta {
     display: flex;
     align-items: center;
     flex-wrap: nowrap;
     gap: 6px;
     min-width: 0;
+    padding: 0 3px;
 }
 
 #tw-panel .tw-card-tags {
@@ -1572,64 +1721,195 @@ const PANEL_CSS = `
     gap: 4px;
     justify-content: flex-end;
     min-width: 0;
-    max-width: 100%;
     max-height: 24px;
     overflow: hidden;
     margin-left: auto;
 }
 
-#tw-panel .tw-card-meta > small,
-#tw-panel .tw-card-tags .tw-card-tag-overflow { flex: 0 0 auto; }
+#tw-panel .tw-card-meta > small {
+    flex: 0 1 auto;
+    max-width: 52%;
+}
+
+#tw-panel .tw-card-tags {
+    min-width: 36px;
+}
+
+#tw-panel .tw-card-tags .tw-card-tag-overflow {
+    flex: 0 0 auto;
+}
 
 #tw-panel .tw-garment-card small {
     min-width: 0;
     max-width: 100%;
     padding: 2px 8px;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    border: 1px solid rgba(192, 132, 252, 0.26);
     border-radius: 999px;
-    background: rgba(192, 132, 252, 0.14);
-    border: 1px solid rgba(192, 132, 252, 0.24);
+    background: rgba(192, 132, 252, 0.13);
     color: #e9d5ff;
     font-size: 11px;
     font-weight: 500;
-    line-height: 1.4;
+    line-height: 1.45;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
+#tw-panel .tw-card-tags small {
+    border-color: var(--tw-line);
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--tw-ink-secondary);
+}
+
+#tw-panel .tw-favorite {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    z-index: 2;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: rgba(9, 10, 16, 0.62);
+    color: rgba(255, 255, 255, 0.82);
+    opacity: 0;
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+}
+
+#tw-panel .tw-garment-entry:hover .tw-favorite,
+#tw-panel .tw-favorite:focus-visible,
+#tw-panel .tw-favorite[aria-pressed="true"] {
+    opacity: 1;
+}
+
+#tw-panel .tw-favorite:hover {
+    background: rgba(9, 10, 16, 0.85);
+    color: #fff;
+}
+
+#tw-panel .tw-favorite .tw-icon {
+    width: 16px;
+    height: 16px;
+}
+
+#tw-panel .tw-favorite[aria-pressed="true"] {
+    color: #f472b6;
+}
+
+#tw-panel .tw-favorite[aria-pressed="true"] .tw-icon {
+    fill: currentColor;
+}
+
+/* 普通模式彻底隐藏勾选框，鼠标悬停和键盘聚焦都不会意外进入多选。 */
+#tw-panel .tw-item-check {
+    position: absolute;
+    top: 14px;
+    left: 14px;
+    z-index: 3;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 8px;
+    background: rgba(9, 10, 16, 0.6);
+    cursor: pointer;
+}
+
+#tw-panel .tw-library[data-multi-select="true"] .tw-item-check {
+    display: flex;
+}
+
+#tw-panel .tw-library[data-multi-select="true"] .tw-favorite {
+    display: none;
+}
+
+#tw-panel .tw-garment-entry[data-checked="true"] .tw-garment-card {
+    border-color: var(--tw-accent);
+    background: linear-gradient(180deg, rgba(168, 85, 247, 0.26) 0%, var(--tw-bg-card) 100%);
+    box-shadow: inset 0 0 0 1px rgba(192, 132, 252, 0.55);
+}
+
+/* 列表视图 */
 #tw-panel .tw-library[data-layout="list"] .tw-items {
     grid-template-columns: minmax(0, 1fr);
-    gap: 8px;
+    gap: 6px;
+}
+
+#tw-panel .tw-library[data-layout="list"] .tw-garment-entry {
+    contain-intrinsic-size: auto 76px;
 }
 
 #tw-panel .tw-library[data-layout="list"] .tw-garment-card {
     grid-template-columns: 56px minmax(0, 1fr);
     align-items: center;
-    gap: 4px 12px;
-    padding: 8px 48px 8px 10px;
+    gap: 3px 14px;
+    padding: 8px 56px 8px 12px;
+    border-radius: 12px;
 }
 
-#tw-panel .tw-library[data-layout="list"] .tw-garment-card :is(img, .tw-icon) {
+#tw-panel .tw-library[data-layout="list"] .tw-garment-card > :is(img, .tw-icon) {
     grid-row: 1 / 3;
     width: 56px;
     height: 56px;
     padding: 4px;
 }
 
+#tw-panel .tw-library[data-layout="list"] .tw-garment-card > .tw-icon {
+    padding: 14px;
+    aspect-ratio: auto;
+}
+
+#tw-panel .tw-library[data-layout="list"] .tw-card-tags {
+    justify-content: flex-start;
+    margin-left: 0;
+}
+
+#tw-panel .tw-library[data-layout="list"] .tw-card-meta {
+    justify-content: flex-start;
+}
+
 #tw-panel .tw-library[data-layout="list"] :is(.tw-item-check, .tw-favorite) {
     top: 50%;
-    right: 10px;
+    right: 14px;
     transform: translateY(-50%);
 }
 
-/* 空状态 */
+#tw-panel .tw-library[data-layout="list"] .tw-item-check {
+    right: auto;
+    left: 18px;
+    top: 50%;
+    z-index: 4;
+}
+
+#tw-panel .tw-library[data-layout="list"][data-multi-select="true"] .tw-garment-card {
+    padding-left: 52px;
+    padding-right: 12px;
+}
+
+#tw-panel .tw-library[data-layout="list"] .tw-favorite {
+    opacity: 1;
+    background: transparent;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    color: var(--tw-muted);
+}
+
+#tw-panel .tw-library[data-layout="list"] .tw-favorite[aria-pressed="true"] {
+    color: #f472b6;
+}
+
+/* ───────── 空状态 ───────── */
 #tw-panel .tw-empty {
-    display: grid;
-    justify-items: center;
-    align-content: center;
-    gap: 14px;
-    min-height: 280px;
-    padding: 36px 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    min-height: min(420px, 60%);
+    padding: 40px 16px;
     color: var(--tw-muted);
     text-align: center;
 }
@@ -1638,95 +1918,313 @@ const PANEL_CSS = `
     width: 76px;
     height: 76px;
     padding: 18px;
-    border-radius: 22px;
     border: 1px dashed var(--tw-line-strong);
-    background: rgba(255, 255, 255, 0.02);
-    color: var(--tw-muted);
-    stroke-width: 1.35;
-    overflow: visible;
+    border-radius: 22px;
+    background: var(--tw-bg-surface);
+    color: rgba(192, 132, 252, 0.6);
+    stroke-width: 1.4;
 }
 
 #tw-panel h2 {
+    color: var(--tw-ink);
     font-size: 16px;
-    font-weight: 500;
-    color: var(--tw-ink-secondary);
+    font-weight: 600;
 }
 
-/* 右侧详情与预览栏 */
+#tw-panel .tw-empty-hint {
+    max-width: 34ch;
+    margin: 0;
+    font-size: 13px;
+}
+
+#tw-panel .tw-empty-action {
+    margin-top: 6px;
+}
+
+#tw-panel .tw-empty:not([data-kind="no-garments"]) .tw-empty-hint,
+#tw-panel .tw-empty:not([data-kind="no-garments"]) .tw-empty-action {
+    display: none;
+}
+
+/* ───────── 批量操作栏 ───────── */
+#tw-panel .tw-bulk-actions {
+    position: absolute;
+    right: 16px;
+    bottom: 18px;
+    left: 16px;
+    z-index: 20;
+    width: max-content;
+    max-width: calc(100% - 32px);
+    margin: 0 auto;
+    padding: 8px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 16px;
+    background: #181b28;
+    box-shadow: var(--tw-pop-shadow);
+}
+
+#tw-panel .tw-bulk-main {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+}
+
+#tw-panel .tw-bulk-selection {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    height: 36px;
+    padding: 0 10px 0 8px;
+    border-radius: 10px;
+    color: var(--tw-ink);
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+#tw-panel .tw-bulk-sep {
+    width: 1px;
+    height: 22px;
+    margin: 0 4px;
+    background: var(--tw-line-strong);
+}
+
+#tw-panel .tw-bulk-main button:not(.tw-menu-item) {
+    height: 36px;
+    padding: 0 12px;
+    border-color: var(--tw-line);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--tw-ink-secondary);
+    font-weight: 500;
+}
+
+#tw-panel .tw-bulk-main button:not(:disabled, .tw-menu-item):hover {
+    border-color: var(--tw-line-strong);
+    background: var(--tw-bg-hover);
+    color: #fff;
+}
+
+#tw-panel .tw-bulk-trigger[aria-expanded="true"] {
+    border-color: var(--tw-selected-border);
+    background: var(--tw-selected);
+    color: var(--tw-accent-ink);
+}
+
+#tw-panel .tw-bulk-main .tw-icon {
+    width: 16px;
+    height: 16px;
+}
+
+#tw-panel .tw-bulk-trigger > .tw-icon:last-child {
+    width: 13px;
+    height: 13px;
+    margin-left: -1px;
+    color: var(--tw-muted);
+}
+
+#tw-panel .tw-bulk-favorite-button[aria-pressed="true"] {
+    border-color: rgba(244, 114, 182, 0.4);
+    background: rgba(244, 114, 182, 0.12);
+    color: #f9a8d4;
+}
+
+#tw-panel .tw-bulk-favorite-button[aria-pressed="true"] .tw-icon {
+    fill: currentColor;
+}
+
+#tw-panel .tw-bulk-main .tw-bulk-delete {
+    border-color: var(--tw-danger-border);
+    background: var(--tw-danger-bg);
+    color: var(--tw-danger);
+}
+
+#tw-panel .tw-bulk-main .tw-bulk-delete:not(:disabled):hover {
+    background: rgba(244, 63, 94, 0.24);
+    color: #fff;
+}
+
+#tw-panel .tw-bulk-main .tw-bulk-done {
+    width: 36px;
+    padding: 0;
+    border-color: transparent;
+    background: transparent;
+    color: var(--tw-muted);
+}
+
+/* 弹出菜单：向上展开，样式完全自控 */
+#tw-panel .tw-menu-wrap {
+    position: relative;
+}
+
+#tw-panel .tw-menu {
+    position: absolute;
+    bottom: calc(100% + 10px);
+    left: 0;
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: 224px;
+    max-height: min(360px, 55dvh);
+    padding: 6px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 14px;
+    background: #1b1e2c;
+    box-shadow: var(--tw-pop-shadow);
+}
+
+#tw-panel .tw-menu-wide {
+    width: 264px;
+}
+
+#tw-panel .tw-menu-title {
+    padding: 6px 10px 4px;
+    color: var(--tw-muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+}
+
+#tw-panel .tw-menu-search {
+    position: sticky;
+    top: -6px;
+    z-index: 1;
+    margin: -6px -6px 4px;
+    padding: 8px 8px 6px;
+    background: #1b1e2c;
+}
+
+#tw-panel .tw-menu-search input {
+    min-height: 34px;
+    font-size: 13px;
+}
+
+#tw-panel .tw-menu-item {
+    justify-content: flex-start;
+    gap: 10px;
+    width: 100%;
+    height: 36px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 9px;
+    color: var(--tw-ink);
+    font-size: 13.5px;
+    text-align: left;
+}
+
+#tw-panel .tw-menu-item > span:last-child {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#tw-panel .tw-menu-item:hover,
+#tw-panel .tw-menu-item:focus-visible {
+    background: rgba(255, 255, 255, 0.07);
+    outline: none;
+}
+
+/* 三态标记：全部选中、部分选中、未选 */
+#tw-panel .tw-menu-mark {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    border: 1.5px solid rgba(255, 255, 255, 0.34);
+    border-radius: 5px;
+    color: transparent;
+}
+
+#tw-panel .tw-menu-item[role="menuitemradio"] .tw-menu-mark {
+    border-radius: 50%;
+}
+
+#tw-panel .tw-menu-mark .tw-icon {
+    width: 12px;
+    height: 12px;
+    stroke-width: 3.2;
+}
+
+#tw-panel .tw-menu-item[aria-checked="true"] .tw-menu-mark,
+#tw-panel .tw-menu-item[aria-checked="mixed"] .tw-menu-mark {
+    border-color: var(--tw-accent);
+    background: var(--tw-accent-strong);
+    color: #fff;
+}
+
+#tw-panel .tw-menu-item[aria-checked="mixed"] .tw-menu-mark .tw-icon-check,
+#tw-panel .tw-menu-item:not([aria-checked="mixed"]) .tw-menu-mark .tw-icon-minus {
+    display: none;
+}
+
+#tw-panel .tw-menu-item[data-tone="danger"] {
+    color: var(--tw-danger);
+}
+
+#tw-panel .tw-menu-divider {
+    height: 1px;
+    margin: 4px 2px;
+    background: var(--tw-line);
+}
+
+#tw-panel .tw-menu-empty {
+    padding: 10px;
+    color: var(--tw-muted);
+    font-size: 12.5px;
+}
+
+/* ───────── 右栏：预览与详情 ───────── */
 #tw-panel .tw-details {
     display: flex;
     flex-direction: column;
     gap: 14px;
     min-width: 0;
     min-height: 0;
-    padding: 16px 18px 20px;
+    padding: 16px 16px 0;
+    overflow-x: hidden;
     overflow-y: auto;
+    overscroll-behavior: contain;
     border-left: 1px solid var(--tw-line);
     background: var(--tw-bg-surface);
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
 }
 
-#tw-panel .tw-wearer-modes {
+#tw-panel .tw-preview-wrap {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
     flex: 0 0 auto;
-}
-
-#tw-panel .tw-wearer-modes label {
-    display: flex;
-    align-items: center;
-    justify-content: center;
     gap: 8px;
-    min-height: 38px;
-    padding: 6px 12px;
-    border: 1px solid var(--tw-line-strong);
-    border-radius: 10px;
-    background: var(--tw-bg-elevated);
-    color: var(--tw-ink-secondary);
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.16s ease;
-}
-
-#tw-panel .tw-wearer-modes label:hover {
-    background: var(--tw-bg-hover);
-    color: #fff;
-}
-
-#tw-panel .tw-wearer-modes label:has(:checked) {
-    border-color: var(--tw-selected-border);
-    background: linear-gradient(135deg, rgba(168, 85, 247, 0.24), rgba(99, 102, 241, 0.16));
-    color: #f3e8ff;
-    box-shadow: 0 4px 12px -2px rgba(147, 51, 234, 0.25);
 }
 
 #tw-panel .tw-preview {
     position: relative;
     display: flex;
-    flex: 0 0 auto;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     gap: 12px;
-    height: clamp(200px, 28dvh, 290px);
+    height: clamp(150px, 27dvh, 380px);
     padding: 12px;
     border: 1px solid var(--tw-line-strong);
-    border-radius: 14px;
+    border-radius: 16px;
     background:
         radial-gradient(circle at 50% 35%, rgba(168, 85, 247, 0.14) 0%, rgba(15, 17, 25, 0.96) 72%),
         var(--tw-bg-input);
     color: var(--tw-muted);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 #tw-panel .tw-preview > .tw-icon {
     width: 56px;
     height: 56px;
     color: rgba(192, 132, 252, 0.45);
-    stroke-width: 1.5;
+    stroke-width: 1.4;
 }
 
 #tw-panel .tw-preview img {
@@ -1736,86 +2234,168 @@ const PANEL_CSS = `
     border-radius: 8px;
     filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.45));
 }
-/* 原生按钮让预览同时支持鼠标、触屏和键盘；空图不提供无效的放大入口。 */
-#tw-panel .tw-preview-image { justify-content: center; width: 100%; height: 100%; min-height: 0; border-radius: 8px; cursor: zoom-in; }
-#tw-panel .tw-preview-member:not(:disabled) { cursor: zoom-in; }
-/* 用原图组成预览网格，每个成员可独立放大；发送与备份仍使用独立图片。 */
-#tw-panel .tw-preview[data-combination="true"] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); gap: 8px; }
-#tw-panel .tw-preview-member { display: flex; flex-direction: column; align-items: center; min-height: 0; min-width: 0; gap: 4px; }
-#tw-panel .tw-preview-member img { flex: 1; min-height: 0; }
-#tw-panel .tw-preview-member span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 
-/* 放大框直接读取保存的原图，不使用聊天压缩副本；完整显示图片并适配手机视口。 */
-#tw-panel #tw-original-image {
-    width: calc(100vw - 24px);
-    height: calc(100dvh - 24px);
-    max-width: none;
-    max-height: none;
-    margin: auto;
-    padding: 12px;
-    border: 1px solid var(--tw-line-strong);
-    border-radius: 14px;
-    background: var(--tw-bg-base);
-    color: var(--tw-ink);
-}
-#tw-panel #tw-original-image[open] { display: flex; flex-direction: column; gap: 12px; }
-#tw-panel #tw-original-image::backdrop { background: rgba(5, 6, 11, 0.85); }
-#tw-panel #tw-original-image header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-#tw-panel #tw-original-image h2 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
-#tw-panel #tw-original-image header button { flex-shrink: 0; }
-#tw-panel #tw-original-image > img { flex: 1; min-height: 0; width: 100%; object-fit: contain; }
-
-#tw-panel .tw-details :is(input, select, textarea) {
+#tw-panel .tw-preview-image {
     width: 100%;
+    height: 100%;
+    min-height: 0;
+    padding: 0;
+    border-radius: 8px;
+    cursor: zoom-in;
+}
+
+#tw-panel .tw-preview-member:not(:disabled) {
+    cursor: zoom-in;
+}
+
+/* 搭配直接用成员原图拼成预览，每个成员可单独放大。 */
+#tw-panel .tw-preview[data-combination="true"] {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-auto-rows: minmax(0, 1fr);
+    gap: 8px;
+}
+
+#tw-panel .tw-preview-member {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
     min-width: 0;
-    padding: 8px 11px;
-    border: 1px solid var(--tw-line-strong);
-    border-radius: 9px;
-    background: var(--tw-bg-input);
+    min-height: 0;
+    padding: 0;
+    color: var(--tw-muted);
+}
+
+#tw-panel .tw-preview-member img {
+    flex: 1;
+    min-height: 0;
+}
+
+#tw-panel .tw-preview-member span {
+    max-width: 100%;
+    overflow: hidden;
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#tw-panel .tw-image-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+#tw-panel .tw-image-actions > span {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    color: var(--tw-muted);
+    font-size: 12.5px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#tw-panel .tw-image-actions button {
+    flex: 0 0 auto;
+    height: 30px;
+    padding: 0 12px;
+    border-color: var(--tw-line-strong);
+    color: var(--tw-ink-secondary);
+    font-size: 12.5px;
+}
+
+#tw-panel .tw-image-actions button:not(:disabled):hover {
+    background: var(--tw-bg-hover);
+    color: #fff;
+}
+
+#tw-panel .tw-image-actions button[data-action="remove-image"]:not(:disabled):hover {
+    border-color: var(--tw-danger-border);
+    background: var(--tw-danger-bg);
+    color: var(--tw-danger);
+}
+
+/* 穿着：把“谁可以穿”和“此刻穿着”分成带说明的两行 */
+#tw-panel .tw-wearer-card {
+    display: grid;
+    flex: 0 0 auto;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--tw-line);
+    border-radius: 14px;
+    background: var(--tw-bg-card);
+}
+
+#tw-panel .tw-wearer-row {
+    display: grid;
+    gap: 7px;
+}
+
+#tw-panel .tw-wearer-label {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
     color: var(--tw-ink);
     font-size: 13px;
-    box-shadow: none;
-    transition: border-color 0.16s ease, box-shadow 0.16s ease;
+    font-weight: 600;
+    line-height: 1.3;
 }
 
-#tw-panel .tw-details :is(input, select, textarea):focus {
-    border-color: var(--tw-selected-border);
-    box-shadow: 0 0 0 3px rgba(192, 132, 252, 0.12);
+#tw-panel .tw-wearer-label small {
+    color: var(--tw-muted);
+    font-size: 11.5px;
+    font-weight: 400;
 }
 
-/* 复用标签选择器的箭头图标，同时保留原生下拉菜单的键盘与触屏操作。 */
-#tw-panel .tw-select-control { position: relative; display: block; width: 100%; min-width: 0; }
-#tw-panel .tw-select-control select { appearance: none; padding-right: 34px; cursor: pointer; }
-#tw-panel .tw-select-control > .tw-icon { position: absolute; right: 11px; top: 50%; transform: translateY(-50%); pointer-events: none; color: var(--tw-ink-secondary); }
-#tw-panel .tw-select-control select:disabled + .tw-icon { opacity: 0.45; }
-
-#tw-panel .tw-wearer-modes input {
-    width: 16px;
-    height: 16px;
-    margin: 0;
-    padding: 0;
-    accent-color: var(--tw-accent-strong);
-    cursor: pointer;
-}
-
+#tw-panel .tw-wearer-modes,
 #tw-panel .tw-current-modes {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
-    flex: 0 0 auto;
+    min-width: 0;
+}
+
+#tw-panel .tw-wearer-modes label {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    height: 36px;
+    padding: 0 12px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 10px;
+    background: var(--tw-bg-input);
+    color: var(--tw-ink-secondary);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.14s ease, background-color 0.14s ease;
+}
+
+#tw-panel .tw-wearer-modes label:hover {
+    border-color: rgba(255, 255, 255, 0.28);
+}
+
+#tw-panel .tw-wearer-modes label:has(:checked) {
+    border-color: var(--tw-selected-border);
+    background: var(--tw-selected);
+    color: var(--tw-accent-ink);
+}
+
+#tw-panel .tw-wearer-modes label:has(:disabled) {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 #tw-panel .tw-current-modes button {
-    min-height: 32px;
-    padding: 4px 10px;
-    border: 1px solid var(--tw-line-strong);
-    border-radius: 10px;
-    background: var(--tw-bg-elevated);
+    height: 36px;
+    padding: 0 8px;
+    border-color: var(--tw-line-strong);
+    background: transparent;
     color: var(--tw-ink-secondary);
-    font-size: 12px;
+    font-size: 12.5px;
     font-weight: 600;
-    cursor: pointer;
-    transition: all 0.16s ease;
 }
 
 #tw-panel .tw-current-modes button:not(:disabled):hover {
@@ -1824,90 +2404,328 @@ const PANEL_CSS = `
 }
 
 #tw-panel .tw-current-modes button[aria-pressed="true"] {
-    border-color: var(--tw-selected-border);
-    background: linear-gradient(135deg, rgba(168, 85, 247, 0.24), rgba(99, 102, 241, 0.16));
-    color: #f3e8ff;
+    border-color: rgba(74, 222, 128, 0.45);
+    background: rgba(74, 222, 128, 0.12);
+    color: #bbf7d0;
 }
 
 #tw-panel .tw-current-modes button[aria-pressed="true"]::before {
-    content: "✓ ";
+    content: "✓";
+    font-weight: 700;
 }
 
-#tw-panel .tw-current-modes button:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-}
-
-#tw-panel .tw-details textarea {
-    min-height: 170px;
-    line-height: 1.6;
-    resize: vertical;
-}
-
-/* 下拉收起时只占一行；展开后在固定高度内搜索和滚动，数百个标签也不会撑长详情页。 */
-#tw-panel .tw-tag-picker { position: relative; margin-top: 8px; min-width: 0; }
-#tw-panel .tw-tag-picker summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 11px; border: 1px solid var(--tw-line-strong); border-radius: 9px; color: var(--tw-ink); background: var(--tw-bg-input); font-size: 13px; list-style: none; cursor: pointer; }
-#tw-panel .tw-tag-picker summary::-webkit-details-marker { display: none; }
-#tw-panel .tw-tag-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#tw-panel .tw-tag-picker summary .tw-icon { flex: 0 0 auto; }
-#tw-panel .tw-tag-picker summary:focus-visible { outline: 2px solid var(--tw-selected-border); outline-offset: 2px; }
-#tw-panel .tw-tag-picker[open] summary .tw-icon { transform: rotate(180deg); }
-#tw-panel .tw-tag-dropdown { position: absolute; z-index: 5; top: 100%; left: 0; right: 0; padding: 8px; margin-top: 4px; border: 1px solid var(--tw-line-strong); border-radius: 9px; background: var(--tw-bg-input); box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35); }
-/* 创建入口放在选项滚动区外，窄屏和长标签列表中也能直接操作。 */
-#tw-panel .tw-tag-search-row { display: flex; align-items: center; gap: 8px; }
-#tw-panel .tw-tag-search-row input { flex: 1; min-width: 0; }
-#tw-panel .tw-tag-search-row button { flex-shrink: 0; padding: 8px; white-space: nowrap; }
-#tw-panel .tw-tag-empty { margin: 10px 4px; color: var(--tw-ink-secondary); font-size: 13px; }
-#tw-panel .tw-garment-tag {
+/* 详情分页 */
+#tw-panel .tw-detail-tabs {
     display: grid;
+    flex: 0 0 auto;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 2px;
-    padding: 6px 0;
-    margin: 0;
-    min-width: 0;
-    border: 0;
-    max-height: min(200px, 30dvh);
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    color: var(--tw-ink-secondary);
-    font-size: 13px;
+    padding: 3px;
+    border: 1px solid var(--tw-line);
+    border-radius: 12px;
+    background: var(--tw-bg-base);
 }
 
-/* 自绘勾选样式隔离酒馆主题的暗色复选框；用白勾和整行底色同时区分选中，避免仅靠颜色辨认。 */
-#tw-panel .tw-garment-tag label { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 4px 8px; border-radius: 6px; overflow-wrap: anywhere; cursor: pointer; }
-#tw-panel .tw-garment-tag label:has(input:checked) { color: #f5eaff; background: rgba(168, 85, 247, 0.2); box-shadow: inset 3px 0 0 #b877ff; }
-#tw-panel .tw-garment-tag input[type="checkbox"] { appearance: none; -webkit-appearance: none; display: grid; place-content: center; flex: 0 0 auto; width: 18px; height: 18px; margin: 0; padding: 0; border: 2px solid #798093; border-radius: 4px; background: #10121b; box-shadow: none; opacity: 1; filter: none; cursor: pointer; }
-#tw-panel .tw-garment-tag input[type="checkbox"]::before { content: none; }
-#tw-panel .tw-garment-tag input[type="checkbox"]:checked { border-color: #a66bf0; background: #8b3ddb; }
-#tw-panel .tw-garment-tag input[type="checkbox"]:checked::after { content: ''; display: block; width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0; transform: translateY(-1px) rotate(45deg); }
-#tw-panel .tw-garment-tag input[type="checkbox"]:focus-visible { outline: 2px solid #d8b4fe; outline-offset: 3px; }
+#tw-panel .tw-detail-tabs button {
+    height: 32px;
+    border-radius: 9px;
+    color: var(--tw-muted);
+    font-weight: 600;
+}
+
+#tw-panel .tw-detail-tabs .tw-icon {
+    width: 15px;
+    height: 15px;
+}
+
+#tw-panel .tw-detail-tabs button:hover {
+    color: #fff;
+}
+
+#tw-panel .tw-detail-tabs button[aria-pressed="true"] {
+    border-color: var(--tw-line-strong);
+    background: var(--tw-bg-elevated);
+    color: var(--tw-accent-ink);
+}
+
+#tw-panel .tw-detail-content {
+    display: flex;
+    flex: 1 0 auto;
+    flex-direction: column;
+    min-height: 230px;
+}
+
+#tw-panel .tw-detail-content > section {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+}
+
+#tw-panel .tw-properties {
+    display: grid;
+    gap: 12px;
+}
+
+#tw-panel .tw-description-options {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+#tw-panel .tw-field {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+}
+
+#tw-panel .tw-field > span:first-child {
+    color: var(--tw-muted);
+    font-size: 12px;
+    font-weight: 600;
+}
 
 #tw-panel .tw-description-actions {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
-    margin-bottom: 10px;
 }
 
 #tw-panel .tw-describe {
-    min-height: 36px;
-    padding: 6px 14px;
+    height: 38px;
+    padding: 0 14px;
     border-color: var(--tw-selected-border);
     background: var(--tw-selected);
-    color: #f3e8ff;
-    font-size: 12.5px;
+    color: var(--tw-accent-ink);
     font-weight: 600;
 }
 
 #tw-panel .tw-describe:not(:disabled):hover {
-    background: rgba(168, 85, 247, 0.26);
+    background: rgba(168, 85, 247, 0.28);
+}
+
+#tw-panel .tw-describe .tw-icon {
+    width: 16px;
+    height: 16px;
+}
+
+#tw-panel .tw-details textarea {
+    flex: 1 1 auto;
+    min-height: 180px;
+    padding: 10px 12px;
+    resize: vertical;
+    line-height: 1.6;
+}
+
+#tw-panel .tw-combination-details {
+    display: grid;
+    gap: 8px;
+    padding: 12px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 12px;
+    background: var(--tw-bg-card);
+    color: var(--tw-muted);
+    font-size: 12.5px;
+}
+
+#tw-panel .tw-combination-details button {
+    height: 36px;
+    border-color: var(--tw-line-strong);
+    color: var(--tw-ink);
+}
+
+#tw-panel .tw-combination-details button:not(:disabled):hover {
+    background: var(--tw-bg-hover);
+}
+
+/* 标签页：直接展开，标签是可点选的胶囊，数百个标签也在本区域内滚动 */
+#tw-panel .tw-tag-picker {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 0;
+}
+
+#tw-panel .tw-tag-summary {
+    color: var(--tw-muted);
+    font-size: 12.5px;
+    overflow-wrap: anywhere;
+}
+
+#tw-panel .tw-tag-dropdown {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 0;
+}
+
+#tw-panel .tw-tag-search-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+}
+
+#tw-panel .tw-tag-search-row button {
+    height: 38px;
+    padding: 0 12px;
+    border-color: var(--tw-line-strong);
+    color: var(--tw-ink-secondary);
+    font-weight: 600;
+}
+
+#tw-panel .tw-tag-search-row button:not(:disabled):hover {
+    background: var(--tw-bg-hover);
+    color: #fff;
+}
+
+#tw-panel .tw-tag-search-row .tw-icon {
+    width: 15px;
+    height: 15px;
+}
+
+#tw-panel .tw-garment-tag {
+    display: flex;
+    flex-wrap: wrap;
+    align-content: flex-start;
+    gap: 7px;
+    min-width: 0;
+    max-height: 46dvh;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    border: 0;
+}
+
+#tw-panel .tw-garment-tag > label {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    height: 32px;
+    padding: 0 13px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 999px;
+    background: var(--tw-bg-elevated);
+    color: var(--tw-ink-secondary);
+    font-size: 13px;
+    cursor: pointer;
+    transition: border-color 0.12s ease, background-color 0.12s ease, color 0.12s ease;
+}
+
+#tw-panel .tw-garment-tag > label:hover {
+    border-color: rgba(255, 255, 255, 0.3);
+    color: #fff;
+}
+
+#tw-panel .tw-garment-tag > label:has(:checked) {
+    border-color: var(--tw-accent);
+    background: var(--tw-selected);
+    color: var(--tw-accent-ink);
+    font-weight: 600;
+}
+
+#tw-panel .tw-garment-tag > label:has(:focus-visible) {
+    outline: 2px solid var(--tw-accent);
+    outline-offset: 2px;
+}
+
+#tw-panel .tw-garment-tag > label:has(:disabled) {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* 复选框仍保留给键盘和读屏，视觉上由整颗胶囊表达选中。 */
+#tw-panel .tw-garment-tag input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    margin: 0;
+    border: 0;
+    border-radius: 999px;
+    background: transparent !important;
+    opacity: 0;
+    cursor: inherit;
+}
+
+#tw-panel .tw-tag-empty {
+    color: var(--tw-muted);
+    font-size: 12.5px;
+}
+
+/* 底部操作：保存为主，导出次之，删除单独分隔并用红色强调 */
+#tw-panel .tw-detail-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    display: grid;
+    flex: 0 0 auto;
+    gap: 8px;
+    margin: 0 -16px;
+    padding: 12px 16px 14px;
+    border-top: 1px solid var(--tw-line);
+    background: var(--tw-bg-surface);
+}
+
+#tw-panel .tw-action-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) auto;
+    gap: 8px;
+}
+
+#tw-panel .tw-action-row button {
+    height: 38px;
+    padding: 0 14px;
+    border-color: var(--tw-line-strong);
+    color: var(--tw-ink-secondary);
+    font-weight: 600;
+}
+
+#tw-panel .tw-action-row button:not(:disabled):hover {
+    background: var(--tw-bg-hover);
+    color: #fff;
+}
+
+#tw-panel .tw-action-row .tw-icon {
+    width: 16px;
+    height: 16px;
+}
+
+#tw-panel .tw-action-row .tw-save:not(:disabled) {
+    border-color: rgba(192, 132, 252, 0.5);
+    background: linear-gradient(135deg, #9333ea 0%, #6366f1 100%);
+    color: #fff;
+}
+
+#tw-panel .tw-action-row .tw-save:not(:disabled):hover {
+    background: linear-gradient(135deg, #9333ea 0%, #6366f1 100%);
+    filter: brightness(1.1);
+}
+
+#tw-panel .tw-action-row .tw-delete {
+    width: 44px;
+    padding: 0;
+    border-color: var(--tw-danger-border);
+    background: var(--tw-danger-bg);
+    color: var(--tw-danger);
+}
+
+#tw-panel .tw-action-row .tw-delete span {
+    display: none;
+}
+
+#tw-panel .tw-action-row .tw-delete:not(:disabled):hover {
+    background: rgba(244, 63, 94, 0.26);
+    color: #fff;
 }
 
 #tw-panel .tw-garment-status {
-    margin: 0;
-    overflow-wrap: anywhere;
+    min-height: 0;
     color: var(--tw-accent);
     font-size: 12.5px;
-    text-align: center;
+    overflow-wrap: anywhere;
 }
 
 #tw-panel .tw-garment-status:empty {
@@ -1918,129 +2736,480 @@ const PANEL_CSS = `
     color: var(--tw-danger);
 }
 
-/* 详情只保留信息、描述和标签三页，等宽填满导航。 */
-#tw-panel .tw-detail-tabs {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 4px;
-    flex: 0 0 auto;
-    padding: 4px;
-    border: 1px solid var(--tw-line);
-    border-radius: 11px;
-    background: var(--tw-bg-input);
+/* 没有选中服装时只显示占位，不展示一整套禁用的表单 */
+#tw-panel .tw-details[data-empty="true"] > :not(.tw-preview-wrap) {
+    display: none;
 }
 
-#tw-panel .tw-detail-tabs button {
-    position: relative;
-    gap: 5px;
-    min-height: 34px;
-    border-radius: 8px;
-    color: var(--tw-muted);
-    font-size: 12.5px;
-    font-weight: 500;
-    white-space: nowrap;
+#tw-panel .tw-details[data-empty="true"] .tw-preview-wrap {
+    flex: 1 1 auto;
+    grid-template-rows: minmax(0, 1fr);
 }
 
-#tw-panel .tw-detail-tabs button:hover {
+#tw-panel .tw-details[data-empty="true"] .tw-preview {
+    height: auto;
+    min-height: 240px;
+    border-style: dashed;
+}
+
+#tw-panel .tw-details[data-empty="true"] .tw-image-actions {
+    display: none;
+}
+
+/* ───────── 弹窗统一外观 ───────── */
+#tw-panel dialog:not(#tw-panel) {
+    color: var(--tw-ink);
+}
+
+#tw-panel .tw-import-conflict,
+#tw-panel #tw-ask,
+#tw-panel #tw-import-picker,
+#tw-panel #tw-group-manager,
+#tw-panel #tw-combination-editor {
+    margin: auto;
+    padding: 20px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 18px;
+    background: var(--tw-bg-surface);
+    color: var(--tw-ink);
+    box-shadow: 0 30px 80px -16px rgba(0, 0, 0, 0.85);
+}
+
+#tw-panel .tw-import-conflict::backdrop,
+#tw-panel #tw-ask::backdrop,
+#tw-panel #tw-import-picker::backdrop,
+#tw-panel #tw-group-manager::backdrop,
+#tw-panel #tw-combination-editor::backdrop {
+    background: rgba(4, 5, 10, 0.7);
+    -webkit-backdrop-filter: blur(4px);
+    backdrop-filter: blur(4px);
+}
+
+#tw-panel .tw-import-conflict {
+    width: min(440px, calc(100% - 32px));
+}
+
+#tw-panel .tw-import-conflict h2 {
+    margin-bottom: 8px;
+}
+
+#tw-panel .tw-import-conflict p {
+    margin-bottom: 16px;
     color: var(--tw-ink-secondary);
+    overflow-wrap: anywhere;
 }
 
-#tw-panel .tw-detail-tabs .tw-icon {
-    width: 15px;
-    height: 15px;
-}
-
-#tw-panel .tw-detail-tabs button[aria-pressed="true"] {
-    background: var(--tw-bg-elevated);
-    color: #f3e8ff;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
-}
-
-#tw-panel .tw-detail-content {
-    flex: 1 0 auto;
-    min-height: 160px;
-}
-
-#tw-panel .tw-properties {
-    display: grid;
-    grid-template-columns: 64px minmax(0, 1fr);
-    align-items: center;
-    gap: 14px 12px;
-    padding: 6px 0 12px;
-    color: var(--tw-ink-secondary);
-    font-size: 13px;
-}
-
-#tw-panel .tw-properties dd {
+#tw-panel .tw-import-conflict form {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-}
-
-/* 图片状态与两个操作分行，避免窄详情栏把按钮文字挤成多行。 */
-#tw-panel .tw-properties .tw-image-actions { flex-wrap: wrap; justify-content: flex-start; gap: 6px; }
-#tw-panel #tw-garment-image-state { flex-basis: 100%; }
-
-/* 详情底部操作按钮组 */
-#tw-panel .tw-detail-actions {
-    display: grid;
-    gap: 10px;
-    flex: 0 0 auto;
-    padding-top: 12px;
-    border-top: 1px solid var(--tw-line);
-}
-
-#tw-panel .tw-action-row {
-    display: grid;
-    grid-template-columns: 1.35fr 1fr 1fr;
+    flex-wrap: wrap;
     gap: 8px;
 }
 
-#tw-panel .tw-action-row button {
-    min-height: 40px;
-    padding: 0 10px;
+#tw-panel .tw-import-conflict button {
+    flex: 1;
+    height: 38px;
+    padding: 0 12px;
     border-color: var(--tw-line-strong);
-    border-radius: 10px;
     background: var(--tw-bg-elevated);
-    color: var(--tw-ink-secondary);
-    font-size: 13px;
     font-weight: 600;
 }
 
-#tw-panel .tw-action-row button:not(:disabled):hover {
+/* 确认 / 输入弹窗：取代浏览器自带的 confirm 与 prompt */
+#tw-panel #tw-ask {
+    width: min(440px, calc(100% - 32px));
+}
+
+#tw-panel .tw-ask-form {
+    display: grid;
+    gap: 12px;
+}
+
+#tw-panel .tw-ask-message {
+    color: var(--tw-ink-secondary);
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+    white-space: pre-line;
+}
+
+#tw-panel .tw-ask-message:empty {
+    display: none;
+}
+
+#tw-panel .tw-ask-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+#tw-panel .tw-ask-actions button {
+    height: 38px;
+    min-width: 84px;
+    padding: 0 18px;
+    border-color: var(--tw-line-strong);
+    background: var(--tw-bg-elevated);
+    color: var(--tw-ink-secondary);
+    font-weight: 600;
+}
+
+#tw-panel .tw-ask-actions button:hover {
     background: var(--tw-bg-hover);
     color: #fff;
 }
 
-#tw-panel .tw-action-row [data-action="save-garment"]:not(:disabled) {
-    border-color: rgba(192, 132, 252, 0.45);
+#tw-panel .tw-ask-actions .tw-ask-ok {
+    border-color: rgba(192, 132, 252, 0.5);
     background: linear-gradient(135deg, #9333ea 0%, #6366f1 100%);
     color: #fff;
-    box-shadow: 0 4px 14px -3px rgba(147, 51, 234, 0.45);
 }
 
-#tw-panel .tw-action-row [data-action="save-garment"]:not(:disabled):hover {
-    filter: brightness(1.08);
-}
-
-#tw-panel .tw-action-row .tw-icon {
-    width: 16px;
-    height: 16px;
-}
-
-#tw-panel .tw-action-row .tw-delete {
+#tw-panel #tw-ask[data-danger="true"] .tw-ask-ok {
     border-color: var(--tw-danger-border);
-    background: var(--tw-danger-bg);
+    background: #dc2650;
+}
+
+#tw-panel .tw-ask-actions .tw-ask-ok:hover {
+    background: linear-gradient(135deg, #9333ea 0%, #6366f1 100%);
+    filter: brightness(1.1);
+}
+
+#tw-panel #tw-ask[data-danger="true"] .tw-ask-ok:hover {
+    background: #e63a63;
+}
+
+/* 导入：缩略图直接勾选，确认前不上传 */
+#tw-panel #tw-import-picker {
+    width: min(900px, calc(100vw - 24px));
+    max-height: calc(100dvh - 32px);
+    overflow-y: auto;
+}
+
+#tw-panel #tw-import-picker header,
+#tw-panel #tw-import-picker footer,
+#tw-panel .tw-import-tools {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+#tw-panel #tw-import-picker header,
+#tw-panel #tw-import-picker footer {
+    justify-content: space-between;
+}
+
+#tw-panel #tw-import-picker header button {
+    width: 34px;
+    height: 34px;
+}
+
+#tw-panel #tw-import-picker button {
+    min-height: 38px;
+    padding: 0 14px;
+    border-color: var(--tw-line-strong);
+    background: var(--tw-bg-elevated);
+    color: var(--tw-ink-secondary);
+    font-weight: 600;
+}
+
+#tw-panel #tw-import-picker button:not(:disabled):hover {
+    background: var(--tw-bg-hover);
+    color: #fff;
+}
+
+#tw-panel .tw-import-tools {
+    margin: 14px 0;
+}
+
+#tw-panel .tw-import-empty {
+    padding: 36px 0;
+    color: var(--tw-muted);
+    text-align: center;
+}
+
+#tw-panel .tw-import-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+    gap: 10px;
+    max-height: min(52dvh, 480px);
+    overflow-y: auto;
+}
+
+#tw-panel .tw-import-grid:empty {
+    display: none;
+}
+
+#tw-panel .tw-import-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+    padding: 8px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 12px;
+    background: var(--tw-bg-card);
+    cursor: pointer;
+}
+
+#tw-panel .tw-import-card:has(:checked) {
+    border-color: var(--tw-accent);
+    background: var(--tw-selected);
+}
+
+#tw-panel .tw-import-card input {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+}
+
+#tw-panel .tw-import-card img {
+    width: 100%;
+    height: 118px;
+    object-fit: contain;
+    border-radius: 8px;
+    background: #0f111a;
+}
+
+#tw-panel .tw-import-card > .tw-icon {
+    width: 100%;
+    height: 118px;
+    color: var(--tw-muted);
+}
+
+#tw-panel .tw-import-card span {
+    overflow: hidden;
+    font-size: 12.5px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#tw-panel .tw-import-status {
+    margin-top: 8px;
     color: var(--tw-danger);
 }
 
-#tw-panel .tw-action-row .tw-delete:not(:disabled):hover {
-    background: rgba(244, 63, 94, 0.22);
-    color: #fda4af;
+#tw-panel .tw-import-status:empty {
+    display: none;
 }
 
-/* 设置弹窗宽高较原尺寸扩大 20%，保留视口边距以便小窗口仍能完整显示。 */
+#tw-panel #tw-import-picker footer {
+    margin-top: 14px;
+}
+
+#tw-panel #tw-import-picker .tw-import-count {
+    color: var(--tw-muted);
+    font-size: 13px;
+}
+
+#tw-panel #tw-import-picker [data-action="confirm-import"]:not(:disabled) {
+    border-color: rgba(192, 132, 252, 0.5);
+    background: linear-gradient(135deg, #9333ea 0%, #6366f1 100%);
+    color: #fff;
+}
+
+/* 标签管理与搭配编辑 */
+#tw-panel #tw-group-manager,
+#tw-panel #tw-combination-editor {
+    width: min(520px, calc(100vw - 24px));
+    max-height: calc(100dvh - 40px);
+    overflow-y: auto;
+}
+
+#tw-panel #tw-combination-editor {
+    width: min(640px, calc(100vw - 24px));
+}
+
+#tw-panel .tw-combination-form > h2,
+#tw-panel .tw-group-form > h2 {
+    margin-bottom: 14px;
+    font-size: 17px;
+}
+
+#tw-panel .tw-combination-name {
+    display: grid;
+    gap: 6px;
+    color: var(--tw-muted);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+#tw-panel .tw-combination-items {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 8px;
+    max-height: 46dvh;
+    margin: 14px 0;
+    overflow-y: auto;
+}
+
+#tw-panel .tw-combination-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 56px;
+    padding: 6px 10px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 12px;
+    background: var(--tw-bg-card);
+    cursor: pointer;
+}
+
+#tw-panel .tw-combination-item:has(:checked) {
+    border-color: var(--tw-accent);
+    background: var(--tw-selected);
+}
+
+#tw-panel .tw-combination-item img {
+    flex: 0 0 auto;
+    width: 40px;
+    height: 46px;
+    object-fit: contain;
+    border-radius: 6px;
+    background: #0f111a;
+}
+
+#tw-panel .tw-combination-item span {
+    min-width: 0;
+    font-size: 12.5px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+#tw-panel .tw-combination-status,
+#tw-panel .tw-group-status {
+    margin-top: 8px;
+    color: var(--tw-danger);
+    font-size: 13px;
+}
+
+#tw-panel .tw-combination-status:empty,
+#tw-panel .tw-group-status:empty {
+    display: none;
+}
+
+#tw-panel .tw-group-rows {
+    display: grid;
+    gap: 8px;
+    margin: 0 0 14px;
+    max-height: 56dvh;
+    overflow-y: auto;
+}
+
+#tw-panel .tw-group-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+#tw-panel .tw-group-row input {
+    flex: 1;
+}
+
+#tw-panel .tw-group-row button {
+    width: 36px;
+    height: 36px;
+    border-color: var(--tw-line-strong);
+    background: var(--tw-bg-elevated);
+}
+
+#tw-panel .tw-group-row button:hover {
+    background: var(--tw-bg-hover);
+}
+
+/* 对话框底部按钮：取消次要、保存为主 */
+#tw-panel .tw-send-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 10px;
+}
+
+#tw-panel .tw-send-actions button {
+    min-height: 38px;
+    padding: 6px 20px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 10px;
+    background: var(--tw-bg-elevated);
+    color: var(--tw-ink-secondary);
+    font-weight: 600;
+}
+
+#tw-panel .tw-send-actions button:hover {
+    background: var(--tw-bg-hover);
+    color: #fff;
+}
+
+#tw-panel .tw-send-actions button[type="submit"] {
+    border-color: rgba(192, 132, 252, 0.5);
+    background: linear-gradient(135deg, #9333ea 0%, #6366f1 100%);
+    color: #fff;
+}
+
+#tw-panel .tw-send-actions button[type="submit"]:hover {
+    filter: brightness(1.1);
+}
+
+/* 原图查看 */
+#tw-panel #tw-original-image {
+    width: calc(100vw - 24px);
+    height: calc(100dvh - 24px);
+    max-width: none;
+    max-height: none;
+    margin: auto;
+    padding: 14px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 18px;
+    background: var(--tw-bg-base);
+    color: var(--tw-ink);
+}
+
+#tw-panel #tw-original-image[open] {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+#tw-panel #tw-original-image::backdrop {
+    background: rgba(3, 4, 8, 0.88);
+}
+
+#tw-panel #tw-original-image header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+#tw-panel #tw-original-image h2 {
+    overflow: hidden;
+    font-size: 16px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#tw-panel #tw-original-image header button {
+    flex-shrink: 0;
+}
+
+#tw-panel #tw-original-image > img {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    object-fit: contain;
+}
+
+/* 矮屏幕：压缩预览与描述框下限，让编辑区域不被底部操作栏压住 */
+@media (max-height: 860px) {
+    #tw-panel .tw-preview {
+        height: clamp(130px, 22dvh, 220px);
+    }
+
+    #tw-panel .tw-details textarea {
+        min-height: 130px;
+    }
+}
+
 #tw-panel #tw-settings {
     inset: 0;
     width: min(1056px, calc(100% - 48px));
@@ -2448,176 +3617,357 @@ const PANEL_CSS = `
 }
 
 /* 移动端与紧凑视口响应式布局 */
-@media (max-width: 900px), (max-height: 500px) and (pointer: coarse) {
-    #tw-panel {
-        padding-bottom: 0;
+#tw-panel .tw-menu-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+#tw-panel .tw-save[data-dirty="true"]::after {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #fde68a;
+    box-shadow: 0 0 0 3px rgba(253, 230, 138, 0.22);
+}
+
+/* ───────── 中等宽度：工具栏允许换行，收起次要控件 ───────── */
+#tw-panel .tw-library-toolbar {
+    flex-wrap: wrap;
+    row-gap: 8px;
+}
+
+@media (max-width: 1240px) {
+    #tw-panel .tw-body {
+        grid-template-columns: 208px minmax(0, 1fr) 328px;
     }
+
+    #tw-panel .tw-result-count,
+    #tw-panel .tw-density {
+        display: none;
+    }
+}
+
+/* ───────── 移动端与紧凑视口：单栏 + 底部操作栏 ───────── */
+@media (max-width: 900px), (max-height: 500px) and (pointer: coarse) {
     #tw-panel .tw-shell {
         grid-template-rows: auto minmax(0, 1fr) auto;
     }
+
     #tw-panel .tw-header {
-        flex-wrap: wrap;
-        gap: 8px;
-        padding: 10px 14px;
-    }
-    #tw-panel .tw-brand {
-        margin-right: auto;
-    }
-    /* 紧凑视口把大分类放到整行，避免搜索和排序将页签挤成不可辨认的窄条。 */
-    #tw-panel .tw-library-switcher {
-        flex-basis: 100%;
-        order: 1;
-    }
-    #tw-panel .tw-body {
-        grid-template-columns: minmax(0, 1fr);
-        grid-template-rows: auto minmax(0, 1fr);
-        overflow: hidden;
-    }
-    #tw-panel .tw-sidebar {
         display: grid;
-        grid-template-columns: 40px minmax(0, 1fr);
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+    }
+
+    #tw-panel .tw-brand {
+        grid-column: 1;
+        grid-row: 1;
+    }
+
+    /* 窄屏只留图标，标题保留给读屏和初始焦点 */
+    #tw-panel .tw-brand > div {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+    }
+
+    #tw-panel .tw-library-switcher {
+        grid-column: 2;
+        grid-row: 1;
+    }
+
+    #tw-panel .tw-header-actions {
+        grid-column: 3;
+        grid-row: 1;
+    }
+
+    #tw-panel .tw-library-tabs {
+        max-width: none;
+        flex: 1 1 auto;
+    }
+
+    #tw-panel .tw-search {
+        grid-column: 1 / -1;
+        grid-row: 2;
+        flex: none;
+        max-width: none;
+        margin-left: 0;
+    }
+
+    #tw-panel .tw-icon-button {
+        width: 40px;
+        height: 40px;
+    }
+
+    #tw-panel .tw-body {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+    }
+
+    #tw-panel .tw-sidebar {
+        flex: 0 0 auto;
+        flex-direction: row;
         align-items: center;
         gap: 8px;
         padding: 8px 12px;
         border-right: 0;
         border-bottom: 1px solid var(--tw-line);
     }
+
     #tw-panel .tw-mobile-filter {
         position: relative;
-        display: grid;
-        width: 40px;
+        display: block;
+        flex: 0 0 44px;
+        width: 44px;
         height: 40px;
-        place-items: center;
-        border: 1px solid var(--tw-line-strong);
-        border-radius: 10px;
-        background: var(--tw-bg-elevated);
-        color: #e9d5ff;
     }
-    #tw-panel .tw-mobile-filter .tw-icon {
-        width: 18px;
-        height: 18px;
-    }
-    #tw-panel .tw-mobile-filter select {
+
+    #tw-panel .tw-mobile-filter > .tw-icon {
         position: absolute;
-        inset: 0;
-        width: 100%;
-        height: 100%;
-        opacity: 0;
-        font-size: 16px;
+        inset: 11px;
+        z-index: 1;
+        pointer-events: none;
+        color: var(--tw-accent);
     }
-    #tw-panel .tw-mobile-filter:focus-within {
-        outline: 2px solid var(--tw-accent);
-        outline-offset: 2px;
+
+    #tw-panel .tw-mobile-filter select {
+        width: 44px;
+        height: 40px;
+        min-height: 40px;
+        padding: 0;
+        color: transparent;
+        opacity: 1;
     }
+
     #tw-panel .tw-category-list {
         flex-direction: row;
+        flex: 1 1 auto;
         gap: 6px;
-        min-width: 0;
-        padding: 2px;
+        padding: 0;
         overflow-x: auto;
         overflow-y: hidden;
-        overscroll-behavior-x: contain;
         scrollbar-width: none;
-        scroll-behavior: auto;
     }
-    /* 窄屏分类栏下方保留范围入口，不随桌面的导入区一起隐藏。 */
-    #tw-panel .tw-selection-scope {
-        grid-column: 1 / -1;
-        grid-template-columns: auto minmax(0, 1fr);
-        align-items: center;
-        padding: 0;
+
+    #tw-panel .tw-category-list::-webkit-scrollbar {
+        display: none;
     }
+
+    #tw-panel .tw-nav-section {
+        display: contents;
+    }
+
+    #tw-panel .tw-nav-heading {
+        display: none;
+    }
+
     #tw-panel .tw-category {
-        display: inline-flex;
         flex: 0 0 auto;
-        gap: 6px;
         width: auto;
-        min-height: 38px;
-        padding: 6px 12px;
-        font-size: 13px;
+        height: 36px;
+        padding: 0 10px;
+        border-color: var(--tw-line);
+        border-radius: 999px;
+        background: var(--tw-bg-elevated);
     }
+
     #tw-panel .tw-category > .tw-icon {
-        width: 16px;
-        height: 16px;
+        display: none;
     }
-    #tw-panel .tw-count,
-    #tw-panel .tw-divider,
+
+    #tw-panel .tw-selection-scope {
+        order: 99;
+        display: flex;
+        flex: 0 0 auto;
+        align-items: center;
+        gap: 6px;
+        margin: 0 0 0 4px;
+        padding: 0 0 0 10px;
+        border-left: 1px solid var(--tw-line);
+    }
+
+    #tw-panel .tw-selection-scope select {
+        width: auto;
+        min-height: 36px;
+    }
+
     #tw-panel .tw-import-footer {
         display: none;
     }
-    #tw-panel .tw-library {
-        min-height: 0;
-        margin: 0;
-        overscroll-behavior: contain;
-    }
-    #tw-panel .tw-library-content {
-        padding: 12px;
-    }
-    #tw-panel .tw-bulk-actions {
-        margin: 10px 12px 12px;
-    }
-    #tw-panel .tw-empty {
-        gap: 10px;
-        min-height: 200px;
-        padding: 16px 0;
-    }
-    #tw-panel .tw-empty > .tw-icon {
-        width: 64px;
-        height: 64px;
-    }
-    #tw-panel h2 {
-        font-size: 15px;
-    }
+
+    #tw-panel .tw-library,
     #tw-panel .tw-details {
-        display: none;
-        grid-column: 1;
-        grid-row: 1 / -1;
-        padding: 14px 14px 20px;
-        border-left: 0;
-        overflow-y: auto;
-        overscroll-behavior: contain;
+        flex: 1 1 0;
+        min-height: 0;
     }
+
+    #tw-panel[data-mobile-screen="library"] .tw-details,
     #tw-panel[data-mobile-screen="details"] .tw-sidebar,
     #tw-panel[data-mobile-screen="details"] .tw-library {
         display: none;
     }
-    #tw-panel[data-mobile-screen="details"] .tw-details {
-        display: flex;
+
+    #tw-panel .tw-details {
+        border-left: 0;
+        padding-inline: 14px;
     }
+
+    #tw-panel .tw-detail-actions {
+        margin-inline: -14px;
+        padding-inline: 14px;
+    }
+
     #tw-panel .tw-preview {
-        height: 210px;
+        height: clamp(180px, 34dvh, 340px);
     }
-    #tw-panel .tw-properties {
-        grid-template-columns: 64px minmax(0, 1fr);
+
+    #tw-panel .tw-group-bar {
+        padding: 8px 12px;
     }
+
+    #tw-panel .tw-group-tools button span {
+        display: none;
+    }
+
+    #tw-panel .tw-group-tools button {
+        width: 34px;
+        padding: 0;
+    }
+
+    #tw-panel .tw-library-toolbar {
+        padding: 8px 12px;
+    }
+
+    #tw-panel .tw-toolbar-start {
+        flex: 1 1 100%;
+        overflow-x: auto;
+        scrollbar-width: none;
+    }
+
+    #tw-panel .tw-toolbar-start button {
+        flex: 0 0 auto;
+        height: 38px;
+    }
+
+    #tw-panel .tw-toolbar-end {
+        flex: 1 1 100%;
+        margin-left: 0;
+    }
+
+    #tw-panel .tw-sort {
+        flex: 1 1 auto;
+        width: auto;
+    }
+
+    #tw-panel .tw-sort select {
+        min-height: 38px;
+    }
+
+    #tw-panel .tw-view-modes .tw-icon-button {
+        width: 38px;
+        height: 34px;
+    }
+
+    #tw-panel .tw-library-content {
+        padding: 12px 12px 24px;
+    }
+
+    #tw-panel .tw-items {
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+        gap: 10px;
+    }
+
+    /* 批量栏贴底；菜单改为底部面板，避免在窄屏溢出 */
+    #tw-panel .tw-bulk-actions {
+        right: 8px;
+        bottom: 8px;
+        left: 8px;
+        width: auto;
+        max-width: none;
+    }
+
+    #tw-panel .tw-bulk-main {
+        justify-content: flex-start;
+    }
+
+    #tw-panel .tw-bulk-sep {
+        display: none;
+    }
+
+    #tw-panel .tw-bulk-main button:not(.tw-menu-item),
+    #tw-panel .tw-bulk-selection {
+        height: 40px;
+    }
+
+    #tw-panel .tw-bulk-main .tw-bulk-done {
+        margin-left: auto;
+    }
+
+    #tw-panel .tw-menu,
+    #tw-panel .tw-menu-wide {
+        position: fixed;
+        right: 8px;
+        bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
+        left: 8px;
+        width: auto;
+        max-height: 62dvh;
+        border-radius: 18px;
+    }
+
+    #tw-panel .tw-menu-item {
+        height: 44px;
+    }
+
+    #tw-panel .tw-library[data-multi-select="true"] .tw-library-content {
+        padding-bottom: 150px;
+    }
+
     #tw-panel .tw-mobile-actions {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(104px, 1.25fr);
+        grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 8px;
-        padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+        padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px));
         border-top: 1px solid var(--tw-line);
         background: var(--tw-bg-surface);
     }
+
     #tw-panel .tw-mobile-actions button {
-        gap: 6px;
-        min-height: 44px;
-        padding: 8px 10px;
+        height: 44px;
         border-color: var(--tw-line-strong);
-        border-radius: 10px;
         background: var(--tw-bg-elevated);
         color: var(--tw-ink-secondary);
-        font-size: 13px;
         font-weight: 600;
     }
+
+    /* 详情页只保留“返回列表”，避免与详情自己的保存/导出/删除重复 */
+    #tw-panel[data-mobile-screen="details"] .tw-mobile-actions {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    #tw-panel[data-mobile-screen="details"] .tw-mobile-actions > :not([data-action="toggle-details"]) {
+        display: none;
+    }
+
     #tw-panel .tw-mobile-actions .tw-mobile-import {
-        border-color: rgba(192, 132, 252, 0.45);
+        border-color: rgba(192, 132, 252, 0.5);
         background: linear-gradient(135deg, #9333ea 0%, #6366f1 100%);
         color: #fff;
     }
-    #tw-panel .tw-mobile-actions .tw-icon {
-        width: 18px;
-        height: 18px;
+
+    #tw-panel .tw-mobile-actions button[aria-expanded="true"] {
+        border-color: var(--tw-selected-border);
+        background: var(--tw-selected);
+        color: var(--tw-accent-ink);
     }
+
     #tw-panel #tw-settings {
         width: 100%;
         height: 100%;
@@ -2626,13 +3976,16 @@ const PANEL_CSS = `
         border: 0;
         border-radius: 0;
     }
+
     #tw-panel .tw-settings-header {
         padding: 12px 16px;
     }
+
     #tw-panel .tw-settings-body {
         grid-template-columns: minmax(0, 1fr);
         grid-template-rows: auto minmax(0, 1fr);
     }
+
     #tw-panel .tw-settings-nav {
         flex-direction: row;
         padding: 8px 12px;
@@ -2640,83 +3993,26 @@ const PANEL_CSS = `
         border-right: 0;
         border-bottom: 1px solid var(--tw-line);
     }
+
     #tw-panel .tw-settings-content {
         padding: 18px 16px;
     }
+
+    #tw-panel #tw-import-picker,
+    #tw-panel #tw-group-manager,
+    #tw-panel #tw-combination-editor {
+        padding: 16px;
+    }
 }
 
-@media (max-width: 600px) {
-    #tw-panel .tw-header {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) 68px 38px 38px;
-        gap: 8px;
-        padding: 10px 12px;
+/* 触屏没有悬停：收藏心形常驻显示，选中的标签始终可删除 */
+@media (hover: none) {
+    #tw-panel .tw-favorite {
+        opacity: 1;
     }
-    #tw-panel .tw-brand {
-        grid-column: 1 / 3;
-        grid-row: 1;
-        gap: 10px;
-        margin-right: 0;
-    }
-    #tw-panel .tw-brand > .tw-icon {
-        width: 32px;
-        height: 32px;
-        padding: 6px;
-    }
-    #tw-panel h1 {
-        font-size: 15px;
-    }
-    #tw-panel .tw-brand-subtitle {
-        font-size: 10px;
-    }
-    #tw-panel .tw-header > .tw-icon-button {
-        width: 38px;
-        height: 38px;
-    }
-    #tw-panel .tw-settings-button {
-        grid-column: 3;
-        grid-row: 1;
-    }
-    #tw-panel .tw-close {
-        grid-column: 4;
-        grid-row: 1;
-    }
-    /* 手机单独留一行给大分类，保持全部页签及新增入口可达。 */
-    #tw-panel .tw-library-switcher {
-        grid-column: 1 / -1;
-        grid-row: 3;
-    }
-    #tw-panel .tw-sort {
-        grid-column: 3 / 5;
-        grid-row: 2;
-        height: 38px;
-        padding: 0 4px;
-        gap: 2px;
-    }
-    #tw-panel .tw-sort .tw-icon {
-        display: none;
-    }
-    #tw-panel .tw-sort select {
-        width: 100%;
-        font-size: 11px;
-    }
-    #tw-panel .tw-search {
-        grid-column: 1;
-        grid-row: 2;
-        width: 100%;
-        min-width: 0;
-        height: 38px;
-    }
-    #tw-panel .tw-view-modes {
-        grid-column: 2;
-        grid-row: 2;
-        width: 100%;
-        height: 38px;
-    }
-    #tw-panel .tw-view-modes .tw-icon-button {
-        flex: 1 1 0;
-        width: auto;
-        height: 100%;
+
+    #tw-panel .tw-category:not([aria-pressed="true"]):hover {
+        background: transparent;
     }
 }
 
@@ -2725,17 +4021,25 @@ const PANEL_CSS = `
         min-height: 44px;
         padding: 8px 10px;
     }
+
     #tw-panel button,
     #tw-panel select {
         touch-action: manipulation;
     }
-}
 
-@media (hover: none) {
-    #tw-panel .tw-category:not([aria-pressed="true"]):hover {
-        background: transparent;
+    #tw-panel input:is([type="checkbox"], [type="radio"]) {
+        width: 20px;
+        height: 20px;
     }
 }
+
+@media (prefers-reduced-motion: reduce) {
+    #tw-panel *, #tw-panel *::before, #tw-panel *::after {
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+    }
+}
+
 `;
 
 // 酒馆助手使用独立 iframe 执行脚本，面板元素挂载到父级文档。
@@ -2794,6 +4098,354 @@ let importingGarments = false;
 const pendingGarmentImports = new Map();
 let replacingImage = false;
 let importConflictDialog;
+
+/* ───────── 界面辅助：批量弹出菜单、确认与输入弹窗、卡片大小 ───────── */
+const BULK_ENGINES = { apply: '.tw-bulk-apply', tags: '.tw-bulk-group', category: '.tw-bulk-category', favorite: '.tw-bulk-favorite' };
+let openBulkMenuName = '';
+let askSession;
+
+/**
+ * 读取当前勾选的服装记录；已被删除的记录自动忽略。
+ * @returns {object[]} 勾选的服装。
+ */
+function getCheckedGarments() {
+    return Array.from(checkedGarmentIds, id => garments.get(id)).filter(Boolean);
+}
+
+/**
+ * 把“有几件具备某属性”转为三态：全部具备、部分具备或都不具备。
+ * @param {number} count 具备属性的件数。
+ * @param {number} total 勾选总数。
+ * @returns {string} aria-checked 使用的 true、mixed 或 false。
+ */
+function getTriState(count, total) {
+    return total > 0 && count === total ? 'true' : count > 0 ? 'mixed' : 'false';
+}
+
+/**
+ * 关闭所有批量弹出菜单；键盘关闭时把焦点还给触发按钮。
+ * @param {boolean} restoreFocusToTrigger 是否恢复焦点。
+ * @returns {void} 无返回值。
+ */
+function closeBulkMenus(restoreFocusToTrigger = false) {
+    if (!panel) return;
+    const name = openBulkMenuName;
+    openBulkMenuName = '';
+    for (const trigger of panel.querySelectorAll('[data-bulk-menu]')) trigger.setAttribute('aria-expanded', 'false');
+    for (const menu of panel.querySelectorAll('.tw-menu')) menu.hidden = true;
+    if (restoreFocusToTrigger && name) panel.querySelector(`[data-bulk-menu="${name}"]`)?.focus();
+}
+
+/**
+ * 创建一个可点选的菜单项，三态由 aria-checked 表达，样式完全由衣柜自己绘制。
+ * @param {{role: string, state: string, label: string, engine: string, value: string}} options 菜单项参数。
+ * @returns {HTMLButtonElement} 菜单项按钮。
+ */
+function createMenuItem({ role, state, label, engine, value }) {
+    const button = hostDocument.createElement('button');
+    button.type = 'button';
+    button.className = 'tw-menu-item';
+    button.setAttribute('role', role);
+    button.setAttribute('aria-checked', state);
+    button.dataset.engine = engine;
+    button.dataset.value = value;
+    button.dataset.filterText = label.toLocaleLowerCase();
+    button.innerHTML = `<span class="tw-menu-mark">${icon('check', 'tw-icon-check')}${icon('minus', 'tw-icon-minus')}</span>`;
+    const text = hostDocument.createElement('span');
+    text.textContent = label;
+    button.append(text);
+    return button;
+}
+
+/**
+ * 按标签搜索框过滤批量标签菜单；数量很多时只切换可见性，不重建节点。
+ * @param {HTMLElement} menu 标签菜单。
+ * @returns {void} 无返回值。
+ */
+function filterBulkTagMenu(menu) {
+    const input = menu.querySelector('.tw-menu-search input');
+    const query = (input?.value ?? '').trim().toLocaleLowerCase();
+    let visible = 0;
+    for (const item of menu.querySelectorAll('.tw-menu-item[data-engine="tags"][data-value^="add:"], .tw-menu-item[data-engine="tags"][data-value^="remove:"]')) {
+        item.hidden = Boolean(query) && !item.dataset.filterText.includes(query);
+        if (!item.hidden) visible += 1;
+    }
+    const empty = menu.querySelector('.tw-menu-empty');
+    if (empty) empty.hidden = visible !== 0;
+}
+
+/**
+ * 根据勾选状态重建批量菜单：角色与标签为三态勾选，分类为单选。
+ * 菜单只设置原有选择器的值并触发其 change，业务逻辑完全沿用原实现。
+ * @param {string} name apply、tags 或 category。
+ * @returns {void} 无返回值。
+ */
+function renderBulkMenu(name) {
+    const menu = panel.querySelector(`[data-menu="${name}"]`);
+    if (!menu) return;
+    const items = getCheckedGarments();
+    const total = items.length;
+    const focusedValue = menu.contains(hostDocument.activeElement) ? hostDocument.activeElement.dataset?.value : undefined;
+    const entries = [];
+    if (name === 'apply') {
+        const selections = readEffectiveSelections();
+        for (const wearer of WEARERS) {
+            const count = items.filter(item => selections[wearer].has(item.id)).length;
+            const state = getTriState(count, total);
+            entries.push(createMenuItem({ role: 'menuitemcheckbox', state, label: wearer === 'user' ? 'USER' : 'Char',
+                engine: 'apply', value: `${state === 'true' ? 'unapply' : 'apply'}-${wearer}` }));
+        }
+        menu.replaceChildren(...entries);
+        const title = hostDocument.createElement('p');
+        title.className = 'tw-menu-title';
+        title.textContent = '穿着归属';
+        menu.prepend(title);
+    } else if (name === 'category') {
+        const categories = new Set(items.map(item => item.category));
+        const current = categories.size === 1 ? categories.values().next().value : '';
+        for (const [id, label] of CATEGORIES.slice(1)) {
+            entries.push(createMenuItem({ role: 'menuitemradio', state: String(id === current), label, engine: 'category', value: id }));
+        }
+        menu.replaceChildren(...entries);
+    } else if (name === 'tags') {
+        const groups = getFilterGarmentGroups();
+        if (!menu.querySelector('.tw-menu-list')) {
+            const search = hostDocument.createElement('div');
+            search.className = 'tw-menu-search';
+            const input = hostDocument.createElement('input');
+            input.type = 'search';
+            input.placeholder = '搜索标签…';
+            input.setAttribute('aria-label', '搜索标签');
+            input.autocomplete = 'off';
+            input.addEventListener('input', () => filterBulkTagMenu(menu));
+            input.addEventListener('keydown', event => {
+                if (event.key === 'ArrowDown') {
+                    event.preventDefault();
+                    menu.querySelector('.tw-menu-item:not([hidden])')?.focus();
+                }
+            });
+            search.append(input);
+            const list = hostDocument.createElement('div');
+            list.className = 'tw-menu-list';
+            menu.replaceChildren(search, list);
+        }
+        const search = menu.querySelector('.tw-menu-search');
+        search.hidden = groups.size <= 6;
+        for (const [id, label] of groups) {
+            const count = items.filter(item => item.groupIds.includes(id)).length;
+            const state = getTriState(count, total);
+            const entry = createMenuItem({ role: 'menuitemcheckbox', state, label, engine: 'tags', value: `${state === 'true' ? 'remove' : 'add'}:${id}` });
+            entries.push(entry);
+        }
+        const empty = hostDocument.createElement('p');
+        empty.className = 'tw-menu-empty';
+        empty.textContent = groups.size ? '没有匹配的标签' : '当前筛选下还没有标签，可在上方“＋ 标签”新增。';
+        empty.hidden = groups.size !== 0 ? true : false;
+        const clear = createMenuItem({ role: 'menuitem', state: 'false', label: '清空所选服装的全部标签', engine: 'tags', value: '' });
+        clear.dataset.tone = 'danger';
+        clear.querySelector('.tw-menu-mark').hidden = true;
+        const divider = hostDocument.createElement('div');
+        divider.className = 'tw-menu-divider';
+        menu.querySelector('.tw-menu-list').replaceChildren(...entries, empty, divider, clear);
+        filterBulkTagMenu(menu);
+    }
+    // 点击后菜单会按新状态重建；恢复焦点，键盘连续操作不会丢失位置。
+    if (focusedValue !== undefined) {
+        const next = Array.from(menu.querySelectorAll('.tw-menu-item')).find(item => item.dataset.engine && item.dataset.value.replace(/^(un)?apply-|^(add|remove):/, '') === focusedValue.replace(/^(un)?apply-|^(add|remove):/, ''));
+        next?.focus();
+    }
+}
+
+/**
+ * 通过原有的隐藏选择器执行批量操作。
+ * @param {string} engineName apply、tags、category 或 favorite。
+ * @param {string} value 选择器取值。
+ * @returns {void} 无返回值。
+ */
+function runBulkEngine(engineName, value) {
+    const engine = panel.querySelector(BULK_ENGINES[engineName]);
+    engine.value = value;
+    engine.dispatchEvent(new Event('change'));
+}
+
+/**
+ * 批量栏上的点击入口：打开/关闭菜单、执行菜单项或切换收藏。
+ * @param {MouseEvent} event 点击事件。
+ * @returns {void} 无返回值。
+ */
+function handleBulkMenu(event) {
+    const trigger = event.target.closest('[data-bulk-menu]');
+    if (trigger) {
+        if (trigger.disabled) return;
+        const name = trigger.dataset.bulkMenu;
+        if (openBulkMenuName === name) {
+            closeBulkMenus();
+            return;
+        }
+        closeBulkMenus();
+        openBulkMenuName = name;
+        trigger.setAttribute('aria-expanded', 'true');
+        renderBulkMenu(name);
+        const menu = panel.querySelector(`[data-menu="${name}"]`);
+        menu.hidden = false;
+        menu.querySelector('.tw-menu-item')?.focus();
+        return;
+    }
+    const item = event.target.closest('.tw-menu-item');
+    if (item) {
+        runBulkEngine(item.dataset.engine, item.dataset.value);
+        // 修改分类是一次性选择；角色和标签可连续勾选，菜单保持打开。
+        if (item.dataset.engine === 'category') closeBulkMenus(true);
+        return;
+    }
+    if (event.target.closest('[data-bulk-favorite]')) {
+        const items = getCheckedGarments();
+        if (items.length) runBulkEngine('favorite', items.every(entry => entry.favorite) ? 'unfavorite' : 'favorite');
+    }
+}
+
+/**
+ * 菜单内的键盘操作：上下键移动，Escape 只关闭菜单而不关闭整个衣柜。
+ * @param {KeyboardEvent} event 键盘事件。
+ * @returns {void} 无返回值。
+ */
+function handleBulkMenuKeys(event) {
+    if (!openBulkMenuName) return;
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        closeBulkMenus(true);
+        return;
+    }
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    const menu = panel.querySelector(`[data-menu="${openBulkMenuName}"]`);
+    if (!menu?.contains(event.target)) return;
+    const items = Array.from(menu.querySelectorAll('.tw-menu-item:not([hidden])'));
+    if (!items.length) return;
+    event.preventDefault();
+    const index = items.indexOf(hostDocument.activeElement);
+    const step = event.key === 'ArrowDown' ? 1 : -1;
+    items[(index + step + items.length) % items.length].focus();
+}
+
+/**
+ * 点击菜单以外的位置时收起批量菜单。
+ * @param {MouseEvent} event 点击事件。
+ * @returns {void} 无返回值。
+ */
+function dismissBulkMenus(event) {
+    // 菜单项点击后菜单会重建，事件目标可能已脱离文档；用点击发生时的事件路径判断才可靠。
+    if (openBulkMenuName && !event.composedPath().some(node => node.classList?.contains('tw-menu-wrap'))) closeBulkMenus();
+}
+
+/**
+ * 同步批量栏的菜单、收藏按钮状态；没有勾选或退出多选时收起菜单。
+ * @returns {void} 无返回值。
+ */
+function renderBulkExtras() {
+    const items = getCheckedGarments();
+    const favorite = panel.querySelector('[data-bulk-favorite]');
+    const allFavorite = items.length > 0 && items.every(item => item.favorite);
+    favorite.setAttribute('aria-pressed', String(allFavorite));
+    favorite.querySelector('span').textContent = allFavorite ? '取消收藏' : '收藏';
+    for (const control of panel.querySelectorAll('[data-bulk-menu], [data-bulk-favorite]')) control.disabled = items.length === 0;
+    if (!multiSelectMode || items.length === 0) closeBulkMenus();
+    else if (openBulkMenuName) renderBulkMenu(openBulkMenuName);
+}
+
+/**
+ * 调整卡片最小宽度，页面上图片很多时可以一屏看更多。
+ * @param {Event} event 滑块输入事件。
+ * @returns {void} 无返回值。
+ */
+function resizeGarmentCards(event) {
+    panel.style.setProperty('--tw-card-min', `${event.currentTarget.value}px`);
+}
+
+/**
+ * 更新按钮文字；按钮含图标时只改文字节点，保留图标。
+ * @param {HTMLElement} button 目标按钮。
+ * @param {string} text 新文字。
+ * @returns {void} 无返回值。
+ */
+function setButtonLabel(button, text) {
+    (button.querySelector('span') ?? button).textContent = text;
+}
+
+/**
+ * 标记详情表单有尚未保存的修改，保存按钮旁出现提示点。
+ * @param {boolean} dirty 是否有未保存修改。
+ * @returns {void} 无返回值。
+ */
+function setDetailsDirty(dirty) {
+    const save = panel.querySelector('[data-action="save-garment"]');
+    save.dataset.dirty = String(dirty);
+    save.title = dirty ? '有尚未保存的修改' : '';
+}
+
+/**
+ * 只有名称、分类、分级和描述需要点击保存；标签和穿着是即时保存的，不计入。
+ * @param {Event} event 详情表单的输入或变更事件。
+ * @returns {void} 无返回值。
+ */
+function markDetailsDirty(event) {
+    if (['garment_name', 'garment_category', 'garment_content_rating', 'garment_description'].includes(event.target.name)) setDetailsDirty(true);
+}
+
+/**
+ * 打开自带的确认/输入弹窗，替代浏览器原生 confirm 与 prompt。
+ * 传入 input 时为输入框，取消返回 null；否则为确认框，返回 true 或 false。
+ * @param {{title: string, message?: string, input?: string, confirmText?: string, cancelText?: string, danger?: boolean}} options 弹窗内容。
+ * @returns {Promise<string|boolean|null>} 用户的选择。
+ */
+function askDialog({ title, message = '', input, confirmText = '确定', cancelText = '取消', danger = false }) {
+    const dialog = panel.querySelector('#tw-ask');
+    const withInput = input !== undefined;
+    // 弹窗是模态的，正常不会重入；若被程序重入则按取消处理，避免互相覆盖。
+    if (dialog.open) return Promise.resolve(withInput ? null : false);
+    dialog.dataset.danger = String(danger);
+    dialog.querySelector('#tw-ask-title').textContent = title;
+    dialog.querySelector('.tw-ask-message').textContent = message;
+    const field = dialog.querySelector('.tw-ask-input');
+    field.hidden = !withInput;
+    field.value = withInput ? input : '';
+    field.setAttribute('aria-label', title);
+    const ok = dialog.querySelector('.tw-ask-ok');
+    const cancel = dialog.querySelector('.tw-ask-cancel');
+    ok.textContent = confirmText;
+    cancel.textContent = cancelText;
+    dialog.returnValue = '';
+    return new Promise(resolve => {
+        askSession = { resolve, withInput };
+        dialog.showModal();
+        // 破坏性操作默认聚焦“取消”，避免按住回车误删。
+        if (withInput) { field.focus(); field.select(); } else (danger ? cancel : ok).focus();
+    });
+}
+
+/**
+ * 确认类弹窗的简写。
+ * @param {string} title 标题。
+ * @param {string} message 说明。
+ * @param {{confirmText?: string, cancelText?: string, danger?: boolean}} options 按钮文案与是否为危险操作。
+ * @returns {Promise<boolean>} 用户是否确认。
+ */
+function askConfirm(title, message, options = {}) {
+    return askDialog({ title, message, ...options });
+}
+
+/**
+ * 弹窗关闭（点击按钮、回车或 Escape）后交回用户的选择。
+ * @returns {void} 无返回值。
+ */
+function finishAskDialog() {
+    if (!askSession) return;
+    const { resolve, withInput } = askSession;
+    askSession = undefined;
+    const dialog = panel.querySelector('#tw-ask');
+    const accepted = dialog.returnValue === 'ok';
+    resolve(withInput ? (accepted ? dialog.querySelector('.tw-ask-input').value : null) : accepted);
+}
 
 /**
  * 创建衣柜并加载服装与配置；只注册请求注入监听，不主动发送生成请求。
@@ -2903,7 +4555,15 @@ function initializeWardrobe() {
     panel.querySelector('[data-action="cancel-groups"]').addEventListener('click', closeGarmentGroupManager);
     panel.querySelector('.tw-group-rows').addEventListener('click', reorderGarmentGroup);
     panel.querySelector('.tw-group-form').addEventListener('submit', saveGarmentGroups);
-    panel.querySelector('[data-action="toggle-multi"]').addEventListener('click', toggleMultiSelect);
+    for (const button of panel.querySelectorAll('[data-action="toggle-multi"]')) button.addEventListener('click', toggleMultiSelect);
+    panel.querySelector('.tw-bulk-actions').addEventListener('click', handleBulkMenu);
+    panel.querySelector('.tw-bulk-actions').addEventListener('keydown', handleBulkMenuKeys);
+    panel.addEventListener('click', dismissBulkMenus);
+    panel.querySelector('.tw-density input').addEventListener('input', resizeGarmentCards);
+    panel.querySelector('.tw-detail-content').addEventListener('input', markDetailsDirty);
+    panel.querySelector('.tw-detail-content').addEventListener('change', markDetailsDirty);
+    panel.querySelector('#tw-ask .tw-ask-cancel').addEventListener('click', () => panel.querySelector('#tw-ask').close('cancel'));
+    panel.querySelector('#tw-ask').addEventListener('close', finishAskDialog);
     panel.querySelector('[data-action="describe-all"]').addEventListener('click', generateMissingGarmentDescriptions);
     for (const button of panel.querySelectorAll('[data-action="export-all"], [data-action="export-one"], [data-action="delete-one"], [data-action="remove-image"]')) {
         button.addEventListener('click', handleGarmentAction);
@@ -2950,6 +4610,8 @@ function openWardrobe() {
 function closeWardrobe() {
     stopDescriptionRequest();
     closeGarmentImage();
+    closeBulkMenus();
+    if (panel.querySelector('#tw-ask').open) panel.querySelector('#tw-ask').close('cancel');
     window.parent.clearTimeout(garmentTagSearchTimer);
     panel.querySelector('.tw-tag-picker').open = false;
     if (importConflictDialog?.open) importConflictDialog.close();
@@ -3079,8 +4741,8 @@ function selectWardrobeLibrary(event) {
  * 输入名称后新建并打开空衣柜，让外部数据有独立的导入目标。
  * @returns {void} 取消或空名称不创建，存储失败保留当前衣柜。
  */
-function addWardrobeLibrary() {
-    const name = window.parent.prompt('衣柜名称', `衣柜${wardrobeLibraries.size + 1}`)?.trim();
+async function addWardrobeLibrary() {
+    const name = (await askDialog({ title: '新增空衣柜', message: '为新的衣柜命名。', input: `衣柜${wardrobeLibraries.size + 1}`, confirmText: '创建' }))?.trim();
     if (!name) return;
     const id = window.parent.crypto.randomUUID();
     try { activateWardrobeLibrary(id, new Map([...wardrobeLibraries, [id, name]])); }
@@ -3446,7 +5108,7 @@ function clearPendingImports() {
  * @returns {Promise<void>} 文件导入完成后结束。
  */
 async function handleGarmentTransfer(event) {
-    if (settingsPanel.open || importConflictDialog?.open) return;
+    if (settingsPanel.open || importConflictDialog?.open || panel.querySelector('#tw-ask').open) return;
     if (event.type === 'paste' && event.target.closest('input, textarea, [contenteditable="true"]')) return;
     const transfer = event.clipboardData ?? event.dataTransfer;
     if (event.type === 'dragover') {
@@ -3943,14 +5605,14 @@ async function handleGarmentAction(event) {
         if (action === 'export-all') await exportGarments(garments.keys(), true);
         else if (action === 'export-one') {
             if (saveSelectedGarment()) await exportGarments([selectedGarmentId]);
-        } else if (action === 'delete-one') deleteGarments(new Set([selectedGarmentId]));
+        } else if (action === 'delete-one') await deleteGarments(new Set([selectedGarmentId]));
         else if (action === 'remove-image') {
             const item = garments.get(selectedGarmentId);
             const selections = readWearerSelections();
             if (sendSettings.content_type !== 'text' && (selections.user.has(item.id) || selections.char.has(item.id))) {
                 throw new Error('这件服装正在以图片模式应用，请先取消应用或切换为文字模式，再删除图片。');
             }
-            if (!window.parent.confirm('删除这件服装的图片？名称和描述会保留。')) return;
+            if (!await askConfirm('删除图片', '删除这件服装的图片？名称和描述会保留。', { confirmText: '删除图片', danger: true })) return;
             const saved = saveSelectedGarment();
             if (!saved) return;
             const next = new Map(garments);
@@ -3971,13 +5633,13 @@ async function handleGarmentAction(event) {
  * @param {Set<string>} ids 待删除的服装标识集合。
  * @returns {void} 无返回值。
  */
-function deleteGarments(ids) {
+async function deleteGarments(ids) {
     for (const item of garments.values()) {
         if (!ids.has(item.id) && item.componentIds?.some(id => ids.has(id))) {
             throw new Error(`所选服装仍被搭配“${item.name}”使用，请先编辑该搭配移除成员，或一并删除搭配。`);
         }
     }
-    if (!ids.size || !window.parent.confirm(`删除所选的 ${ids.size} 件服装及其图片？此操作不可撤销。`)) return;
+    if (!ids.size || !await askConfirm('删除服装', `删除所选的 ${ids.size} 件服装及其图片？\n此操作不可撤销。`, { confirmText: '删除', danger: true })) return;
     const next = new Map(garments);
     const removedImages = [];
     for (const id of ids) {
@@ -4162,10 +5824,10 @@ function pruneDeletedSelections(remaining) {
  * @param {MouseEvent} [event] 创建按钮事件；省略时按列表入口处理。
  * @returns {void} 无返回值。
  */
-function addGarmentGroup(event) {
+async function addGarmentGroup(event) {
     const fromDetails = event?.currentTarget.dataset.action === 'add-garment-group';
     const search = panel.querySelector('.tw-tag-search');
-    const name = window.parent.prompt('标签名称', fromDetails ? search.value.trim() : '')?.trim();
+    const name = (await askDialog({ title: '新增标签', message: '标签可用于筛选和整理服装。', input: fromDetails ? search.value.trim() : '', confirmText: '创建' }))?.trim();
     if (!name) return;
     try {
         let id;
@@ -4276,11 +5938,11 @@ function saveGarmentGroups(event) {
  * @param {MouseEvent} [event] 标签关闭按钮的点击事件。
  * @returns {void} 无返回值。
  */
-function deleteGarmentGroup(event) {
+async function deleteGarmentGroup(event) {
     const button = event?.target.closest('[data-delete-group]');
     if (event && !button) return;
     const groupId = button ? button.dataset.deleteGroup : currentGroup;
-    if (!garmentGroups.has(groupId) || !window.parent.confirm(`删除标签“${garmentGroups.get(groupId)}”？服装及其他标签将保留。`)) return;
+    if (!garmentGroups.has(groupId) || !await askConfirm('删除标签', `删除标签“${garmentGroups.get(groupId)}”？\n服装及其他标签将保留。`, { confirmText: '删除标签', danger: true })) return;
     try {
         saveFilterGarmentGroups(new Map([[groupId, null]]));
         setLibraryStatus('标签已删除');
@@ -4588,6 +6250,7 @@ function renderBulkState() {
         card.setAttribute('aria-pressed', String(multiSelectMode ? input.checked : card.dataset.garment === selectedGarmentId));
     }
     for (const button of panel.querySelectorAll('[data-action="export-all"]')) button.disabled = garments.size === 0;
+    renderBulkExtras();
 }
 
 /**
@@ -4603,7 +6266,7 @@ async function handleBulkAction(event) {
     try {
         const action = event.type === 'change' ? control.value : control.dataset.bulk;
         if (action === 'export') await exportGarments(checkedGarmentIds);
-        else if (action === 'delete') deleteGarments(new Set(checkedGarmentIds));
+        else if (action === 'delete') await deleteGarments(new Set(checkedGarmentIds));
         else {
             const wearer = action.endsWith('-user') ? 'user' : 'char';
             const removing = action.startsWith('unapply-');
@@ -4713,11 +6376,11 @@ function setLibraryStatus(message, error = false) {
     const status = panel.querySelector('.tw-library-status');
     status.textContent = message;
     status.dataset.error = String(error);
-    if (message && !error) {
+    if (message) {
         libraryStatusTimer = window.parent.setTimeout(() => {
             status.textContent = '';
             libraryStatusTimer = undefined;
-        }, 3000);
+        }, error ? 8000 : 3000);
     }
 }
 
@@ -5234,7 +6897,7 @@ function renderGarmentLibrary() {
             image.loading = 'lazy';
             image.decoding = 'async';
             card.append(image);
-        } else card.innerHTML = icon(item.componentIds ? 'star' : 'shirt');
+        } else card.innerHTML = icon(item.componentIds ? 'combine' : 'shirt');
         const name = hostDocument.createElement('span');
         name.textContent = item.componentIds ? `${item.name}（${item.componentIds.length} 件搭配）` : item.name;
         card.append(name);
@@ -5280,6 +6943,8 @@ function renderGarmentLibrary() {
     list.hidden = visible === 0;
     panel.querySelector('.tw-library').dataset.hasItems = String(visible !== 0);
     panel.querySelector('.tw-empty').hidden = visible !== 0;
+    panel.querySelector('.tw-empty').dataset.kind = garments.size === 0 ? 'no-garments' : 'no-match';
+    panel.querySelector('.tw-result-count').textContent = visible === garments.size ? `共 ${visible} 件` : `显示 ${visible} / 共 ${garments.size} 件`;
     for (const button of panel.querySelectorAll('[data-category]')) {
         button.querySelector('.tw-count').textContent = String(counts.get(button.dataset.category) ?? 0);
     }
@@ -5309,6 +6974,8 @@ function renderGarmentDetails() {
     panel.querySelector('.tw-combination-details').hidden = !item?.componentIds;
     setDescriptionBusy(Boolean(descriptionRequest));
     renderWearerState();
+    panel.querySelector('.tw-details').dataset.empty = String(!item);
+    setDetailsDirty(false);
 }
 
 /**
@@ -5457,9 +7124,10 @@ async function generateGarmentDescription() {
         const result = await requestGarmentDescription(item, panel.querySelector('[name="description_mode"]').value, config, request);
         if (!result) return;
         // 先完整校验回复再更新表单，格式错误时保留原来的名称、描述和存档。
-        if (result.category !== undefined || result.tags !== undefined) commitGeneratedGarment(garments.get(item.id), result, false);
+        if (result.category !== undefined || result.tags !== undefined) await commitGeneratedGarment(garments.get(item.id), result, false);
         if (result.name !== undefined) panel.querySelector('[name="garment_name"]').value = result.name;
         panel.querySelector('[name="garment_description"]').value = result.description;
+        setDetailsDirty(true);
         const savedFields = [result.category !== undefined ? '分类' : '', result.tags !== undefined ? '标签' : ''].filter(Boolean).join('与');
         setGarmentStatus(savedFields ? `${savedFields}已保存，名称与描述请保存或应用` : result.name !== undefined ? '名称与描述已生成，请保存或应用' : '描述已生成，请保存或应用');
     } catch (error) {
@@ -5489,7 +7157,7 @@ async function generateMissingGarmentDescriptions() {
         setLibraryStatus('没有需要识图的图片，已有描述的图片会自动跳过');
         return;
     }
-    if (!window.parent.confirm(`${currentCategory === 'missing-description' ? '当前筛选中' : '衣柜中'}有 ${ids.length} 张图片尚未识别，是否一键识图？\n仅识别没有描述的图片，已有描述的图片将跳过。识别结果会自动保存。`)) return;
+    if (!await askConfirm('一键识图', `${currentCategory === 'missing-description' ? '当前筛选中' : '衣柜中'}有 ${ids.length} 张图片尚未识别，是否一键识图？\n仅识别没有描述的图片，已有描述的图片将跳过。识别结果会自动保存。`, { confirmText: '开始识图' })) return;
     // 整批共用同一份连接，错误提示也按该连接移除密钥。
     const config = savedApiSettings;
     let request;
@@ -5509,7 +7177,7 @@ async function generateMissingGarmentDescriptions() {
             // 等待接口时列表仍可删除或更新记录；只补全原图未变且仍无描述的服装。
             const latest = garments.get(id);
             if (!latest?.image || latest.image !== item.image || latest.description.trim()) continue;
-            commitGeneratedGarment(latest, result, true);
+            await commitGeneratedGarment(latest, result, true);
             request.completed = ++completed;
             if (id === selectedGarmentId) {
                 panel.querySelector('[name="garment_name"]').value = result.name ?? latest.name;
@@ -5611,7 +7279,7 @@ function parseGarmentDescriptionReply(reply, options = { category: true, tags: t
  * @param {boolean} saveDescription 是否同时保存名称与描述；单张识图仍保留原有草稿流程。
  * @returns {void} 保存成功后同步当前服装的分类控件，不提交其他编辑草稿。
  */
-function commitGeneratedGarment(item, result, saveDescription) {
+async function commitGeneratedGarment(item, result, saveDescription) {
     const groups = new Map(garmentGroups);
     const groupIds = new Set(item.groupIds);
     if (result.tags !== undefined) {
@@ -5619,7 +7287,7 @@ function commitGeneratedGarment(item, result, saveDescription) {
         const names = new Map(Array.from(groups, ([id, label]) => [label, id]));
         const newLabels = result.tags.filter(label => !names.has(label));
         // 单张与批量共用确认入口；拒绝只跳过新标签，不丢弃描述、分类或可复用的已有标签。
-        const createTags = !newLabels.length || window.parent.confirm(`AI 为“${result.name ?? item.name}”建议新增以下标签：\n${newLabels.join('、')}\n\n是否创建并归入这些标签？\n取消仅跳过新标签，已有标签和其他识图结果仍会保留。`);
+        const createTags = !newLabels.length || await askConfirm('创建 AI 建议的标签？', `AI 为“${result.name ?? item.name}”建议新增以下标签：\n${newLabels.join('、')}\n\n跳过时只忽略新标签，已有标签和其他识图结果仍会保留。`, { confirmText: '创建并归入', cancelText: '跳过新标签' });
         for (const label of result.tags) {
             let id = names.get(label);
             if (!id) {
@@ -5651,7 +7319,7 @@ function setDescriptionBusy(busy) {
     }
     const button = panel.querySelector('[data-action="describe"]');
     button.disabled = !item?.image || busy;
-    button.textContent = busy ? '正在生成…' : 'AI 生成描述';
+    setButtonLabel(button, busy ? '正在生成…' : 'AI 生成描述');
     for (const control of panel.querySelectorAll('[data-action="export-one"], [data-action="delete-one"]')) control.disabled = !item || busy;
     panel.querySelector('[data-action="remove-image"]').disabled = !item?.image || busy;
     const replaceButton = panel.querySelector('[data-action="replace-image"]');
@@ -5661,7 +7329,7 @@ function setDescriptionBusy(busy) {
     panel.querySelector('[data-action="edit-combination"]').disabled = !item?.componentIds || busy;
     const bulkButton = panel.querySelector('[data-action="describe-all"]');
     bulkButton.disabled = busy;
-    bulkButton.textContent = descriptionRequest?.bulk ? '识图中…' : '一键识图';
+    setButtonLabel(bulkButton, descriptionRequest?.bulk ? '识图中…' : '一键识图');
 }
 
 /**
@@ -5966,7 +7634,7 @@ function clearTemplateStatus(event) {
 }
 
 /**
- * 在存档入口归一化两种描述提示词；旧存档或空白字段补充只描述服饰的默认提示词。
+ * 在存档入口归一化两种描述提示词；缺失、空白或未编辑的旧默认值使用新版，自定义内容保持原样。
  * @returns {void} 无返回值。
  */
 function loadDescriptionPrompts() {
@@ -5974,7 +7642,8 @@ function loadDescriptionPrompts() {
     const form = settingsPanel.querySelector('.tw-description-form');
     for (const field of Object.keys(DEFAULT_DESCRIPTION_PROMPTS)) {
         const value = saved?.[field];
-        descriptionPrompts[field] = typeof value === 'string' && value.trim() ? value : DEFAULT_DESCRIPTION_PROMPTS[field];
+        const previousDefault = field === 'outfit' ? PREVIOUS_DEFAULT_OUTFIT_PROMPT : PREVIOUS_DEFAULT_ITEM_PROMPT;
+        descriptionPrompts[field] = typeof value === 'string' && value.trim() && value !== previousDefault ? value : DEFAULT_DESCRIPTION_PROMPTS[field];
         // item 与原生控件集合的方法同名，统一通过 namedItem 读取实际表单控件。
         form.elements.namedItem(field).value = descriptionPrompts[field];
     }

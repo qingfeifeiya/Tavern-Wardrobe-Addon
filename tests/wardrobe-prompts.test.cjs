@@ -124,6 +124,8 @@ root = { isConnected: true };
 refreshWardrobe = () => {};
 renderGarmentLibrary = () => {};
 globalThis.api = { loadWardrobeTemplates, saveWardrobeTemplate, loadDescriptionPrompts, saveDescriptionPrompts,
+    previousOutfitPrompt: PREVIOUS_DEFAULT_OUTFIT_PROMPT,
+    previousItemPrompt: PREVIOUS_DEFAULT_ITEM_PROMPT,
     loadGarments, generateGarmentDescription, generateMissingGarmentDescriptions, stopDescriptionRequest, saveSelectedGarment, buildWearerContent,
     handleWardrobeData, parseWardrobeSettingsData, loadSendSettings,
     filterMissing: ids => { currentCategory = 'missing-description'; visibleGarmentIds = new Set(ids); },
@@ -155,6 +157,33 @@ async function main() {
     for (const prompt of Object.values(api.state().descriptionPrompts)) {
         assert.ok(prompt.includes('人物') && prompt.includes('背景') && prompt.includes('仅输出'), '默认提示词限制人物和背景，要求只输出描述');
     }
+
+    // 升级仅替换原始默认提示词，用户编辑的两种提示词都应完整保留。
+    const defaultOutfitPrompt = api.state().descriptionPrompts.outfit;
+    assert.ok(defaultOutfitPrompt.includes('原始标准静态版型') && defaultOutfitPrompt.includes('200-280字'), '默认服装提示词使用新版静态版型及字数要求');
+    assert.ok(defaultOutfitPrompt.includes('后背结构的合理补全') && defaultOutfitPrompt.includes('系统追加的最终输出格式'), '新版包含后背还原要求并服从最终输出格式');
+    saved.wardrobe_description_prompts = { outfit: api.previousOutfitPrompt, item: '自定义单品提示词' };
+    api.loadDescriptionPrompts();
+    assert.equal(api.state().descriptionPrompts.outfit, defaultOutfitPrompt, '旧默认服装提示词自动升级');
+    assert.equal(descriptionForm.elements.outfit.value, defaultOutfitPrompt, '设置表单同步显示新版服装提示词');
+    assert.equal(api.state().descriptionPrompts.item, '自定义单品提示词', '升级不改写单品提示词');
+    saved.wardrobe_description_prompts.outfit = '自定义服装提示词';
+    api.loadDescriptionPrompts();
+    assert.equal(api.state().descriptionPrompts.outfit, '自定义服装提示词', '升级不改写自定义服装提示词');
+    saved.wardrobe_description_prompts.item = api.previousItemPrompt;
+    api.loadDescriptionPrompts();
+    const upgradedItemPrompt = api.state().descriptionPrompts.item;
+    assert.ok(upgradedItemPrompt.includes('单品版型还原师') && upgradedItemPrompt.includes('120-220字'), '旧默认单品提示词升级为新版静态版型要求');
+    assert.ok(upgradedItemPrompt.includes('{{name}}') && upgradedItemPrompt.includes('{{category}}'), '新版保留目标名称和预设分类占位符');
+    assert.ok(upgradedItemPrompt.includes('完全无法辨认或不存在该目标单品') && upgradedItemPrompt.includes('不可见/后背结构的合理补全'), '新版包含目标缺失与背面固定结构要求');
+    assert.equal(descriptionForm.elements.namedItem('item').value, upgradedItemPrompt, '单品表单同步升级');
+    assert.equal(api.state().descriptionPrompts.outfit, '自定义服装提示词', '单品升级保留自定义服装提示词');
+    saved.wardrobe_description_prompts.item = '自定义单品提示词';
+    api.loadDescriptionPrompts();
+    assert.equal(api.state().descriptionPrompts.item, '自定义单品提示词', '升级不改写自定义单品提示词');
+    delete saved.wardrobe_description_prompts;
+    api.loadDescriptionPrompts();
+    assert.equal(api.state().descriptionPrompts.item, upgradedItemPrompt, '无存档时使用新版单品默认值');
 
     // 上一代剧情模板也必须升级，用户自行改写的旧选装规则则保留原文，由固定结构规则约束。
     saved.wardrobe_templates.char.wardrobe = '{{char}} 的衣柜，共 {{count}} 套：\n{{outfits}}\n请根据剧情选择合适的一套，不要同时穿上所有套装。\n（禁止编造以上之外的服装。根据场景标签匹配穿搭，若回复中出现场景转换则对应切换穿搭。严禁集中罗列服装信息，服装细节必须分散融入动作、触感、环境互动中，每次只带出一两个细节。）';
