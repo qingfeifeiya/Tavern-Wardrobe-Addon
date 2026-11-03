@@ -377,6 +377,7 @@ const PANEL_HTML = `
                         <label class="tw-bulk-selection" title="全选当前列表"><input type="checkbox" class="tw-select-all" aria-label="全选当前列表"><span class="tw-selection-count">已选 0 件</span></label>
                         <span class="tw-bulk-sep" aria-hidden="true"></span>
                         <div class="tw-menu-wrap"><button type="button" class="tw-bulk-trigger" data-bulk-menu="apply" aria-haspopup="menu" aria-expanded="false" disabled>${icon('hanger')}<span>应用到</span>${icon('chevron')}</button><div class="tw-menu" data-menu="apply" role="menu" aria-label="应用到角色" hidden></div></div>
+                        <div class="tw-menu-wrap"><button type="button" class="tw-bulk-trigger" data-bulk-menu="library" aria-haspopup="menu" aria-expanded="false" disabled>${icon('layers')}<span>移动到</span>${icon('chevron')}</button><div class="tw-menu" data-menu="library" role="menu" aria-label="移动到其他衣柜" hidden></div></div>
                         <div class="tw-menu-wrap"><button type="button" class="tw-bulk-trigger" data-bulk-menu="tags" aria-haspopup="menu" aria-expanded="false" disabled>${icon('tag')}<span>标签</span>${icon('chevron')}</button><div class="tw-menu tw-menu-wide" data-menu="tags" role="menu" aria-label="批量标签" hidden></div></div>
                         <div class="tw-menu-wrap"><button type="button" class="tw-bulk-trigger" data-bulk-menu="category" aria-haspopup="menu" aria-expanded="false" disabled>${icon('shirt')}<span>分类</span>${icon('chevron')}</button><div class="tw-menu" data-menu="category" role="menu" aria-label="修改分类" hidden></div></div>
                         <button type="button" class="tw-bulk-favorite-button" data-bulk-favorite aria-pressed="false" disabled>${icon('heart')}<span>收藏</span></button>
@@ -385,7 +386,7 @@ const PANEL_HTML = `
                         <button type="button" class="tw-bulk-delete" data-bulk="delete" disabled>${icon('trash')}<span>删除</span></button>
                         <button type="button" class="tw-bulk-done" data-action="toggle-multi" aria-label="退出多选" title="退出多选">${icon('close')}</button>
                     </div>
-                    <!-- 批量操作沿用原有的选择器逻辑：菜单只负责设置值并触发 change，不复制业务代码。 -->
+                    <!-- 角色、标签、分类和收藏沿用隐藏选择器；跨衣柜移动由菜单直接提交两个分区。 -->
                     <select class="tw-bulk-apply" aria-label="批量应用到角色" hidden disabled>
                         <option value="" disabled selected>应用到…</option>
                         <optgroup label="应用到"><option value="apply-user">USER</option><option value="apply-char">Char</option></optgroup>
@@ -4175,9 +4176,9 @@ function filterBulkTagMenu(menu) {
 }
 
 /**
- * 根据勾选状态重建批量菜单：角色与标签为三态勾选，分类为单选。
- * 菜单只设置原有选择器的值并触发其 change，业务逻辑完全沿用原实现。
- * @param {string} name apply、tags 或 category。
+ * 根据勾选状态重建批量菜单：角色与标签为三态勾选，分类为单选，移动只列出其他衣柜。
+ * 原有操作继续触发隐藏选择器，跨衣柜移动交由独立入口一次提交两个分区。
+ * @param {string} name apply、library、tags 或 category。
  * @returns {void} 无返回值。
  */
 function renderBulkMenu(name) {
@@ -4200,6 +4201,15 @@ function renderBulkMenu(name) {
         title.className = 'tw-menu-title';
         title.textContent = '穿着归属';
         menu.prepend(title);
+    } else if (name === 'library') {
+        for (const [id, label] of wardrobeLibraries) {
+            if (id === activeLibraryId) continue;
+            const entry = createMenuItem({ role: 'menuitem', state: 'false', label, engine: 'library', value: id });
+            entry.removeAttribute('aria-checked');
+            entry.querySelector('.tw-menu-mark').hidden = true;
+            entries.push(entry);
+        }
+        menu.replaceChildren(...entries);
     } else if (name === 'category') {
         const categories = new Set(items.map(item => item.category));
         const current = categories.size === 1 ? categories.values().next().value : '';
@@ -4293,6 +4303,12 @@ function handleBulkMenu(event) {
     }
     const item = event.target.closest('.tw-menu-item');
     if (item) {
+        if (item.dataset.engine === 'library') {
+            closeBulkMenus(true);
+            try { moveGarmentsToLibrary(item.dataset.value); }
+            catch (error) { setLibraryStatus(String(error), true); }
+            return;
+        }
         runBulkEngine(item.dataset.engine, item.dataset.value);
         // 修改分类是一次性选择；角色和标签可连续勾选，菜单保持打开。
         if (item.dataset.engine === 'category') closeBulkMenus(true);
@@ -4782,6 +4798,84 @@ function activateWardrobeLibrary(id, libraries = wardrobeLibraries) {
     setMobileDetails(false);
     setLibraryStatus('');
     setGarmentStatus('');
+}
+
+/**
+ * 将勾选服装与搭配成员移动到另一衣柜，图片复用原文件，同名标签复用目标分组。
+ * @param {string} targetId 菜单选定的目标衣柜标识。
+ * @returns {void} 两个分区一次保存成功后才更新当前界面，失败保留存档、多选与详情。
+ */
+function moveGarmentsToLibrary(targetId) {
+    const ids = getGarmentMoveIds(targetId);
+    if (!ids.size) return;
+    const targetSaved = getLibraryVariables(targetId);
+    const target = parseWardrobeData({ items: targetSaved.wardrobe_items ?? [], groups: targetSaved.wardrobe_groups ?? [] });
+    const remaining = new Map(garments);
+    const itemIds = new Map();
+    const groupIds = new Map();
+    // 目标可含相同 ID 或同名标签；先建索引再映射，成本随移动记录和标签数线性增长。
+    const groupNames = new Map(Array.from(target.groups, ([id, name]) => [name, id]));
+    for (const id of ids) {
+        itemIds.set(id, target.items.has(id) ? window.parent.crypto.randomUUID() : id);
+        for (const groupId of garments.get(id).groupIds) {
+            if (groupIds.has(groupId)) continue;
+            const name = garmentGroups.get(groupId);
+            const mapped = groupNames.get(name) ?? (target.groups.has(groupId) ? window.parent.crypto.randomUUID() : groupId);
+            groupIds.set(groupId, mapped);
+            groupNames.set(name, mapped);
+            target.groups.set(mapped, name);
+            const filters = target.groupFilters.get(mapped) ?? new Set();
+            for (const filter of garmentGroupFilters.get(groupId) ?? []) filters.add(filter);
+            target.groupFilters.set(mapped, filters);
+        }
+    }
+    for (const id of ids) {
+        const item = garments.get(id);
+        const mapped = itemIds.get(id);
+        target.items.set(mapped, { ...item, id: mapped, groupIds: item.groupIds.map(groupId => groupIds.get(groupId)),
+            ...(item.componentIds ? { componentIds: item.componentIds.map(memberId => itemIds.get(memberId)) } : {}) });
+        remaining.delete(id);
+    }
+    const sourceUpdate = { wardrobe_items: Array.from(remaining.values()), ...pruneDeletedSelections(remaining) };
+    const targetUpdate = { wardrobe_items: Array.from(target.items.values()),
+        wardrobe_groups: Array.from(target.groups, ([id, name]) => ({ id, name,
+            ...(target.groupFilters.get(id)?.size ? { filters: Array.from(target.groupFilters.get(id)) } : {}) })) };
+    const saved = getVariables({ type: 'script' });
+    const update = { wardrobe_library_data: { ...saved.wardrobe_library_data } };
+    // 原衣柜清理全部范围的归属，目标不自动应用；同次提交避免仅删除原件或只留下目标副本。
+    for (const [id, patch] of [[activeLibraryId, sourceUpdate], [targetId, targetUpdate]]) {
+        if (id === 'default-1') Object.assign(update, patch);
+        else update.wardrobe_library_data[id] = { ...saved.wardrobe_library_data?.[id], ...patch };
+    }
+    insertOrAssignVariables(update, { type: 'script' });
+    stopDescriptionRequest();
+    const movedSelected = ids.has(selectedGarmentId);
+    garments = remaining;
+    checkedGarmentIds.clear();
+    if (movedSelected) selectedGarmentId = garments.keys().next().value ?? null;
+    renderGarmentLibrary();
+    // 未移动的预览保留名称和描述草稿，只有原预览已移走时才切换详情。
+    if (movedSelected) renderGarmentDetails();
+    else renderWearerState();
+    setLibraryStatus(`已移动 ${ids.size} 件服装到“${wardrobeLibraries.get(targetId)}”`);
+}
+
+/**
+ * 在移动入口验证目标与进行中的操作，展开搭配成员，并阻止原衣柜留下悬空搭配。
+ * @param {string} targetId 待验证的目标衣柜标识。
+ * @returns {Set<string>} 勾选服装及其成员的去重集合；无法整体移动时抛出具体原因。
+ */
+function getGarmentMoveIds(targetId) {
+    if (!wardrobeLibraries.has(targetId) || targetId === activeLibraryId) throw new Error('请选择其他衣柜作为移动目标。');
+    if (importingGarments || replacingImage) throw new Error('请等待当前导入或图片替换完成后再移动服装。');
+    const ids = new Set(getCheckedGarments().map(item => item.id));
+    for (const id of ids) for (const memberId of garments.get(id).componentIds ?? []) ids.add(memberId);
+    for (const item of garments.values()) {
+        if (!ids.has(item.id) && item.componentIds?.some(id => ids.has(id))) {
+            throw new Error(`所选服装仍被搭配“${item.name}”使用，请一并勾选该搭配后移动，或先编辑搭配移除成员。`);
+        }
+    }
+    return ids;
 }
 
 /**
@@ -5790,9 +5884,9 @@ function readGarmentDescriptionDraft(item) {
 }
 
 /**
- * 在删除入口清理全局、角色卡和聊天选择及当前穿着，保留手动设置锚点与显式空选择。
- * @param {Map<string, WardrobeItem>} remaining 删除后仍存在的服装表。
- * @returns {Object} 随服装删除一次写入的全局及独立范围选择补丁。
+ * 在删除或跨衣柜移动时清理全局、角色卡和聊天选择及当前穿着，保留锚点与显式空选择。
+ * @param {Map<string, WardrobeItem>} remaining 原衣柜操作后仍存在的服装表。
+ * @returns {Object} 随服装变更一次写入的全局及独立范围选择补丁。
  */
 function pruneDeletedSelections(remaining) {
     const variables = getLibraryVariables();
