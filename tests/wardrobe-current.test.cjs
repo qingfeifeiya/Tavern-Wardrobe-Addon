@@ -11,11 +11,7 @@ let chat = [];
 let chatId = 'chat-a';
 let writesFail = false;
 const controls = new Map();
-const currentButtons = ['user', 'char'].map(wearer => ({
-    dataset: { current: wearer }, disabled: false,
-    /** 记录按钮状态；参数为属性名和值，无返回值。 */
-    setAttribute(name, value) { this[name] = value; },
-}));
+const wearerInputs = ['user', 'char'].map(wearer => ({ dataset: { wearer }, disabled: false, checked: false }));
 const sendStatus = { textContent: '', dataset: {} };
 const sendForm = {
     elements: { content_type: { value: 'text' }, position: { value: 'user_end' }, marker_mode: { value: 'strip' }, send_content_rating: { checked: true } },
@@ -39,7 +35,7 @@ const sandbox = {
             if (!controls.has(selector)) controls.set(selector, { value: '', textContent: '', dataset: {} });
             return controls.get(selector);
         },
-        querySelectorAll: selector => selector === 'button[data-current]' ? currentButtons : [],
+        querySelectorAll: selector => selector === 'input[data-wearer]' ? wearerInputs : [],
     },
     testSendForm: sendForm,
     toastr: { error: message => assert.fail(message) },
@@ -51,7 +47,7 @@ sendForm = testSendForm;
 renderGarmentLibrary = () => {};
 globalThis.api = {
     loadGarments, readWearerSelections, saveWearerSelections, pruneDeletedSelections, applyGarments,
-    resolveCurrentOutfits, readEffectiveSelections, clampCurrentAnchors, toggleCurrentGarment, renderWearerState,
+    resolveCurrentOutfits, readEffectiveSelections, clampCurrentAnchors, renderWearerState,
     matchGarmentByName, matchesGarmentFilter, buildWearerContent, stripOutfitMarkers, injectWardrobeContent,
     loadSendSettings, saveSendSettings,
     select: id => { selectedGarmentId = id; },
@@ -131,23 +127,16 @@ async function checkCurrentOutfits() {
     chat = [{ mes: '<!-- outfit:user=红外套 -->' }];
     api.select('blue');
     api.renderWearerState();
-    assert.equal(currentButtons[0]['aria-pressed'], 'false', '按钮显示自动解析出的当前穿着');
-    assert.equal(currentButtons[1].disabled, true, '未分配给 Char 的服装不能设为其当前穿着');
-    api.toggleCurrentGarment({ target: { closest: () => currentButtons[0] } });
-    assert.deepEqual(Array.from(saved.wardrobe_selections.current.user), ['red', 'blue'], '手动加入基于最新实际穿着，明确选择的同类衣物也保留');
-    assert.equal(saved.wardrobe_selections.anchor.user.len, 1, '手动设置记录当时楼层数');
-    assert.deepEqual(Array.from(api.readEffectiveSelections().current.user), ['red', 'blue']);
-    assert.equal(currentButtons[0]['aria-pressed'], 'true', '手动设置后刷新按钮状态');
+    assert.equal(wearerInputs[0].checked, true, '详情继续显示 USER 已分配状态');
+    assert.equal(wearerInputs[1].checked, false, '详情继续显示 Char 未分配状态');
+    assert.equal(wearerInputs[1].disabled, false, '仍可为另一角色分配服装');
+    assert.deepEqual(Array.from(api.readEffectiveSelections().current.user), ['red'], '穿着仍由后台自动解析');
     chat.push({ mes: '<!-- outfit:user=红外套 -->' });
     assert.deepEqual(Array.from(api.readEffectiveSelections().current.user), ['red'], '后续 AI 旧名称换装仍兼容');
-    api.select('red');
-    api.toggleCurrentGarment({ target: { closest: () => currentButtons[0] } });
-    assert.equal(api.readEffectiveSelections().current.user.size, 0, '取消当前穿着屏蔽已有标记');
-    const beforeFailure = JSON.stringify(saved);
-    writesFail = true;
-    api.toggleCurrentGarment({ target: { closest: () => currentButtons[0] } });
-    writesFail = false;
-    assert.equal(JSON.stringify(saved), beforeFailure, '保存失败保留全部原记录');
+    // 模拟旧版手动存档，验证移除操作入口后仍兼容已有空穿着与聊天锚点。
+    saved.wardrobe_selections.current.user = [];
+    saved.wardrobe_selections.anchor.user = { chat: chatId, len: chat.length };
+    assert.equal(api.readEffectiveSelections().current.user.size, 0, '旧存档的空穿着仍屏蔽更早标记');
     chat.length = 0;
     const selections = api.readWearerSelections();
     api.clampCurrentAnchors(selections);
@@ -156,7 +145,6 @@ async function checkCurrentOutfits() {
     chat.push({ is_user: true, mes: '<!-- outfit:user=蓝外套 -->' });
     chat.push({ is_system: true, mes: '<!-- outfit:user=蓝外套 -->' });
     assert.deepEqual(Array.from(api.readEffectiveSelections().current.user), ['red'], '忽略用户、系统与无效名称，同楼层取最后有效记录');
-    assert.ok(api.matchesGarmentFilter(red, 'current', api.readEffectiveSelections()));
     chat[0].mes = '<!-- outfit:user= 蓝 外 套 -->';
     assert.deepEqual(Array.from(api.readEffectiveSelections().current.user), ['blue'], '编辑和滑动后的当前楼层直接生效');
     chatId = 'chat-b';
@@ -346,12 +334,6 @@ async function checkMultiItemOutfits() {
     saved.wardrobe_selection_scope = 'global';
     api.applyGarments(['tops-1'], 'user', true);
     assert.deepEqual(Array.from(api.readEffectiveSelections().current.user), ['bottoms-0', 'shoes-0'], '取消分配保留当前裤子和鞋');
-    api.select('tops-2');
-    api.renderWearerState();
-    api.toggleCurrentGarment({ target: { closest: () => currentButtons[0] } });
-    assert.deepEqual(Array.from(api.readEffectiveSelections().current.user), ['bottoms-0', 'shoes-0', 'tops-2'], '手动补充新上衣保留其余部位');
-    api.toggleCurrentGarment({ target: { closest: () => currentButtons[0] } });
-    assert.deepEqual(Array.from(api.readEffectiveSelections().current.user), ['bottoms-0', 'shoes-0'], '手动移出只影响该件');
     chat.push({ mes: '<!-- outfit:user=[] -->' });
     assert.equal(api.readEffectiveSelections().current.user.size, 0, '显式空快照有效，不恢复更早穿着');
 
@@ -364,11 +346,7 @@ async function checkMultiItemOutfits() {
     saved.wardrobe_selections.current.user = ['combo', 'blue', 'red', 'combo'];
     api.loadGarments();
     assert.deepEqual(Array.from(api.readWearerSelections().current.user), ['combo', 'red'], '当前搭配与成员的重复引用在入口合并');
-    assert.ok(api.matchesGarmentFilter(pants, 'current', api.readEffectiveSelections()), '当前筛选包含随整套穿着的成员');
-    api.select('blue');
-    api.renderWearerState();
-    assert.equal(currentButtons[0].disabled, true, '不能从当前保存搭配中单独脱掉成员');
-    assert.equal(currentButtons[0].textContent, 'USER 随搭配穿着');
+    assert.ok(api.readEffectiveSelections().worn.user.has('pants'), '后台状态仍包含随整套穿着的成员');
     chat = [{ mes: '<!-- outfit:user=["combo","red","blue"] -->' }];
     assert.deepEqual(Array.from(api.readEffectiveSelections().current.user), ['combo', 'red'], '搭配快照允许补充独立外套并合并重复成员');
     chat.push({ mes: '<!-- outfit:user=["pants","red"] -->' });

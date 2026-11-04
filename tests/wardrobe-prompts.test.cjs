@@ -50,10 +50,12 @@ const controls = {
     '[name="garment_description"]': { value: '' },
     '.tw-garment-status': { textContent: '', dataset: {} },
     '.tw-library-status': { textContent: '', dataset: {} },
-    '[data-action="describe"]': { disabled: false, textContent: '' },
-    '[data-action="describe-all"]': { disabled: false, textContent: '一键识图' },
+    '[data-action="describe"]': { disabled: false, textContent: '', querySelector: () => null },
+    '[data-action="describe-all"]': { disabled: false, textContent: '一键识图', querySelector: () => null },
     '[data-action="remove-image"]': { disabled: false },
+    '[data-action="save-garment"]': { dataset: {} },
     '[data-action="replace-image"]': { disabled: false, textContent: '' },
+    '[data-action="replace-front-image"]': { disabled: false, textContent: '' },
     '[data-action="edit-combination"]': { disabled: true },
 };
 const saved = { wardrobe_templates: {
@@ -117,6 +119,8 @@ const sandbox = {
 vm.createContext(sandbox);
 const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
 const hooks = `
+/** 用现有确认替身驱动识图标签流程；参数为弹窗说明，返回模拟选择。 */
+askDialog = async ({ message }) => window.parent.confirm(message);
 settingsPanel = testSettingsPanel;
 sendForm = testSendForm;
 panel = testPanel;
@@ -247,6 +251,19 @@ async function main() {
     assert.equal(requests.at(-1).image, 'data:image/png;base64,aGVsbG8=', '文件图片生成描述前恢复原图内容');
     assert.equal(imageReads, 1, '重复生成描述复用文件读取缓存');
     assert.equal(saved.wardrobe_items[0].image, 'user/images/tavern_wardrobe/coat.png', '描述生成不改回内嵌存储');
+
+    const backData = 'data:image/webp;base64,YmFjay1pbWFnZQ==';
+    saved.wardrobe_items[0].backImage = backData;
+    api.loadGarments();
+    await api.generateGarmentDescription();
+    assert.deepEqual(Array.from(requests.at(-1).image), ['data:image/png;base64,aGVsbG8=', backData], '双图识别按正面背面传给宿主');
+    assert.match(requests.at(-1).user_input, /参考图顺序：正面、背面/);
+    saved.wardrobe_items[0].image = '';
+    api.loadGarments();
+    await api.generateGarmentDescription();
+    assert.equal(requests.at(-1).image, backData, '仅有背面也能识图');
+    saved.wardrobe_items[0].image = 'user/images/tavern_wardrobe/coat.png';
+    delete saved.wardrobe_items[0].backImage;
 
     saved.wardrobe_groups = [{ id: 'daily', name: '日常' }];
     api.loadGarments();

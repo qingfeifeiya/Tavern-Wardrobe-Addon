@@ -106,7 +106,7 @@ async function imageFetch(url, options = {}) {
     if (url === '/api/images/delete') {
         assert.equal(options.method, 'POST');
         // 删除请求发生时，已保存的存档必须不再引用该文件。
-        assert.ok(!scriptVariables.wardrobe_items.some(item => item.image === body.path));
+        assert.ok(!scriptVariables.wardrobe_items.some(item => item.image === body.path || item.backImage === body.path));
         const removed = imageFiles.delete(body.path);
         return { ok: removed, status: removed ? 200 : 404 };
     }
@@ -140,7 +140,7 @@ class ImageReader {
  * @returns {Object} 可读写的控件替身。
  */
 function control(selector) {
-    if (!controls.has(selector)) controls.set(selector, { children: [], querySelectorAll: () => [], value: selector === '[name="garment_content_rating"]' ? 'unrated' : '', dataset: {}, disabled: false, textContent: '', setAttribute(name, value) { this[name] = value; } });
+    if (!controls.has(selector)) controls.set(selector, { children: [], querySelector: child => selector === '[data-bulk-favorite]' ? control(`favorite-${child}`) : null, querySelectorAll: () => [], value: selector === '[name="garment_content_rating"]' ? 'unrated' : '', dataset: {}, disabled: false, textContent: '', setAttribute(name, value) { this[name] = value; } });
     return controls.get(selector);
 }
 
@@ -179,6 +179,8 @@ const sandbox = {
 vm.createContext(sandbox);
 const hooks = `
 panel = testPanel;
+/** 用现有确认与输入替身驱动业务；参数为弹窗内容，返回模拟选择。 */
+askDialog = async ({ message, input }) => input === undefined ? window.parent.confirm(message) : window.parent.prompt(message, input);
 settingsPanel = { open: false };
 root = { isConnected: true };
 refreshWardrobe = () => { recordDetailRefresh(); renderWearerState(); };
@@ -239,7 +241,8 @@ async function main() {
     assert.equal(libraryStatus.textContent, '', '超时后清空提示，空状态样式会移除占位');
     api.setLibraryStatus('已导出');
     api.setLibraryStatus('存储失败', true);
-    assert.equal(statusTimers.size, 0, '错误提示不被成功消息的计时器清除');
+    assert.equal(statusTimers.size, 1, '错误提示替换原有成功提示的计时器');
+    assert.equal(statusTimers.values().next().value.delay, 8000, '错误提示沿用现有八秒停留时间');
     assert.equal(libraryStatus.textContent, '存储失败');
     api.setLibraryStatus('');
     assert.equal(libraryStatus.textContent, '');
@@ -411,13 +414,13 @@ async function main() {
     assert.deepEqual(scriptVariables.wardrobe_items.find(item => item.id === 'blue').groupIds, ['slim', 'empty'], '批量添加保留原标签并写入存档');
 
     promptValue = '新款';
-    api.addGarmentGroup();
+    await api.addGarmentGroup();
     const newGroup = api.state().currentGroup;
     assert.equal(api.state().garmentGroups.get(newGroup), '新款');
-    api.addGarmentGroup();
+    await api.addGarmentGroup();
     assert.equal(api.state().garmentGroups.size, 3, '相同名称不重复创建');
     api.selectGroup('empty');
-    api.deleteGarmentGroup();
+    await api.deleteGarmentGroup();
     assert.equal(api.state().garments.size, 4, '删标签不删服装');
     assert.deepEqual(Array.from(api.state().garments.get('blue').groupIds), ['slim'], '删除标签保留其他归属');
     assert.equal(api.state().garmentGroups.has('empty'), false);
@@ -432,15 +435,15 @@ async function main() {
     assert.equal(JSON.stringify(scriptVariables), beforeApply, '应用保存失败保留共用选择');
     writesFail = false;
     confirmation = false;
-    api.deleteGarments(new Set(['blue', 'red']));
+    await api.deleteGarments(new Set(['blue', 'red']));
     assert.equal(api.state().garments.has('blue'), true, '取消删除保留原数据');
     confirmation = true;
     writesFail = true;
-    assert.throws(() => api.deleteGarments(new Set(['blue'])), /存储失败/);
+    await assert.rejects(() => api.deleteGarments(new Set(['blue'])), /存储失败/);
     assert.equal(api.state().garments.has('blue'), true, '存储失败不能删除内存数据');
     writesFail = false;
     chatId = '';
-    api.deleteGarments(new Set(['blue', 'red']));
+    await api.deleteGarments(new Set(['blue', 'red']));
     assert.equal(api.state().garments.has('blue'), false);
     assert.equal(api.readWearerSelections().user.size, 0, '删除同步清理 USER 应用');
     assert.equal(api.readWearerSelections().char.size, 0, '删除同步清理 Char 应用');
@@ -496,13 +499,13 @@ async function main() {
     const shared = { ...blue, id: 'shared', image: storedBlue };
     scriptVariables.wardrobe_items.push(shared);
     api.loadGarments();
-    api.deleteGarments(new Set(['blue']));
+    await api.deleteGarments(new Set(['blue']));
     assert.equal(imageFiles.has(storedBlue), true, '仍有服装引用时保留原图');
     writesFail = true;
-    assert.throws(() => api.deleteGarments(new Set(['shared'])), /存储失败/);
+    await assert.rejects(() => api.deleteGarments(new Set(['shared'])), /存储失败/);
     assert.equal(imageFiles.has(storedBlue), true, '保存失败不删文件');
     writesFail = false;
-    api.deleteGarments(new Set(['shared']));
+    await api.deleteGarments(new Set(['shared']));
     assert.equal(imageFiles.has(storedBlue), true, '红色外套仍引用同图，不能提前清理文件');
     api.selectItem('red');
     control('[name="garment_name"]').value = red.name;
@@ -575,6 +578,7 @@ async function main() {
     await checkMultipleTags();
     await checkFilterGroups();
     checkOriginalImage();
+    await checkImageSides();
     console.log('通过多选与操作栏显隐、衣柜导出回读、标签存储、可见范围全选、批量归类与角色应用、删除及失败回滚检查。');
     console.log('通过图片落盘、逐张迁移及重试、读取缓存、多模态注入、自包含备份、原图格式及删除和导入回滚检查。');
 }
@@ -1036,7 +1040,7 @@ async function checkSelectionScopes() {
     api.selectSelectionScope({ currentTarget: scopeControl });
     assert.equal(api.readWearerSelections().user.has('blue'), true);
     assert.equal(api.readWearerSelections().char.has('red'), true, '全局选择未被独立范围覆盖');
-    api.deleteGarments(new Set(['blue']));
+    await api.deleteGarments(new Set(['blue']));
     assert.ok(!scriptVariables.wardrobe_selections.user.includes('blue'));
     for (const record of Object.values(scriptVariables.wardrobe_scoped_selections)) {
         assert.ok(!record.user.includes('blue') && !record.char.includes('blue'), '删除清理所有范围的引用');
@@ -1144,7 +1148,7 @@ async function checkLibraryImprovements() {
     preview.append = () => {};
     const replaceInput = control('.tw-image-replace');
     replaceInput.click = () => {};
-    api.openImageReplacement();
+    api.openImageReplacement({ currentTarget: { dataset: { imageField: 'image' } } });
     assert.equal(replaceInput.dataset.garmentId, 'blue');
     replaceInput.files = [];
     await api.replaceGarmentImage({ currentTarget: replaceInput });
@@ -1178,7 +1182,7 @@ async function checkLibraryImprovements() {
     await api.replaceGarmentImage({ currentTarget: replaceInput });
     assert.equal(imageFiles.has(replacement), false, '成功替换后回收无引用旧文件');
     api.selectItem('empty-improvement');
-    api.openImageReplacement();
+    api.openImageReplacement({ currentTarget: { dataset: { imageField: 'image' } } });
     await api.replaceGarmentImage({ currentTarget: replaceInput });
     assert.ok(api.state().garments.get('empty-improvement').image, '无图片记录也可补上传');
 
@@ -1406,12 +1410,12 @@ async function checkCombinations() {
             for (const item of members.slice(0, 3)) assert.ok(parts[0].text.includes(item.description));
         }
         assert.equal(parts.filter(part => part.type === 'image_url').length, content_type === 'text' ? 0 : 3);
-        if (content_type !== 'text') assert.match(parts[0].text, /参考图：服装0＝图1、服装1＝图2、服装2＝图3/);
+        if (content_type !== 'text') assert.match(parts[0].text, /参考图：服装0（正面）＝图1、服装1（正面）＝图2、服装2（正面）＝图3/);
         const multiple = api.buildWearerContent([casual, formal], 'char', { content_type }, templates, { user: '玩家', char: '角色' });
         if (content_type !== 'image') assert.match(multiple[0].text, /角色衣柜\|2\|/);
         if (content_type !== 'text') {
             assert.equal(multiple.filter(part => part.type === 'image_url').length, 6, '共享成员只发一次图片');
-            assert.match(multiple[0].text, /参考图：服装3＝图4、服装0＝图1、服装4＝图5、服装5＝图6、服装2＝图3/);
+            assert.match(multiple[0].text, /参考图：服装3（正面）＝图4、服装0（正面）＝图1、服装4（正面）＝图5、服装5（正面）＝图6、服装2（正面）＝图3/);
         }
     }
     const currentMember = api.state().garments.get(members[0].id);
@@ -1518,7 +1522,7 @@ async function checkCombinations() {
     assert.ok(wearerTexts[0].text.includes(casual.name) && !wearerTexts[0].text.includes(formal.name));
     assert.ok(wearerTexts[1].text.includes(formal.name) && !wearerTexts[1].text.includes(casual.name), '两位角色的组合与图片分组独立');
     api.sendType('text');
-    assert.throws(() => api.deleteGarments(new Set([members[0].id])), /搭配.*使用/);
+    await assert.rejects(() => api.deleteGarments(new Set([members[0].id])), /搭配.*使用/);
     api.selectItem(members[0].id);
     control('[name="garment_name"]').value = members[0].name;
     control('[name="garment_category"]').value = members[0].category;
@@ -1560,7 +1564,7 @@ async function checkCombinations() {
     assert.equal(await api.importGarmentFiles([file]), false);
     writesFail = false;
     assert.equal(JSON.stringify(scriptVariables), beforeFailure, '搭配备份保存失败不留下部分成员');
-    api.deleteGarments(new Set(api.state().garments.keys()));
+    await api.deleteGarments(new Set(api.state().garments.keys()));
     assert.equal(api.state().garments.size, 0, '搭配与成员可以一次整体删除');
     console.log('通过自由品类组合、搭配新建编辑、图文整套发送、共享成员、删除约束、自包含备份、关联重映射与失败回滚检查。');
 }
@@ -1652,7 +1656,7 @@ async function checkMultipleTags() {
     assert.equal(await api.importGarmentFiles([{ name: '多标签.json', text: async () => JSON.stringify(backup) }]), true, control('.tw-library-status').textContent);
     assert.deepEqual(Array.from(Array.from(api.state().garments.values()).at(-1).groupIds), ['summer', 'formal'], '导入按名称映射全部标签');
     api.selectGroup('formal');
-    api.deleteGarmentGroup();
+    await api.deleteGarmentGroup();
     assert.deepEqual(Array.from(api.state().garments.get('blue').groupIds), ['summer'], '删标签保留其他标签');
     api.loadGarments();
     assert.deepEqual(Array.from(api.state().garments.get('blue').groupIds), ['summer'], '重载保留多标签变更');
@@ -1729,7 +1733,7 @@ async function checkMultipleTags() {
     control('[name="garment_name"]').value = '新建标签时保留的名称草稿';
     control('[name="garment_description"]').value = '新建标签时保留的描述草稿';
     promptValue = '  下拉新标签  ';
-    api.addGarmentGroup(addTagEvent);
+    await api.addGarmentGroup(addTagEvent);
     const created = scriptVariables.wardrobe_groups.find(group => group.name === '下拉新标签');
     assert.equal(promptDefault, '下拉新标签', '搜索内容预填为标签名');
     assert.ok(scriptVariables.wardrobe_items[0].groupIds.includes(created.id), '创建后自动关联当前服装');
@@ -1743,17 +1747,17 @@ async function checkMultipleTags() {
     assert.equal(control('[name="garment_name"]').value, '新建标签时保留的名称草稿');
     assert.equal(control('[name="garment_description"]').value, '新建标签时保留的描述草稿');
     const afterCreation = JSON.stringify(scriptVariables);
-    api.addGarmentGroup(addTagEvent);
+    await api.addGarmentGroup(addTagEvent);
     assert.equal(JSON.stringify(scriptVariables), afterCreation, '同名复用且不重复勾选');
     for (const cancelled of [null, '   ']) {
         promptValue = cancelled;
-        api.addGarmentGroup(addTagEvent);
+        await api.addGarmentGroup(addTagEvent);
         assert.equal(JSON.stringify(scriptVariables), afterCreation, '取消或空白不产生标签');
     }
     search.value = '保存失败的标签';
     promptValue = search.value;
     writesFail = true;
-    api.addGarmentGroup(addTagEvent);
+    await api.addGarmentGroup(addTagEvent);
     writesFail = false;
     assert.equal(JSON.stringify(scriptVariables), afterCreation, '失败时标签与归属都不提交');
     assert.equal(api.state().garmentGroups.size, 301, '失败不留下内存中的空标签');
@@ -1790,7 +1794,7 @@ async function checkFilterGroups() {
     api.updateCategory('tops');
     assert.deepEqual(Array.from(api.getFilterGarmentGroups().keys()), ['daily'], '旧标签按实际服装出现在对应分类');
     promptValue = '上装专用';
-    api.addGarmentGroup();
+    await api.addGarmentGroup();
     const topGroup = api.state().currentGroup;
     assert.deepEqual(scriptVariables.wardrobe_groups.find(group => group.id === topGroup).filters, ['tops'], '空分组保存创建时的筛选');
     api.loadGarments();
@@ -1799,7 +1803,7 @@ async function checkFilterGroups() {
     assert.equal(api.state().currentGroup, '*', '首次切换筛选不沿用上装标签');
     assert.equal(api.getFilterGarmentGroups().has(topGroup), false, '鞋子不显示上装的空分组');
     promptValue = '鞋子专用';
-    api.addGarmentGroup();
+    await api.addGarmentGroup();
     const shoeGroup = api.state().currentGroup;
     api.updateCategory('tops');
     assert.equal(api.state().currentGroup, topGroup, '切回上装恢复其独立标签选择');
@@ -1807,13 +1811,13 @@ async function checkFilterGroups() {
     api.updateCategory('favorites');
     assert.deepEqual(Array.from(api.getFilterGarmentGroups().keys()), ['daily'], '快捷筛选仅显示相关标签');
     promptValue = '收藏专用';
-    api.addGarmentGroup();
+    await api.addGarmentGroup();
     const favoriteGroup = api.state().currentGroup;
     api.updateCategory('missing-image');
     assert.equal(api.getFilterGarmentGroups().has(favoriteGroup), false, '快捷筛选也独立保存空分组');
     api.updateCategory('shoes');
     promptValue = '上装专用';
-    api.addGarmentGroup();
+    await api.addGarmentGroup();
     assert.equal(api.state().currentGroup, topGroup, '其他筛选同名分组复用稳定 ID');
     assert.deepEqual(scriptVariables.wardrobe_groups.find(group => group.id === topGroup).filters, ['tops', 'shoes']);
     api.updateCategory('all');
@@ -1844,7 +1848,7 @@ async function checkFilterGroups() {
     assert.deepEqual(Array.from(api.state().garments.get('shoe').groupIds), ['daily'], '重命名上装分组保留鞋子的原分组');
     assert.equal(api.getFilterGarmentGroups('shoes').has(renamed), false);
     api.selectGroup(topGroup);
-    api.deleteGarmentGroup();
+    await api.deleteGarmentGroup();
     assert.equal(api.getFilterGarmentGroups().has(topGroup), false, '当前筛选删除其空分组');
     assert.equal(api.getFilterGarmentGroups('shoes').has(topGroup), true, '其他筛选的同名空分组继续保留');
 
@@ -1918,8 +1922,8 @@ function checkOriginalImage() {
     api.openGarmentImage({ target: { closest: () => button } });
     assert.equal(dialog.open, true);
     assert.equal(image.src, blue.image, '直接显示保存的原图，不引用压缩副本');
-    assert.equal(image.alt, blue.name);
-    assert.equal(heading.textContent, blue.name);
+    assert.equal(image.alt, `${blue.name}（正面）`);
+    assert.equal(heading.textContent, `${blue.name}（正面）`);
     api.closeGarmentImage();
     assert.equal(dialog.open, false);
     assert.equal(image.src, undefined, '关闭后移除原图引用');
@@ -1936,6 +1940,107 @@ function checkOriginalImage() {
     assert.equal(dialog.open, false, '预览占位区域不打开空弹窗');
     document.createElement = previousCreate;
     console.log('通过单件与搭配成员原图打开、无图禁用、原图路径复用及关闭清理检查。');
+}
+
+/**
+ * 验证正背面独立保存、预览及失败回滚，覆盖备份恢复、共享文件和双图发送。
+ * @returns {Promise<void>} 双图的数据与交互断言全部完成后结束。
+ */
+async function checkImageSides() {
+    const backData = 'data:image/webp;base64,YmFjay1pbWFnZQ==';
+    scriptVariables.wardrobe_items = [{ ...blue, backImage: backData }, { ...red, image: '' }];
+    scriptVariables.wardrobe_groups = [];
+    scriptVariables.wardrobe_selections = { user: [], char: [] };
+    api.loadGarments();
+    assert.equal(api.state().garments.get('red').backImage, '', '旧记录补空背面，不复制正面');
+    for (const backImage of [null, 1, 'https://bad.test/back.png']) {
+        assert.throws(() => api.parseWardrobeData({ groups: [], items: [{ ...blue, backImage }] }), /有效图片/);
+    }
+    assert.throws(() => api.parseWardrobeData({ groups: [], items: [{ ...blue, backImage: 'user/images/tavern_wardrobe/back.png' }] }, false), /本机路径/);
+    await api.migrateLegacyImages();
+    const front = api.state().garments.get('blue').image;
+    const back = api.state().garments.get('blue').backImage;
+    assert.ok(imageFiles.has(front) && imageFiles.has(back), '两面均迁移到原图文件');
+    api.selectItem('blue');
+    const previousCreate = document.createElement;
+    document.createElement = createLibraryNode;
+    const preview = createLibraryNode();
+    controls.set('.tw-preview', preview);
+    api.renderGarmentImage();
+    assert.deepEqual(preview.children.map(button => button.dataset.imageField), ['image', 'backImage'], '固定左正面右背面');
+    assert.deepEqual(preview.children.map(button => button.children[0].src), [front, back]);
+    const dialog = control('#tw-original-image');
+    api.openGarmentImage({ target: { closest: () => preview.children[1] } });
+    assert.equal(dialog.querySelector('img').src, back, '背面打开对应原图');
+    api.closeGarmentImage();
+    control('[name="garment_name"]').value = '双图草稿';
+    control('[name="garment_description"]').value = '双图描述草稿';
+    const input = control('.tw-image-replace');
+    input.click = () => {};
+    api.openImageReplacement({ currentTarget: { dataset: { imageField: 'backImage' } } });
+    assert.equal(input.dataset.imageField, 'backImage');
+    // 选择器打开后切换详情，文件仍替换原记录的背面。
+    api.selectItem('red');
+    input.files = [new File(['new-back'], 'back.png', { type: 'image/png' })];
+    await api.replaceGarmentImage({ currentTarget: input });
+    let item = api.state().garments.get('blue');
+    const nextBack = item.backImage;
+    assert.equal(item.image, front, '替换背面不修改正面');
+    assert.equal(api.state().garments.get('red').backImage, '', '切换选择不会替换错记录');
+    assert.equal(imageFiles.has(back), false, '成功提交后回收旧背面');
+    assert.equal(control('[name="garment_name"]').value, '双图草稿');
+    api.selectItem('blue');
+    api.openImageReplacement({ currentTarget: { dataset: { imageField: 'image' } } });
+    input.files = [new File(['new-front'], 'front.png', { type: 'image/png' })];
+    await api.replaceGarmentImage({ currentTarget: input });
+    item = api.state().garments.get('blue');
+    const nextFront = item.image;
+    assert.equal(item.backImage, nextBack, '替换正面不修改背面');
+    api.openImageReplacement({ currentTarget: { dataset: { imageField: 'backImage' } } });
+    input.files = [new File(['failed-back'], 'failed.png', { type: 'image/png' })];
+    const filesBefore = imageFiles.size;
+    writesFail = true;
+    await api.replaceGarmentImage({ currentTarget: input });
+    writesFail = false;
+    assert.equal(api.state().garments.get('blue').backImage, nextBack, '保存失败保留原背面');
+    assert.equal(imageFiles.size, filesBefore, '保存失败回收本次新背面');
+    await api.exportGarments(['blue']);
+    const backup = JSON.parse(await blobs.get(downloads.at(-1).href).text());
+    assert.equal(backup.items[0].image, await api.loadImageDataUrl(nextFront));
+    assert.equal(backup.items[0].backImage, await api.loadImageDataUrl(nextBack), '备份内嵌两张原图');
+    duplicateAction = 'overwrite';
+    await api.importGarmentFiles([{ name: '双图.json', type: 'application/json', text: async () => JSON.stringify(backup) }]);
+    assert.equal(api.state().garments.get('blue').backImage, nextBack, '重复导入两面均复用文件');
+    backup.items[0].backImage = backData;
+    await api.importGarmentFiles([{ name: '另一背面.json', type: 'application/json', text: async () => JSON.stringify(backup) }]);
+    assert.equal(api.state().garments.size, 3, '同名同正面但背面不同，不覆盖原服装');
+    api.loadGarments();
+    item = api.state().garments.get('blue');
+    assert.equal(item.backImage, nextBack, '重新加载保留背面');
+    const templates = { user: { single: '{{name}}', wardrobe: '{{outfits}}' } };
+    const parts = api.buildWearerContent([item, item], 'user', { content_type: 'image' }, templates, { user: '玩家' });
+    assert.equal(parts.filter(part => part.type === 'image_url').length, 2, '共享记录两面各发一次');
+    assert.match(parts[0].text, /蓝色外套（正面）＝图1、蓝色外套（背面）＝图2/);
+    const backOnly = { ...item, image: '' };
+    assert.equal(api.matchesGarmentFilter(backOnly, 'missing-image', {}), false, '仅有背面仍视为有图');
+    assert.equal(api.buildWardrobeContent(backOnly, { content_type: 'image' })[0].image_url.url, nextBack);
+    // 另一件服装的背面仍引用正面文件时，不允许清理该共享文件。
+    scriptVariables.wardrobe_items.push({ ...red, id: 'back-shared', image: '', backImage: nextFront });
+    api.loadGarments();
+    await api.deleteGarmentImages([nextFront]);
+    assert.equal(imageFiles.has(nextFront), true);
+    api.selectItem('blue');
+    api.sendType('text');
+    control('[name="garment_name"]').value = item.name;
+    control('[name="garment_description"]').value = item.description;
+    await api.handleGarmentAction({ currentTarget: { dataset: { action: 'remove-image' } } });
+    assert.equal(api.state().garments.get('blue').image, '');
+    assert.equal(api.state().garments.get('blue').backImage, '', '删除图片同时清空两面');
+    api.renderGarmentImage();
+    assert.equal(preview.children.length, 2, '无图时仍保留正背面位置');
+    assert.ok(preview.children.every(button => button.disabled));
+    document.createElement = previousCreate;
+    console.log('通过正背面独立替换、双图迁移备份恢复、失败回滚、图号复用与共享文件清理检查。');
 }
 
 // 使用已有的内置测试运行器等待主流程，异步流程意外悬空时必须失败，避免漏跑后续断言。
