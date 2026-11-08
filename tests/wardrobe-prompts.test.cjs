@@ -27,7 +27,7 @@ function createForm(fields, owner = '') {
 const forms = new Map(['user', 'char', 'image'].map(owner => [`[data-template-owner="${owner}"]`, createForm(['single', 'wardrobe'], owner)]));
 const descriptionForm = createForm(['outfit', 'item']);
 forms.set('.tw-description-form', descriptionForm);
-const sendForm = createForm(['content_type', 'position', 'marker_mode', 'send_content_rating']);
+const sendForm = createForm(['content_type', 'position', 'marker_mode', 'send_content_rating', 'outfit_history_count']);
 sendForm.elements.content_type.value = 'text';
 sendForm.elements.position.value = 'user_end';
 sendForm.elements.marker_mode.value = 'strip';
@@ -130,6 +130,7 @@ renderGarmentLibrary = () => {};
 globalThis.api = { loadWardrobeTemplates, saveWardrobeTemplate, loadDescriptionPrompts, saveDescriptionPrompts,
     previousOutfitPrompt: PREVIOUS_DEFAULT_OUTFIT_PROMPT,
     previousItemPrompt: PREVIOUS_DEFAULT_ITEM_PROMPT,
+    previousStaticItemPrompt: PREVIOUS_STATIC_ITEM_PROMPT,
     loadGarments, generateGarmentDescription, generateMissingGarmentDescriptions, stopDescriptionRequest, saveSelectedGarment, buildWearerContent,
     handleWardrobeData, parseWardrobeSettingsData, loadSendSettings,
     filterMissing: ids => { currentCategory = 'missing-description'; visibleGarmentIds = new Set(ids); },
@@ -164,8 +165,8 @@ async function main() {
 
     // 升级仅替换原始默认提示词，用户编辑的两种提示词都应完整保留。
     const defaultOutfitPrompt = api.state().descriptionPrompts.outfit;
-    assert.ok(defaultOutfitPrompt.includes('原始标准静态版型') && defaultOutfitPrompt.includes('200-280字'), '默认服装提示词使用新版静态版型及字数要求');
-    assert.ok(defaultOutfitPrompt.includes('后背结构的合理补全') && defaultOutfitPrompt.includes('系统追加的最终输出格式'), '新版包含后背还原要求并服从最终输出格式');
+    assert.ok(defaultOutfitPrompt.includes('整套穿搭') && defaultOutfitPrompt.includes('最多 280 字，无最低字数'), '整套模式限制范围和长度，允许短描述');
+    assert.ok(defaultOutfitPrompt.includes('系统追加的最终输出格式'), '整套模式服从分类和标签开关对应的格式');
     saved.wardrobe_description_prompts = { outfit: api.previousOutfitPrompt, item: '自定义单品提示词' };
     api.loadDescriptionPrompts();
     assert.equal(api.state().descriptionPrompts.outfit, defaultOutfitPrompt, '旧默认服装提示词自动升级');
@@ -177,11 +178,27 @@ async function main() {
     saved.wardrobe_description_prompts.item = api.previousItemPrompt;
     api.loadDescriptionPrompts();
     const upgradedItemPrompt = api.state().descriptionPrompts.item;
-    assert.ok(upgradedItemPrompt.includes('单品版型还原师') && upgradedItemPrompt.includes('120-220字'), '旧默认单品提示词升级为新版静态版型要求');
+    assert.ok(upgradedItemPrompt.includes('省略其他服装和独立配饰') && upgradedItemPrompt.includes('无法辨认目标时'), '单品模式限制范围并处理目标缺失');
     assert.ok(upgradedItemPrompt.includes('{{name}}') && upgradedItemPrompt.includes('{{category}}'), '新版保留目标名称和预设分类占位符');
-    assert.ok(upgradedItemPrompt.includes('完全无法辨认或不存在该目标单品') && upgradedItemPrompt.includes('不可见/后背结构的合理补全'), '新版包含目标缺失与背面固定结构要求');
     assert.equal(descriptionForm.elements.namedItem('item').value, upgradedItemPrompt, '单品表单同步升级');
     assert.equal(api.state().descriptionPrompts.outfit, '自定义服装提示词', '单品升级保留自定义服装提示词');
+    // 上一版静态提示词也应升级，但仅改动过一句的用户版本仍属于自定义内容。
+    saved.wardrobe_description_prompts.item = api.previousStaticItemPrompt;
+    api.loadDescriptionPrompts();
+    assert.equal(api.state().descriptionPrompts.item, upgradedItemPrompt, '上一版静态单品默认值自动升级');
+    assert.equal(descriptionForm.elements.namedItem('item').value, upgradedItemPrompt, '上一版升级后表单同步');
+    assert.equal(api.state().descriptionPrompts.outfit, '自定义服装提示词', '上一版单品升级不影响服装提示词');
+    // 整套和单品的结构证据与人物排除口径一致，防止只更新其中一种识图入口。
+    for (const prompt of [defaultOutfitPrompt, upgradedItemPrompt]) {
+        assert.match(prompt, /忽略人物的身材、比例/);
+        assert.match(prompt, /背面、闭合件、画外长度和材质成分只写能从参考图确认/);
+        assert.match(prompt, /自由端按自然垂落写/);
+        assert.doesNotMatch(prompt, /补全|默认完整/);
+    }
+    const customizedStaticItemPrompt = api.previousStaticItemPrompt.replace('不可见/后背结构的合理补全', '我自己的背面规则');
+    saved.wardrobe_description_prompts.item = customizedStaticItemPrompt;
+    api.loadDescriptionPrompts();
+    assert.equal(api.state().descriptionPrompts.item, customizedStaticItemPrompt, '编辑过的上一版静态提示词保持原文');
     saved.wardrobe_description_prompts.item = '自定义单品提示词';
     api.loadDescriptionPrompts();
     assert.equal(api.state().descriptionPrompts.item, '自定义单品提示词', '升级不改写自定义单品提示词');
@@ -355,7 +372,7 @@ async function main() {
     assert.deepEqual(Object.keys(backup).sort(), ['format', 'settings', 'version']);
     assert.equal(backup.format, 'tw-wardrobe-settings');
     assert.deepEqual(Object.keys(backup.settings).sort(), ['description_prompts', 'send', 'templates']);
-    assert.deepEqual(Object.keys(backup.settings.send).sort(), ['content_type', 'marker_mode', 'position', 'send_content_rating']);
+    assert.deepEqual(Object.keys(backup.settings.send).sort(), ['content_type', 'marker_mode', 'outfit_history_count', 'position', 'send_content_rating']);
     assert.equal(backup.settings.send.send_content_rating, true, '设置备份包含分级开关');
     assert.equal(backup.settings.send.marker_mode, 'strip', '导出包含默认换装记录模式');
     assert.deepEqual(Object.keys(backup.settings.description_prompts).sort(), ['item', 'outfit']);
@@ -371,6 +388,7 @@ async function main() {
     const apiBefore = JSON.stringify(saved.wardrobe_api);
     backup.settings.send.position = 'context_end';
     backup.settings.send.marker_mode = 'keep';
+    backup.settings.send.outfit_history_count = 6;
     backup.settings.send.send_content_rating = false;
     backup.settings.templates.user.single = '恢复的 USER 模板 {{name}}';
     backup.settings.description_prompts.outfit = '恢复的服装提示词';
@@ -390,16 +408,19 @@ async function main() {
     assert.equal(sendForm.elements.position.value, 'context_end', '导入后刷新发送选项');
     assert.equal(saved.wardrobe_send.marker_mode, 'keep', '导入保存换装记录模式');
     assert.equal(sendForm.elements.marker_mode.value, 'keep', '导入后刷新换装记录选项');
+    assert.equal(sendForm.elements.outfit_history_count.value, '6', '历史楼层数随设置备份恢复');
     assert.equal(saved.wardrobe_send.send_content_rating, false, '设置导入保留关闭分级');
     assert.equal(sendForm.elements.send_content_rating.checked, false, '设置导入回填分级开关');
     const legacyBackup = structuredClone(backup);
     delete legacyBackup.settings.send.marker_mode;
+    delete legacyBackup.settings.send.outfit_history_count;
     delete legacyBackup.settings.send.send_content_rating;
     assert.equal(api.parseWardrobeSettingsData(legacyBackup).send.send_content_rating, true, '旧设置备份默认开启分级');
     const invalidRating = structuredClone(backup);
     invalidRating.settings.send.send_content_rating = 'false';
     assert.throws(() => api.parseWardrobeSettingsData(invalidRating), /发送内容设置无效/, '分级开关仅接受布尔值');
     assert.equal(api.parseWardrobeSettingsData(legacyBackup).send.marker_mode, 'strip', '旧备份缺失模式时使用默认值');
+    assert.equal(api.parseWardrobeSettingsData(legacyBackup).send.outfit_history_count, 2, '旧备份默认读前两楼');
     const invalidMarker = structuredClone(backup);
     invalidMarker.settings.send.marker_mode = 'invalid';
     assert.throws(() => api.parseWardrobeSettingsData(invalidMarker), /发送内容设置无效/, '拒绝无效记录模式');
@@ -445,7 +466,181 @@ async function main() {
     await checkGeneratedOrganization();
     await checkDescriptionOptions();
     await checkGeneratedTagApproval();
+    await checkBulkDescriptionConcurrency();
     await checkBulkDescriptions();
+    await checkPastedDescriptionJson();
+}
+
+/**
+ * 验证手动粘贴 JSON 后只保存描述正文，标签原子追加，并让所有设置模板变量读取最新资料。
+ * @returns {Promise<void>} 保存、失败保留、模板变量和后续识图提示词断言完成后结束。
+ */
+async function checkPastedDescriptionJson() {
+    saved.wardrobe_selections = { user: [], char: [] };
+    saved.wardrobe_groups = [{ id: 'daily', name: '日常' }];
+    saved.wardrobe_items = [{ id: 'pasted', name: '原名称', category: 'coats', description: '原描述', image: 'data:image/png;base64,aGVsbG8=', groupIds: ['daily'] }];
+    api.loadGarments();
+    controls['[name="garment_name"]'].value = '';
+    controls['[name="garment_category"]'].value = 'coats';
+    // 手动保存与接口请求的 AI 开关独立，防止关闭识图选项后无法导入自己填写的标签。
+    controls['[name="description_category"]'].value = 'off';
+    controls['[name="description_tags"]'].value = 'off';
+    const description = controls['[name="garment_description"]'];
+    const data = { name: ' 红色外袍 ', description: ' 红色衣身。\n袖口饰有滚边。 ', category: '外套', tags: ['日常', ' 冬季 ', '冬季'] };
+    const confirmCount = confirmations.length;
+    for (const text of [JSON.stringify(data), '```json\n' + JSON.stringify(data) + '\n```']) {
+        description.value = text;
+        const item = api.saveSelectedGarment();
+        assert.ok(item);
+        assert.equal(item.name, data.name.trim());
+        assert.equal(item.category, 'coats');
+        assert.equal(item.description, data.description.trim());
+        assert.equal(description.value, item.description, '保存后编辑框只剩 description 正文');
+        assert.deepEqual(saved.wardrobe_items[0].groupIds.map(id => api.state().garmentGroups.get(id)), ['日常', '冬季']);
+        assert.equal(saved.wardrobe_groups.length, 2, '重复保存复用标签，不创建重复项');
+    }
+    assert.equal(confirmations.length, confirmCount, '手动填写并保存的标签直接生效');
+
+    // JSON 是服装资料，七个变量由模板按当前聊天与角色取值，不从 JSON 中硬编码角色或数量。
+    const template = '变量检查|{{user}}|{{char}}|{{wearer}}|{{name}}|{{description}}|{{outfits}}|{{count}}|结束';
+    const templates = { user: { single: template, wardrobe: template }, char: { single: template, wardrobe: template } };
+    const imageTemplates = { single: template, wardrobe: template };
+    const names = { user: '测试玩家', char: '测试角色' };
+    const item = saved.wardrobe_items[0];
+    for (const wearer of ['user', 'char']) for (const content_type of ['text', 'image', 'text_image']) {
+        for (const items of [[item], [item, { ...item, id: 'second', name: '第二件', description: '第二件正文' }]]) {
+            const text = api.buildWearerContent(items, wearer, { content_type }, templates, names, imageTemplates)[0].text;
+            assert.ok(text.includes(`变量检查|测试玩家|测试角色|${names[wearer]}|${items.map(value => value.name).join('、')}|${items.map(value => value.description).join('\n')}|`));
+            assert.ok(text.includes(`|${items.length}|结束`));
+            assert.ok(text.includes(`1. ${item.name}（`) && text.includes(item.description), '候选列表包含保存后的名称和正文');
+            assert.ok(!/\{\{(?:user|char|wearer|name|description|outfits|count)\}\}/.test(text), '七个设置变量全部替换');
+            assert.ok(!text.includes('"description"'), '模板不发送 JSON 包装');
+        }
+    }
+
+    // 用户示例中的未知分类不会变成标签，空 tags 也不撤销已有手动归属。
+    description.value = JSON.stringify({ name: '未指定单品', description: '请明确目标单品。', category: '未指定', tags: [] });
+    assert.ok(api.saveSelectedGarment());
+    assert.equal(description.value, '请明确目标单品。');
+    assert.equal(saved.wardrobe_items[0].category, 'coats');
+    assert.equal(saved.wardrobe_groups.length, 2);
+    assert.equal(saved.wardrobe_items[0].groupIds.length, 2);
+    const originalSaved = JSON.stringify(saved);
+    const originalState = JSON.stringify(Array.from(api.state().garments));
+    for (const invalid of ['{"name":', '[]', '{"name":"名称","description":42}', '{"name":"名称","description":" "}', '{"name":"名称","description":"正文","tags":"冬季"}', '{"name":"名称","description":"正文","tags":[42]}']) {
+        description.value = invalid;
+        assert.equal(api.saveSelectedGarment(), undefined);
+        assert.equal(description.value, invalid, '失败时保留可修改的 JSON 草稿');
+        assert.equal(JSON.stringify(saved), originalSaved);
+        assert.equal(JSON.stringify(Array.from(api.state().garments)), originalState);
+    }
+    const retry = JSON.stringify({ name: '重试名称', description: '重试正文', category: 'shoes', tags: ['新标签'] });
+    description.value = retry;
+    writesFail = true;
+    assert.equal(api.saveSelectedGarment(), undefined);
+    writesFail = false;
+    assert.equal(description.value, retry);
+    assert.equal(JSON.stringify(saved), originalSaved, '存储失败不留下新标签或半份服装资料');
+    assert.equal(JSON.stringify(Array.from(api.state().garments)), originalState);
+    assert.equal(api.state().garmentGroups.size, 2);
+    assert.ok(api.saveSelectedGarment(), '失败后可原样重试');
+    assert.equal(description.value, '重试正文');
+
+    // 保存后的名称和分类同样供设置中的两种描述生成提示词使用。
+    descriptionForm.elements.outfit.value = '服装变量|{{name}}|{{category}}';
+    descriptionForm.elements.namedItem('item').value = '单品变量|{{name}}|{{category}}';
+    api.saveDescriptionPrompts({ preventDefault() {}, currentTarget: descriptionForm });
+    modelReply = '后续生成正文';
+    for (const mode of ['outfit', 'item']) {
+        controls['[name="description_mode"]'].value = mode;
+        await api.generateGarmentDescription();
+        assert.ok(requests.at(-1).user_input.startsWith(`${mode === 'outfit' ? '服装' : '单品'}变量|重试名称|鞋子`));
+    }
+    controls['[name="garment_name"]'].value = '重试名称';
+    description.value = '  普通描述仍可保存  ';
+    assert.equal(api.saveSelectedGarment().description, '普通描述仍可保存');
+    description.value = '';
+    assert.equal(api.saveSelectedGarment().description, '', '未应用服装仍允许清空描述');
+    console.log('通过描述粘贴 JSON、正文提取、标签去重复用、失败回滚和 USER/Char/图片模板全部变量检查。');
+}
+
+/**
+ * 使用可手动结束的模型请求验证两个滚动槽位、独立取消编号、标签保存及失败后停止排队。
+ * @returns {Promise<void>} 并发上限、乱序补位、取消和失败断言全部完成后结束。
+ */
+async function checkBulkDescriptionConcurrency() {
+    const items = ['A', 'B', 'C', 'D'].map(id => ({
+        id, name: id, category: 'tops', description: '',
+        image: `data:image/png;base64,${Buffer.from(id).toString('base64')}`,
+    }));
+    saved.wardrobe_items = structuredClone(items);
+    saved.wardrobe_groups = [];
+    api.loadGarments();
+    controls['[name="garment_description"]'].value = '';
+    const pending = [];
+    generationEffect = config => new Promise((resolve, reject) => { pending.push({ config, resolve, reject }); });
+    const start = requests.length;
+    const batch = api.generateMissingGarmentDescriptions();
+    await new Promise(setImmediate);
+    assert.equal(pending.length, 2, '只启动 A、B 两张图片');
+    assert.deepEqual(requests.slice(start).map(request => request.image), items.slice(0, 2).map(item => item.image));
+
+    pending[0].resolve(JSON.stringify({ name: 'A', description: '描述A', tags: ['标签A'] }));
+    await new Promise(setImmediate);
+    assert.equal(pending.length, 3, 'A 保存后启动 C，不等待 B');
+    assert.equal(pending[2].config.image, items[2].image);
+    assert.equal(saved.wardrobe_items[0].description, '描述A', '已完成图片立即保存');
+    pending[2].resolve(JSON.stringify({ name: 'C', description: '描述C', tags: ['标签C'] }));
+    await new Promise(setImmediate);
+    assert.equal(pending.length, 4, 'C 先完成时继续启动 D，B 仍占用另一槽位');
+    assert.equal(pending[3].config.image, items[3].image);
+    assert.equal(new Set(pending.map(task => task.config.generation_id)).size, 4, '每张图片使用独立编号');
+    pending[3].resolve(JSON.stringify({ name: 'D', description: '描述D', tags: ['标签D'] }));
+    pending[1].resolve(JSON.stringify({ name: 'B', description: '描述B', tags: ['标签B'] }));
+    await batch;
+    assert.equal(requests.length - start, 4, '整批每张只发送一次');
+    for (const item of saved.wardrobe_items) {
+        assert.equal(item.description, `描述${item.id}`, '乱序返回仍保存到对应服装');
+        assert.deepEqual(item.groupIds.map(id => api.state().garmentGroups.get(id)), [`标签${item.id}`], '串行保存保留各张新增标签');
+    }
+    assert.match(controls['.tw-library-status'].textContent, /已识别并保存 4 张/);
+
+    saved.wardrobe_items = structuredClone(items);
+    api.loadGarments();
+    controls['[name="garment_description"]'].value = '';
+    pending.length = 0;
+    const canceled = api.generateMissingGarmentDescriptions();
+    await new Promise(setImmediate);
+    assert.equal(pending.length, 2);
+    const beforeCancel = JSON.stringify(saved);
+    const stoppedBefore = stoppedGenerations.length;
+    api.stopDescriptionRequest();
+    assert.deepEqual(stoppedGenerations.slice(stoppedBefore), pending.map(task => task.config.generation_id), '取消时停止两个独立请求');
+    pending[0].resolve('取消后的迟到描述');
+    pending[1].reject(new Error('取消后的迟到错误'));
+    await canceled;
+    await new Promise(setImmediate);
+    assert.equal(pending.length, 2, '取消后不再启动 C、D');
+    assert.equal(JSON.stringify(saved), beforeCancel, '两个请求的迟到结果均不写入');
+    assert.equal(controls['[data-action="describe-all"]'].disabled, false);
+
+    pending.length = 0;
+    const failed = api.generateMissingGarmentDescriptions();
+    await new Promise(setImmediate);
+    pending[0].resolve('已保存A');
+    await new Promise(setImmediate);
+    assert.equal(pending.length, 3);
+    pending[1].reject(new Error('B识图失败'));
+    await failed;
+    assert.equal(stoppedGenerations.at(-1), pending[2].config.generation_id, 'B 失败时停止仍进行中的 C');
+    pending[2].resolve('失败后迟到的C');
+    await new Promise(setImmediate);
+    assert.equal(pending.length, 3, '失败后不再启动 D');
+    assert.deepEqual(saved.wardrobe_items.map(item => item.description), ['已保存A', '', '', ''], '失败保留已保存结果并忽略迟到回复');
+    assert.match(controls['.tw-library-status'].textContent, /已保存 1 张图片.*B识图失败/);
+    assert.equal(controls['.tw-library-status'].dataset.error, 'true');
+    generationEffect = undefined;
+    console.log('通过一键识图的两并发上限、乱序滚动补位、独立编号、标签保存、全量取消和失败停止检查。');
 }
 
 /**

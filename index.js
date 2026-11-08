@@ -75,11 +75,16 @@ const STORED_IMAGE_PATTERN = /^user\/images\/tavern_wardrobe\/[^/\\?#%]+\.(png|j
 const SEND_IMAGE_MAX_EDGE = 1280;
 const SEND_IMAGE_QUALITY = 0.82;
 const WEARERS = ['user', 'char'];
-// 换装记录只从 AI 楼层读取；关闭时不读取，默认发送前剥离，保留历史模式才将记录发给 AI。
-const MARKER_MODES = ['off', 'strip', 'keep'];
+// 仅在酒馆保存剧情回复时补写穿搭，开场白和其他插件创建的楼层不参与。
+const OUTFIT_REPLY_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue', 'append', 'appendFinal']);
+// 独立选装把快照保存在楼层变量；旧模式继续读取 AI 楼层标记，只有保留历史模式才发送标记。
+const MARKER_MODES = ['off', 'strip', 'keep', 'isolated'];
 const DEFAULT_MARKER_MODE = 'strip';
+const DEFAULT_OUTFIT_HISTORY_COUNT = 2;
 // 仅配合 matchAll 与 replace 使用，避免全局正则的 lastIndex 影响后续读取。
 const OUTFIT_MARKER = /<!--\s*outfit:(user|char)\s*=\s*([\s\S]*?)\s*-->/g;
+// 识别脚本发布的 JSON 快照，仍允许旧名称标记以花括号开头。
+const PUBLISHED_OUTFIT_SNAPSHOT = /^\{\s*"ids"\s*:/;
 // 结构规则独立于用户模板，防止旧模板继续把单品视作互斥套装，或在普通转场时强制换衣。
 const STYLING_RULES = [
     '固定穿搭规则（优先于模板中只选一条候选或转场即换装的旧要求）：实际穿着以“当前实际穿着”段落为准，模板中的服装资料均为候选。',
@@ -95,50 +100,8 @@ const DESCRIPTION_VARIABLES = /\{\{(name|category)\}\}/g;
 // 仅升级未编辑过的旧默认服装、单品提示词，避免覆盖用户保存的自定义内容。
 const PREVIOUS_DEFAULT_OUTFIT_PROMPT = '请只描述图片中可见的服装与配饰，说明款式、颜色、材质、版型、层次、搭配及装饰细节。忽略人物的身份、面容、发型、表情、姿势、身材、皮肤和身体特征，不描述背景，不续写剧情。只写能从图中看出的信息，无法判断的材质和被遮挡的细节不要猜测。仅输出包含 name（服装名称）、description（服装描述）、category（服装分类标识）和 tags（衣柜标签名称数组，可同时包含场景、季节、风格）的 JSON 对象。';
 const PREVIOUS_DEFAULT_ITEM_PROMPT = '请只描述当前服装单品“{{name}}”（分类：{{category}}）在图片中可见的款式、颜色、材质、剪裁、图案、装饰和穿着细节。忽略其他服装和配饰，不描述人物的身份、面容、发型、表情、姿势、身材、皮肤、身体特征及背景。无法辨认目标单品时请明确说明，不编造。仅输出包含 name（单品名称）、description（单品描述）、category（服装分类标识）和 tags（衣柜标签名称数组，可同时包含场景、季节、风格）的 JSON 对象。';
-const DEFAULT_DESCRIPTION_PROMPTS = {
-    // 保留用户提供的静态版型还原规范；请求末尾继续追加与分类、标签开关一致的最终输出格式。
-    outfit: `你是一位擅长拆解服装结构的穿搭造型师与版型还原师，能够看着穿搭图片，逆向推导出该服装出厂时的【原始标准静态版型】，并用直观、准确、画面感极强的语言撰写服装结构描述。你的描述需同时适合小说剧情自然调用和直接转图片生成提示词。
-
-【核心铁律一：特殊情趣剪裁与暴露结构的100%直白还原（最高优先级！）】
-面对极简、镂空或情趣类服装，必须一针见血地写出其**【真实的布料遮挡范围、剪裁缺口与裸露部位】**，绝对禁止保守化修改或用晦涩词汇绕圈子！
-
-1.  直接点明敏感部位的挖空与暴露：若服装在胸部、乳头、乳晕、下胸、胯部或裆部有刻意挖空、剪裁缺口或敞开设计，必须用直白清晰的语言直接写明！
-      - 正确示范：“在三角胸片正下方对应乳头与乳晕的位置做了大面积半圆形挖空剪裁，直接将整个乳头、乳晕及下胸区域完全裸露在外”、“仅盖住乳房上半部，乳头从剪开的豁口中完全漏出”、“前胸大深V全敞开露出胸沟”、“两侧无侧缝超高开衩直达腰际，胯骨与大腿外侧完全暴露”、“裆部采用全开裆剪裁”。
-2.  严禁脑补完整布料：绝对禁止把“剪洞露乳的胸罩、乳贴、细绳”擅自修补脑补为完整的常规胸罩或常规内裤！
-
-【核心铁律二：区分“原本剪裁”与“穿着临时形变”】 在100%保留上述特殊挖空与暴露设计的前提下，执行【去形变还原】：
-
-1.  过滤动作折痕：严禁将人物弯腰、坐姿或挤压导致的临时布料折痕、穿歪偏移写成衣服原本的设计。
-2.  还原对称版型：若衣服原本是对称剪裁（包括对称的乳头挖空或对称绑带），仅因人物姿势扭转导致画面不对称，必须按其原本的【对称结构】描述。
-3.  保留设计感褶皱：对于胸下围、腰部明显的收拢褶皱，直接描述为“横向抓褶收拢”或“抽绳褶皱”。
-
-【核心铁律三：后背结构的合理补全】 当图片看不到后背时，严禁跳过后背或写“后背不可见/推测”！必须根据前片的布料多少，直接笃定地写出最匹配的后背结构：
-
-1.  情趣/露乳/高开衩/细带类：后背直接补全为“全露背结构，仅靠后颈系带与后腰细绳固定”或“后背交叉细绳系带”。
-2.  常规紧身裙/束腰类：补全为“后背隐形拉链闭合”或“后背交叉绑带收紧”。
-3.  日常衣服类：按常规补全后背拼缝、领口包边或后腰拉链。
-
-【核心描述规范（description 字段）】 请将以下6项内容自然融合成一段 200-280字 的直观描述（除第2项仅在有束腰/收腰时写之外，其余必写）：
-
-1.  上身与胸部剪裁：款式类型（如挂脖裙/抹胸等）、肩带与连接环（如金色圆环）、胸部具体的遮挡与挖空方式（必须直白写出哪里被剪开、乳头/乳晕/胸沟如何暴露）。
-2.  腰部与胸下围：胸下围或腰部的收拢、抓褶、绑带或镂空连接方式。
-3.  下摆与开衩结构：裙摆/裤装的形状（如一片式前裙摆/包臀裙/T字裤）、遮挡范围（如仅遮挡小腹与腿间）、开衩高度（如直达腰际的无侧缝超高开衩）及暴露部位（如两侧胯部及大腿完全暴露）。
-4.  后背与固定方式（必写）：后背露肤程度及系带/拉链固定方式。
-5.  面料与质感：面料材质（如高弹氨纶布/蕾丝/漆皮）、表面特征（如带细密闪粉/半透明/高光泽）。
-6.  颜色与配饰：服装主色、金属件颜色，以及耳环、手镯、发饰等配饰的颜色与款式。
-
-【语言与禁忌要求】
-
-  - 语言风格：客观、直白、精准、画面感强！用最容易听懂的服装结构词（如“三角胸罩轮廓”、“半圆形挖空”、“一片式前裙摆”），拒绝晦涩难懂的工业生僻词，禁止头尾总结句。
-  - 绝对禁忌：只通过描述“衣服怎么剪裁、遮了哪里、露了哪里”来体现性感，严禁描写人物的身材大小（如“巨乳”、“丰满”）、皮肤流汗、表情神态、身体挤压动作（如“肉被挤出”）以及背景环境、手拿的道具。
-
-【输出字段规范】 严格配合系统追加的最终输出格式，仅输出合法的 JSON 对象（不要包含任何 markdown 代码块、\`\`\`json 标记或额外解释）： {
-"name": "穿搭名称（6字以内，直观准确，如：挖空露乳挂脖裙）", "description":
-"融合上述要求、直白点出挖空与暴露部位、还原静态版型并补全后背的一段高画面感描述（200-280字）", "category": "必须严格从系统提供的固定分类
-id 中选择1个（如 tops, bottoms, dresses, coats, underwear, socks, shoes, accessories,
-outfits, other）", "tags": ["标签1", "标签2"] }`,
-    // 单品提示词只拆解目标本身，名称与预设分类继续通过现有占位符在发送时替换。
-    item: `你是一位擅长拆解服装结构的单品版型还原师，能够看着穿搭图片，精准锁定目标单品，逆向推导出该单品出厂时的【原始标准静态版型】，并用直观、准确、画面感极强的语言撰写单品结构描述。你的描述需同时适合小说剧情自然调用和直接转图片生成提示词。
+// 保留上一版完整默认单品提示词用于精确迁移，避免把用户仅修改过背面规则的自定义内容覆盖掉。
+const PREVIOUS_STATIC_ITEM_PROMPT = `你是一位擅长拆解服装结构的单品版型还原师，能够看着穿搭图片，精准锁定目标单品，逆向推导出该单品出厂时的【原始标准静态版型】，并用直观、准确、画面感极强的语言撰写单品结构描述。你的描述需同时适合小说剧情自然调用和直接转图片生成提示词。
 
 【当前任务目标】
 请只针对图片中的目标单品“{{name}}”（预设分类：{{category}}）进行深度结构拆解与描述。严格忽略画面中的其他非目标服装和配饰！若图片中完全无法辨认或不存在该目标单品，请在
@@ -150,6 +113,7 @@ description 中明确说明，绝不编造。
 1.  直接点明敏感部位的挖空与暴露：若该单品在胸部、乳头、乳晕、下胸、胯部、臀部或裆部有刻意挖空、剪裁缺口或敞开设计，必须用直白清晰的语言直接写明！
       - 正确示范（视单品部位而定）：“在三角胸片正下方对应乳头与乳晕的位置做了大面积半圆形挖空剪裁，直接将整个乳头、乳晕及下胸区域完全裸露在外”、“仅盖住乳房上半部，乳头从剪开的豁口中完全漏出”、“两侧无侧缝超高开衩直达腰际，胯骨与大腿外侧完全暴露”、“裆部采用全开裆剪裁，仅靠两侧细绳连接”。
 2.  严禁脑补完整布料：绝对禁止把“剪洞露乳的胸罩、乳贴、开裆细绳内裤”擅自修补脑补为完整的常规内衣或常规服装！
+3. 描述遮挡与暴露时，只写"布料在哪里、什么形状、连到哪里"以及"哪里无布料"，严禁写"露出多少乳房/臀肉"这类依赖穿着者身材的结果。布料宽度用衣服自身的锚点（挂脖带、圆环、腰线、胯侧）来界定，而不是用身体部位的大小来界定。
 
 【核心铁律二：区分“原本剪裁”与“穿着临时形变”】 在100%保留上述特殊挖空与暴露设计的前提下，对该单品执行【去形变还原】：
 
@@ -181,7 +145,21 @@ description 中明确说明，绝不编造。
 【输出字段规范】 严格配合系统追加的最终输出格式，仅输出合法的 JSON 对象（不要包含任何 markdown 代码块、\`\`\`json 标记或额外解释）： {
 "name": "单品名称（可沿用或优化输入的{{name}}，6字以内，直观准确，如：挖空露乳胸衣）", "description":
 "融合上述要求、只针对该单品直白点出剪裁与暴露部位、还原静态版型并补全背面固定方式的一段高画面感描述（120-220字）", "category":
-"{{category}}", "tags": ["风格标签", "适用场景", "季节标签", "材质或版型特征标签"] }`,
+"{{category}}", "tags": ["风格标签", "适用场景", "季节标签", "材质或版型特征标签"] }`;
+// 两种识图模式共用服装结构规则，避免整套和单品对同一剪裁作出不同推断。
+const DESCRIPTION_STRUCTURE_RULES = `还原服装的静态版型，写成可直接用于 AI 角色扮演换装的中文服装描述。
+
+- 以布片、边缘、接缝和连接点为主语，写轮廓、覆盖范围、开口、带子、固定方式、颜色、质感和装饰。领口、腰线、胯侧等只用于定位服装结构。忽略人物的身材、比例、面容、发型、姿势和背景。
+- 保留有证据的开窗、开衩和不对称剪裁。区分设计性抓褶与姿势造成的折痕或偏移。连接衣物的手提绳带写连接点与可辨端饰，自由端按自然垂落写。
+- 背面、闭合件、画外长度和材质成分只写能从参考图确认的细节。可写缎面光泽、长绒、半透明等可辨质感。省略无证据的细节。
+- 名称简短，描述写成一段，最多 280 字，无最低字数。仅输出 JSON，字段遵循系统追加的最终输出格式。`;
+const DEFAULT_DESCRIPTION_PROMPTS = {
+    outfit: `描述图中的整套穿搭，按上身、腰部、下身、鞋袜、独立配饰的顺序。区分缀在衣物上的饰件和单独佩戴的配饰。
+
+${DESCRIPTION_STRUCTURE_RULES}`,
+    item: `只描述目标单品“{{name}}”（当前分类：{{category}}）及与它相连的饰件。省略其他服装和独立配饰。无法辨认目标时，在 description 中简短说明。
+
+${DESCRIPTION_STRUCTURE_RULES}`,
 };
 // 精确识别两代原始默认值，升级时保留用户实际编辑过的内容。
 const PREVIOUS_DEFAULT_TEMPLATES = {
@@ -310,6 +288,7 @@ const PANEL_HTML = `
                 <button type="button" class="tw-add-library" data-action="add-library" title="新增空衣柜" aria-label="新增空衣柜">${icon('plus')}</button>
             </div>
             <label class="tw-search">${icon('search')}<input type="search" placeholder="搜索名称、描述、标签…" aria-label="搜索服装"></label>
+            <button type="button" class="tw-log-button" data-action="open-logs" aria-haspopup="dialog" aria-controls="tw-logs">${icon('file')}日志</button>
             <div class="tw-header-actions">
                 <button type="button" class="tw-icon-button tw-settings-button" data-action="open-settings" aria-label="衣柜设置" title="衣柜设置" aria-haspopup="dialog" aria-controls="tw-settings">${icon('settings')}</button>
                 <button type="button" class="tw-icon-button tw-close" data-action="close" aria-label="关闭衣柜" title="关闭">${icon('close')}</button>
@@ -334,7 +313,7 @@ const PANEL_HTML = `
                 </nav>
                 <div class="tw-import-footer">
                     <button type="button" class="tw-import" data-action="import">${icon('plus')}<span>导入服装</span></button>
-                    <button type="button" class="tw-export-all" data-action="export-all" title="导出整个衣柜（含空标签）">${icon('download')}<span>导出全部</span></button>
+                    <button type="button" class="tw-export-all" data-action="export-all" title="选择衣柜和导出内容" aria-haspopup="dialog" aria-controls="tw-export-picker">${icon('download')}<span>导出服装</span></button>
                 </div>
             </aside>
 
@@ -475,7 +454,7 @@ const PANEL_HTML = `
         </div>
         <footer class="tw-mobile-actions" aria-label="衣柜操作">
             <button type="button" class="tw-mobile-import" data-action="import">${icon('plus')}<span>导入</span></button>
-            <button type="button" data-action="export-all">${icon('download')}<span>导出</span></button>
+            <button type="button" data-action="export-all" aria-haspopup="dialog" aria-controls="tw-export-picker">${icon('download')}<span>导出</span></button>
             <button type="button" data-action="toggle-details" aria-controls="tw-details" aria-expanded="false">${icon('info')}<span>服装详情</span></button>
         </footer>
         <input class="tw-image-import" type="file" accept="image/png,image/jpeg,image/webp,application/json,.json" multiple hidden>
@@ -503,6 +482,17 @@ const PANEL_HTML = `
         <p class="tw-import-status" role="status" aria-live="polite"></p>
         <footer><span class="tw-import-count" aria-live="polite">已选 0 / 0 个文件</span><button type="button" data-action="confirm-import" disabled>导入所选</button></footer>
     </dialog>
+    <dialog id="tw-export-picker" aria-labelledby="tw-export-picker-title">
+        <form class="tw-export-form">
+            <header><h2 id="tw-export-picker-title">导出服装</h2><button type="button" data-action="cancel-export" aria-label="关闭导出">${icon('close')}</button></header>
+            <div class="tw-export-options">
+                <label>衣柜<span class="tw-select-control"><select name="export_library" aria-label="选择导出的衣柜"></select>${icon('chevron')}</span></label>
+                <label>导出内容<span class="tw-select-control"><select name="export_content" aria-label="选择导出内容"><option value="all">全部服装</option><option value="described">仅有描述的服装</option></select>${icon('chevron')}</span></label>
+            </div>
+            <p class="tw-export-status" role="status" aria-live="polite"></p>
+            <footer><span class="tw-export-count" aria-live="polite"></span><button type="submit" data-action="confirm-export">导出</button></footer>
+        </form>
+    </dialog>
     <dialog id="tw-combination-editor" aria-labelledby="tw-combination-title">
         <form class="tw-combination-form">
             <h2 id="tw-combination-title">搭配</h2>
@@ -523,6 +513,26 @@ const PANEL_HTML = `
             <div class="tw-send-actions"><button type="button" data-action="cancel-groups">取消</button><button type="submit">保存</button></div>
             <p class="tw-group-status" role="status" aria-live="polite"></p>
         </form>
+    </dialog>
+    <dialog id="tw-logs" aria-labelledby="tw-logs-title">
+        <header class="tw-settings-header">
+            <h2 id="tw-logs-title">日志</h2>
+            <button type="button" class="tw-icon-button" data-log-action="close" aria-label="关闭日志" autofocus>${icon('close')}</button>
+        </header>
+        <div class="tw-log-toolbar">
+            <select class="tw-log-filter" aria-label="日志级别">
+                <option value="all">全部级别</option><option value="error">Error</option>
+                <option value="warn">Warn</option><option value="debug">Debug</option>
+                <option value="info">Info</option><option value="api">API 请求</option>
+            </select>
+            <input class="tw-log-search" type="search" placeholder="搜索日志…" aria-label="搜索日志">
+            <button type="button" data-log-action="copy">复制全部</button>
+            <button type="button" data-log-action="export">导出全部</button>
+            <button type="button" data-log-action="clear">清空</button>
+        </div>
+        <p class="tw-log-status" role="status"></p>
+        <div class="tw-log-list" tabindex="0" aria-label="日志记录"></div>
+        <footer class="tw-log-footer">本次运行最近 1000 条；单条最多 12000 字符；密钥与图片数据已隐藏。</footer>
     </dialog>
     <dialog id="tw-settings" aria-labelledby="tw-settings-title">
         <header class="tw-settings-header">
@@ -592,7 +602,7 @@ const PANEL_HTML = `
                             </div>
                         </fieldset>
                         <fieldset class="tw-send-group">
-                            <legend>注入位置</legend>
+                            <legend>直接发送位置</legend>
                             <div class="tw-send-options">
                                 <label class="tw-send-choice"><input type="radio" name="position" value="system_end"><span>系统提示末尾</span></label>
                                 <label class="tw-send-choice"><input type="radio" name="position" value="context_end"><span>上下文末尾</span></label>
@@ -602,11 +612,12 @@ const PANEL_HTML = `
                         <fieldset class="tw-send-group">
                             <legend>换装记录</legend>
                             <div class="tw-send-options">
+                                <label class="tw-send-choice"><input type="radio" name="marker_mode" value="isolated"><span>独立 API 选装</span></label>
                                 <label class="tw-send-choice"><input type="radio" name="marker_mode" value="strip" checked><span>自动回写（只存不发）</span></label>
                                 <label class="tw-send-choice"><input type="radio" name="marker_mode" value="keep"><span>自动回写（保留历史）</span></label>
                                 <label class="tw-send-choice"><input type="radio" name="marker_mode" value="off"><span>关闭</span></label>
                             </div>
-                            <p class="tw-template-hint">首次选装或换装时记录完整一身；“只存不发”在发送前移除历史记录，“保留历史”继续发送，关闭后不再读取或生成换装记录。</p>
+                            <label class="tw-outfit-history">独立选装读取前 <input type="number" name="outfit_history_count" min="0" step="1" value="${DEFAULT_OUTFIT_HISTORY_COUNT}" required aria-label="独立选装读取的历史楼层数"> 楼及本次输入</label>
                         </fieldset>
                         <fieldset class="tw-send-group">
                             <legend>服装分级</legend>
@@ -2759,6 +2770,7 @@ const PANEL_CSS = `
 #tw-panel .tw-import-conflict,
 #tw-panel #tw-ask,
 #tw-panel #tw-import-picker,
+#tw-panel #tw-export-picker,
 #tw-panel #tw-group-manager,
 #tw-panel #tw-combination-editor {
     margin: auto;
@@ -2773,6 +2785,7 @@ const PANEL_CSS = `
 #tw-panel .tw-import-conflict::backdrop,
 #tw-panel #tw-ask::backdrop,
 #tw-panel #tw-import-picker::backdrop,
+#tw-panel #tw-export-picker::backdrop,
 #tw-panel #tw-group-manager::backdrop,
 #tw-panel #tw-combination-editor::backdrop {
     background: rgba(4, 5, 10, 0.7);
@@ -2872,15 +2885,15 @@ const PANEL_CSS = `
     background: #e63a63;
 }
 
-/* 导入：缩略图直接勾选，确认前不上传 */
-#tw-panel #tw-import-picker {
+/* 导入与导出共用弹窗外观；导出先选择衣柜和内容，确认前不读取原图。 */
+#tw-panel :is(#tw-import-picker, #tw-export-picker) {
     width: min(900px, calc(100vw - 24px));
     max-height: calc(100dvh - 32px);
     overflow-y: auto;
 }
 
-#tw-panel #tw-import-picker header,
-#tw-panel #tw-import-picker footer,
+#tw-panel :is(#tw-import-picker, #tw-export-picker) header,
+#tw-panel :is(#tw-import-picker, #tw-export-picker) footer,
 #tw-panel .tw-import-tools {
     display: flex;
     flex-wrap: wrap;
@@ -2888,17 +2901,17 @@ const PANEL_CSS = `
     gap: 8px;
 }
 
-#tw-panel #tw-import-picker header,
-#tw-panel #tw-import-picker footer {
+#tw-panel :is(#tw-import-picker, #tw-export-picker) header,
+#tw-panel :is(#tw-import-picker, #tw-export-picker) footer {
     justify-content: space-between;
 }
 
-#tw-panel #tw-import-picker header button {
+#tw-panel :is(#tw-import-picker, #tw-export-picker) header button {
     width: 34px;
     height: 34px;
 }
 
-#tw-panel #tw-import-picker button {
+#tw-panel :is(#tw-import-picker, #tw-export-picker) button {
     min-height: 38px;
     padding: 0 14px;
     border-color: var(--tw-line-strong);
@@ -2907,7 +2920,7 @@ const PANEL_CSS = `
     font-weight: 600;
 }
 
-#tw-panel #tw-import-picker button:not(:disabled):hover {
+#tw-panel :is(#tw-import-picker, #tw-export-picker) button:not(:disabled):hover {
     background: var(--tw-bg-hover);
     color: #fff;
 }
@@ -2979,28 +2992,48 @@ const PANEL_CSS = `
     white-space: nowrap;
 }
 
-#tw-panel .tw-import-status {
+#tw-panel :is(.tw-import-status, .tw-export-status) {
     margin-top: 8px;
     color: var(--tw-danger);
 }
 
-#tw-panel .tw-import-status:empty {
+#tw-panel :is(.tw-import-status, .tw-export-status):empty {
     display: none;
 }
 
-#tw-panel #tw-import-picker footer {
+#tw-panel :is(#tw-import-picker, #tw-export-picker) footer {
     margin-top: 14px;
 }
 
-#tw-panel #tw-import-picker .tw-import-count {
+#tw-panel :is(.tw-import-count, .tw-export-count) {
     color: var(--tw-muted);
     font-size: 13px;
 }
 
-#tw-panel #tw-import-picker [data-action="confirm-import"]:not(:disabled) {
+#tw-panel #tw-import-picker [data-action="confirm-import"]:not(:disabled),
+#tw-panel #tw-export-picker [data-action="confirm-export"]:not(:disabled) {
     border-color: rgba(192, 132, 252, 0.5);
     background: linear-gradient(135deg, #9333ea 0%, #6366f1 100%);
     color: #fff;
+}
+
+/* 两个原生选择器随窄屏自动换行，衣柜名称使用文本节点填充，保持自定义名称可读。 */
+#tw-panel .tw-export-options {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+    gap: 16px;
+    margin: 24px 0 32px;
+}
+
+#tw-panel .tw-export-options label {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+}
+
+#tw-panel .tw-export-options select {
+    min-height: 42px;
+    background: var(--tw-bg-elevated);
 }
 
 /* 标签管理与搭配编辑 */
@@ -3205,7 +3238,8 @@ const PANEL_CSS = `
     }
 }
 
-#tw-panel #tw-settings {
+#tw-panel #tw-settings,
+#tw-panel #tw-logs {
     inset: 0;
     width: min(1056px, calc(100% - 48px));
     height: min(768px, calc(100% - 48px));
@@ -3223,12 +3257,14 @@ const PANEL_CSS = `
     box-shadow: 0 28px 70px -12px rgba(0, 0, 0, 0.82);
 }
 
-#tw-panel #tw-settings[open] {
+#tw-panel #tw-settings[open],
+#tw-panel #tw-logs[open] {
     display: grid;
     grid-template-rows: auto minmax(0, 1fr);
 }
 
-#tw-panel #tw-settings::backdrop {
+#tw-panel #tw-settings::backdrop,
+#tw-panel #tw-logs::backdrop {
     background: rgba(4, 5, 10, 0.65);
     backdrop-filter: blur(6px);
 }
@@ -3242,6 +3278,22 @@ const PANEL_CSS = `
     border-bottom: 1px solid var(--tw-line);
     background: var(--tw-bg-elevated);
 }
+
+/* 复用设置弹窗的尺寸和遮罩；日志只在打开时批量刷新，避免后台请求频繁重建界面。 */
+#tw-panel #tw-logs[open] { grid-template-rows: auto auto auto minmax(0, 1fr) auto; }
+#tw-panel .tw-log-button { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+#tw-panel .tw-log-toolbar { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px; }
+#tw-panel .tw-log-filter { width: auto; }
+#tw-panel .tw-log-search { flex: 1; min-width: 120px; }
+#tw-panel .tw-log-status { margin: 0; padding: 0 16px 8px; color: var(--tw-muted); }
+#tw-panel .tw-log-list { overflow: auto; padding: 0 16px; min-height: 0; }
+#tw-panel .tw-log-entry { border-bottom: 1px solid var(--tw-line); padding: 10px 0; }
+#tw-panel .tw-log-entry summary { cursor: pointer; overflow-wrap: anywhere; white-space: pre-wrap; }
+#tw-panel .tw-log-entry[data-level="error"] summary { color: var(--tw-danger); }
+#tw-panel .tw-log-entry[data-level="warn"] summary { color: #fbbf24; }
+#tw-panel .tw-log-entry[data-level="api"] summary { color: var(--tw-accent); }
+#tw-panel .tw-log-entry pre { margin: 8px 0 0; font: 12px/1.6 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+#tw-panel .tw-log-footer { padding: 10px 16px; border-top: 1px solid var(--tw-line); color: var(--tw-muted); font-size: 12px; }
 
 #tw-panel .tw-settings-body {
     display: grid;
@@ -3557,6 +3609,26 @@ const PANEL_CSS = `
     accent-color: var(--tw-accent-strong);
 }
 
+/* 数字输入保持紧凑，窄屏也能看清它与前后文的关系。 */
+#tw-panel .tw-outfit-history {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+    color: var(--tw-ink-secondary);
+    font-size: 13px;
+}
+
+#tw-panel .tw-outfit-history input {
+    width: 7ch;
+    min-height: 36px;
+    padding: 4px 8px;
+    border: 1px solid var(--tw-line-strong);
+    border-radius: 8px;
+    background: var(--tw-bg-input);
+}
+
 #tw-panel .tw-send-actions {
     display: flex;
     flex-wrap: wrap;
@@ -3689,11 +3761,17 @@ const PANEL_CSS = `
     }
 
     #tw-panel .tw-search {
-        grid-column: 1 / -1;
+        grid-column: 1 / 3;
         grid-row: 2;
         flex: none;
         max-width: none;
         margin-left: 0;
+    }
+
+    #tw-panel .tw-log-button {
+        grid-column: 3;
+        grid-row: 2;
+        justify-content: center;
     }
 
     #tw-panel .tw-icon-button {
@@ -3963,7 +4041,8 @@ const PANEL_CSS = `
         color: var(--tw-accent-ink);
     }
 
-    #tw-panel #tw-settings {
+    #tw-panel #tw-settings,
+    #tw-panel #tw-logs {
         width: 100%;
         height: 100%;
         margin: 0;
@@ -3994,6 +4073,7 @@ const PANEL_CSS = `
     }
 
     #tw-panel #tw-import-picker,
+    #tw-panel #tw-export-picker,
     #tw-panel #tw-group-manager,
     #tw-panel #tw-combination-editor {
         padding: 16px;
@@ -4044,6 +4124,17 @@ let root;
 let menuEntry;
 let panel;
 let settingsPanel;
+let logsPanel;
+const wardrobeLogs = [];
+const logSecrets = new Set();
+const logCleanup = [];
+let logRenderTimer;
+let logSequence = 0;
+let requestSequence = 0;
+// 固定容量限制长时间运行和批量图片操作的内存占用，超出后优先保留最新现场。
+const LOG_LIMIT = 1000;
+const LOG_TEXT_LIMIT = 12000;
+const LOG_SECRET_FIELD = /^(?:key|api[_-]?key|authorization|cookie|password|token|access[_-]?token|secret)$/i;
 let apiForm;
 let sendForm;
 let apiRequest;
@@ -4075,8 +4166,11 @@ let garmentSearchTimer;
 let garmentTagSearchTimer;
 let wardrobeTemplates = { user: { ...DEFAULT_TEMPLATES.user }, char: { ...DEFAULT_TEMPLATES.char }, image: { ...DEFAULT_TEMPLATES.image } };
 let descriptionPrompts = { ...DEFAULT_DESCRIPTION_PROMPTS };
-let sendSettings = { content_type: 'text', position: 'user_end', marker_mode: DEFAULT_MARKER_MODE, send_content_rating: true };
+let sendSettings = { content_type: 'text', position: 'user_end', marker_mode: DEFAULT_MARKER_MODE, send_content_rating: true, outfit_history_count: DEFAULT_OUTFIT_HISTORY_COUNT };
 let descriptionRequest;
+let outfitRequest;
+// 用消息对象跨事件关联同一请求，区分原生聊天与只需读取穿搭的辅助生成。
+const outfitChatPrompts = new WeakMap();
 let savedApiSettings = { mode: 'host' };
 const subscriptions = [];
 const imageReaders = new Set();
@@ -4093,6 +4187,267 @@ let importingGarments = false;
 const pendingGarmentImports = new Map();
 let replacingImage = false;
 let importConflictDialog;
+
+/**
+ * 将外部错误和对象转为可复制的文本，同时去除密钥、循环引用和图片原文。
+ * @param {unknown} value 控制台参数、请求摘要或异常。
+ * @returns {string} 已脱敏且限制长度的文本。
+ */
+function formatLogValue(value) {
+    const seen = new WeakSet();
+    let text;
+    try {
+        text = typeof value === 'string' ? value : JSON.stringify(value, /** 将字段名和字段值脱敏后交给序列化器；返回可记录的值。 */ function logReplacer(key, entry) {
+            if (LOG_SECRET_FIELD.test(key)) return '[已隐藏密钥]';
+            // 生成参数可能包含多张大图，序列化前替换，避免先复制整份 Base64 再用正则删除。
+            if (typeof entry === 'string' && entry.startsWith('data:image/')) return '[已隐藏图片数据]';
+            if (entry && typeof entry === 'object') {
+                if (seen.has(entry)) return '[循环引用]';
+                seen.add(entry);
+                // 宿主和脚本来自不同窗口，按堆栈特征识别错误，避免跨窗口 instanceof 失效。
+                if (typeof entry.stack === 'string') return { name: entry.name, message: entry.message, stack: entry.stack, cause: entry.cause, status: entry.status, response: entry.response };
+            }
+            return typeof entry === 'bigint' ? String(entry) : entry;
+        }, 2);
+    } catch { text = '[无法序列化的日志参数]'; }
+    text = String(text ?? value);
+    for (const secret of [savedApiSettings.key, apiForm?.elements.key.value, ...logSecrets]) {
+        if (secret) text = text.replaceAll(secret, '[已隐藏密钥]').replaceAll(JSON.stringify(secret).slice(1, -1), '[已隐藏密钥]');
+    }
+    text = text.replace(/data:image\/[^;\s]+;base64,[A-Za-z0-9+/=]+/gi, '[已隐藏图片数据]')
+        .replace(/\bBearer\s+[^\s"',}]+/gi, 'Bearer [已隐藏密钥]')
+        .replace(/([?&](?:api[_-]?key|key|token|access_token)=)[^&#\s"']+/gi, '$1[已隐藏密钥]');
+    return text.length > LOG_TEXT_LIMIT ? `${text.slice(0, LOG_TEXT_LIMIT)}\n[内容过长，已截断]` : text;
+}
+
+/**
+ * 将时间戳转为带 +08:00 时区的北京时间，供显示、复制和导出共用。
+ * @param {number} [timestamp] 毫秒时间戳，默认使用当前时间。
+ * @returns {string} 保留毫秒和时区偏移的时间文本。
+ */
+function formatBeijingLogTime(timestamp = Date.now()) {
+    // 明确使用 UTC+8，不依赖用户设备的本地时区；日期换日交给 Date 处理。
+    return new Date(timestamp + 8 * 60 * 60 * 1000).toISOString().replace('Z', '+08:00');
+}
+
+/**
+ * 保存带北京时间和顺序的日志；关闭窗口仍采集，打开时合并刷新以控制批量操作成本。
+ * @param {string} level 日志级别。
+ * @param {string} message 操作或错误来源。
+ * @param {...unknown} details 需要保留的异常或参数。
+ * @returns {void} 无返回值。
+ */
+function recordWardrobeLog(level, message, ...details) {
+    wardrobeLogs.push({ id: ++logSequence, time: formatBeijingLogTime(), level, message: formatLogValue(message), details: formatLogValue(details) });
+    if (wardrobeLogs.length > LOG_LIMIT) wardrobeLogs.shift();
+    if (logsPanel?.open && !logRenderTimer) logRenderTimer = window.parent.setTimeout(renderWardrobeLogs, 150);
+}
+
+/**
+ * 只采集衣柜脚本窗口的输出和异常，以及挂载在酒馆页面中的衣柜资源失败；卸载时注销。
+ * @returns {void} 无返回值。
+ */
+function installWardrobeLogging() {
+    for (const level of ['log', 'debug', 'info', 'warn', 'error']) {
+        const original = window.console[level];
+        /** 转发脚本控制台调用并保留原参数；返回原始控制台结果。 */
+        function loggedConsole(...args) {
+            // 普通输出归入正常运行信息，只有显式 console.debug 才作为调试输出。
+            recordWardrobeLog(level === 'log' ? 'info' : level, `衣柜脚本 console.${level}`, ...args);
+            return original.apply(this, args);
+        }
+        window.console[level] = loggedConsole;
+        /** 只撤销本次包装，避免覆盖运行期间接管的控制台；无参数和返回值。 */
+        logCleanup.push(() => { if (window.console[level] === loggedConsole) window.console[level] = original; });
+    }
+    /** 接收脚本异常或衣柜资源失败，记录来源地址与行列；不阻止浏览器原有处理，无返回值。 */
+    function logWindowError(event) {
+        const resource = event.target;
+        recordWardrobeLog('error', `衣柜脚本：${event.message || '资源加载失败'}`, event.error, {
+            source: event.filename || resource?.currentSrc || resource?.src || resource?.href,
+            line: event.lineno, column: event.colno,
+        });
+    }
+    /** 接收脚本窗口内未处理的 Promise 拒绝并保留原始原因；无返回值。 */
+    function logUnhandledRejection(event) { recordWardrobeLog('error', '衣柜脚本：未处理的 Promise 异常', event.reason); }
+    /** 只接收衣柜根节点内的资源错误；忽略酒馆和其他脚本的全局异常，无返回值。 */
+    function logWardrobeResourceError(event) {
+        // 衣柜图片挂载在父文档，不能停掉父窗口监听；按实际节点归属过滤，避免无关资源刷屏。
+        if (root?.contains(event.target)) logWindowError(event);
+    }
+    window.addEventListener('error', logWindowError, true);
+    window.addEventListener('unhandledrejection', logUnhandledRejection);
+    window.parent.addEventListener('error', logWardrobeResourceError, true);
+    /** 清理跨窗口监听，防止重新启用脚本后重复采集；无参数和返回值。 */
+    logCleanup.push(() => {
+        window.removeEventListener('error', logWindowError, true);
+        window.removeEventListener('unhandledrejection', logUnhandledRejection);
+        window.parent.removeEventListener('error', logWardrobeResourceError, true);
+    });
+    // 即使初始化中途失败，也要在 iframe 卸载时注销已安装的日志监听。
+    window.addEventListener('pagehide', stopWardrobeLogging, { once: true });
+    recordWardrobeLog('info', '日志采集已启动', { userAgent: window.navigator.userAgent, viewport: `${window.parent.innerWidth}×${window.parent.innerHeight}` });
+}
+
+/**
+ * 恢复被包装的控制台并移除异常监听和刷新任务。
+ * @returns {void} 无返回值。
+ */
+function stopWardrobeLogging() {
+    window.parent.clearTimeout(logRenderTimer);
+    logRenderTimer = undefined;
+    for (const cleanup of logCleanup.splice(0)) cleanup();
+    window.removeEventListener('pagehide', stopWardrobeLogging);
+}
+
+/**
+ * 记录本插件发起的请求及成功、失败结果，不改宿主全局请求函数或消费原响应体。
+ * @param {string} kind 请求类型。
+ * @param {Object} config 请求参数；图片和密钥在序列化入口隐藏。
+ * @param {Function} execute 实际宿主请求，返回原始响应。
+ * @returns {Promise<unknown>} 原始响应；失败时继续抛出原异常。
+ */
+async function traceWardrobeRequest(kind, config, execute) {
+    const secret = config.custom_api?.key ?? config.key;
+    if (secret) logSecrets.add(secret);
+    const id = ++requestSequence;
+    const started = Date.now();
+    recordWardrobeLog('api', `请求 #${id} ${kind} 开始`, config);
+    try {
+        const result = await execute();
+        const http = typeof result?.status === 'number' && typeof result.clone === 'function';
+        recordWardrobeLog('api', `请求 #${id} ${kind} ${http && !result.ok ? 'HTTP 失败' : '完成'}（${Date.now() - started} ms）`,
+            http ? { status: result.status, statusText: result.statusText, url: result.url } : result);
+        if (http && !result.ok) {
+            // 仅读取失败响应的副本，图片下载成功时不复制大体积响应，也不改变调用方读取流程。
+            try { recordWardrobeLog('error', `请求 #${id} HTTP ${result.status}`, await result.clone().text()); }
+            catch (error) { recordWardrobeLog('warn', `请求 #${id} 无法读取错误响应`, error); }
+        }
+        return result;
+    } catch (error) {
+        recordWardrobeLog('error', `请求 #${id} ${kind} 失败（${Date.now() - started} ms）`, error);
+        throw error;
+    }
+}
+
+/**
+ * 经统一日志入口调用酒馆助手生成，保留参数摘要和原始回复以定位解析失败。
+ * @param {Object} config 原始生成参数。
+ * @returns {Promise<string>} 酒馆助手原始回复。
+ */
+function loggedGenerateRaw(config) {
+    return traceWardrobeRequest('generateRaw', config, () => generateRaw(config));
+}
+
+/**
+ * 经统一日志入口获取模型列表。
+ * @param {Object} config 模型列表连接配置。
+ * @returns {Promise<string[]>} 原始模型列表。
+ */
+function loggedGetModelList(config) {
+    return traceWardrobeRequest('getModelList', config, () => getModelList(config));
+}
+
+/**
+ * 记录衣柜 HTTP 请求的地址、方法、状态及耗时，省略包含聊天、图片或密钥的请求参数。
+ * @param {string} url 图片或接口地址。
+ * @param {RequestInit} [options] 原始请求参数。
+ * @returns {Promise<Response>} 未消费的原始响应。
+ */
+function wardrobeFetch(url, options) {
+    return traceWardrobeRequest('fetch', { url, method: options?.method ?? 'GET' }, () => window.parent.fetch(url, options));
+}
+
+/**
+ * 打开与设置相同层级的原生模态窗口，保留衣柜浏览现场。
+ * @returns {void} 无返回值。
+ */
+function openWardrobeLogs() {
+    if (!logsPanel.open) logsPanel.showModal();
+    renderWardrobeLogs();
+}
+
+/**
+ * 合并搜索输入引起的列表重绘，避免逐键扫描和重建最多一千条记录。
+ * @returns {void} 无返回值。
+ */
+function scheduleLogSearch() {
+    window.parent.clearTimeout(logRenderTimer);
+    logRenderTimer = window.parent.setTimeout(renderWardrobeLogs, 150);
+}
+
+/**
+ * 初始化失败时打开已有界面和日志，避免再次读取损坏配置而失去排错入口。
+ * @returns {void} 无返回值。
+ */
+function openFailedWardrobe() {
+    opener = hostDocument.activeElement;
+    if (!panel.open) panel.showModal();
+    openWardrobeLogs();
+}
+
+/**
+ * 根据级别与关键词批量绘制北京时间日志；仅当用户原本在底部时跟随新记录，保留向上查阅位置。
+ * @returns {void} 无返回值。
+ */
+function renderWardrobeLogs() {
+    window.parent.clearTimeout(logRenderTimer);
+    logRenderTimer = undefined;
+    const list = logsPanel.querySelector('.tw-log-list');
+    const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+    const scrollTop = list.scrollTop;
+    const expanded = new Set(Array.from(list.querySelectorAll('details[open]'), node => Number(node.dataset.id)));
+    const level = logsPanel.querySelector('.tw-log-filter').value;
+    const query = logsPanel.querySelector('.tw-log-search').value.trim().toLocaleLowerCase();
+    const fragment = hostDocument.createDocumentFragment();
+    let count = 0;
+    for (const entry of wardrobeLogs) {
+        if (level !== 'all' && entry.level !== level) continue;
+        if (query && !`${entry.message}\n${entry.details}`.toLocaleLowerCase().includes(query)) continue;
+        const row = hostDocument.createElement('details');
+        row.className = 'tw-log-entry';
+        row.dataset.level = entry.level;
+        row.dataset.id = entry.id;
+        row.open = expanded.has(entry.id);
+        const summary = hostDocument.createElement('summary');
+        summary.textContent = `${entry.time.slice(11, 23)} 北京时间  ${entry.level.toUpperCase()}  ${entry.message}`;
+        const detail = hostDocument.createElement('pre');
+        detail.textContent = entry.details;
+        row.append(summary, detail);
+        fragment.append(row);
+        count++;
+    }
+    list.replaceChildren(fragment);
+    logsPanel.querySelector('.tw-log-status').textContent = `显示 ${count} / ${wardrobeLogs.length} 条`;
+    if (!count) list.textContent = wardrobeLogs.length ? '没有匹配的日志' : '暂无日志';
+    list.scrollTop = atBottom ? list.scrollHeight : scrollTop;
+}
+
+/**
+ * 处理关闭、清空、复制和导出；复制与导出使用北京时间并包含全部保留记录，便于完整复现问题。
+ * @param {MouseEvent} event 日志窗口内的按钮点击。
+ * @returns {Promise<void>} 操作结束后完成。
+ */
+async function handleWardrobeLogs(event) {
+    const action = event.target.closest('[data-log-action]')?.dataset.logAction;
+    if (!action) return;
+    if (action === 'close') { logsPanel.close(); return; }
+    if (action === 'clear') { wardrobeLogs.length = 0; renderWardrobeLogs(); return; }
+    const status = logsPanel.querySelector('.tw-log-status');
+    try {
+        if (action === 'export') {
+            downloadWardrobeJson({ exportedAt: formatBeijingLogTime(), timeZone: 'Asia/Shanghai', userAgent: window.navigator.userAgent, logs: wardrobeLogs }, '衣柜日志.json');
+            status.textContent = '已导出全部日志';
+        } else if (action === 'copy') {
+            await window.parent.navigator.clipboard.writeText(wardrobeLogs.map(entry => `[${entry.time}] ${entry.level.toUpperCase()} ${entry.message}\n${entry.details}`).join('\n\n'));
+            status.textContent = '已复制全部日志';
+        }
+    } catch (error) {
+        recordWardrobeLog('error', '复制或导出日志失败', error);
+        renderWardrobeLogs();
+        status.textContent = `操作失败：${formatLogValue(error.message ?? error)}；可尝试导出或手动选择日志文字复制。`;
+    }
+}
 
 /* ───────── 界面辅助：批量弹出菜单、确认与输入弹窗、卡片大小 ───────── */
 const BULK_ENGINES = { apply: '.tw-bulk-apply', tags: '.tw-bulk-group', category: '.tw-bulk-category', favorite: '.tw-bulk-favorite' };
@@ -4300,7 +4655,7 @@ function handleBulkMenu(event) {
         if (item.dataset.engine === 'library') {
             closeBulkMenus(true);
             try { moveGarmentsToLibrary(item.dataset.value); }
-            catch (error) { setLibraryStatus(String(error), true); }
+            catch (error) { recordWardrobeLog('error', 'handleBulkMenu：捕获异常', error); setLibraryStatus(String(error), true); }
             return;
         }
         runBulkEngine(item.dataset.engine, item.dataset.value);
@@ -4470,14 +4825,13 @@ function initializeWardrobe() {
     hostDocument.body.append(root);
     panel = root.querySelector('#tw-panel');
     settingsPanel = panel.querySelector('#tw-settings');
+    logsPanel = panel.querySelector('#tw-logs');
+    panel.querySelector('[data-action="open-logs"]').addEventListener('click', openWardrobeLogs);
+    logsPanel.addEventListener('click', handleWardrobeLogs);
+    logsPanel.querySelector('.tw-log-filter').addEventListener('change', renderWardrobeLogs);
+    logsPanel.querySelector('.tw-log-search').addEventListener('input', scheduleLogSearch);
     apiForm = settingsPanel.querySelector('.tw-api-form');
     sendForm = settingsPanel.querySelector('.tw-send-form');
-    loadApiSettings();
-    loadSendSettings();
-    loadWardrobeTemplates();
-    loadDescriptionPrompts();
-    loadWardrobeLibraries();
-    loadGarments();
 
     menuEntry = hostDocument.createElement('button');
     menuEntry.id = 'tw-menu-entry';
@@ -4530,6 +4884,9 @@ function initializeWardrobe() {
     for (const button of panel.querySelectorAll('[data-import-selection]')) button.addEventListener('click', selectPendingImports);
     panel.querySelector('#tw-import-picker').addEventListener('close', clearPendingImports);
     panel.querySelector('#tw-import-picker').addEventListener('cancel', preventImportCancellation);
+    panel.querySelector('[data-action="cancel-export"]').addEventListener('click', closeWardrobeExport);
+    panel.querySelector('.tw-export-form').addEventListener('change', updateWardrobeExport);
+    panel.querySelector('.tw-export-form').addEventListener('submit', confirmWardrobeExport);
     panel.querySelector('[data-action="replace-image"]').addEventListener('click', openImageReplacement);
     panel.querySelector('[data-action="replace-front-image"]').addEventListener('click', openImageReplacement);
     panel.querySelector('.tw-image-replace').addEventListener('change', replaceGarmentImage);
@@ -4593,8 +4950,19 @@ function initializeWardrobe() {
     window.addEventListener('pagehide', destroyWardrobe, { once: true });
     appendInexistentScriptButtons([{ name: '衣柜插件', visible: true }]);
     subscriptions.push(eventOn(getButtonEvent('衣柜插件'), openWardrobe));
+    subscriptions.push(eventOn(tavern_events.CHAT_CHANGED, stopOutfitRequest));
     subscriptions.push(eventOn(tavern_events.CHAT_CHANGED, refreshWardrobe));
+    subscriptions.push(eventOn(tavern_events.GENERATION_STOPPED, stopOutfitRequest));
     subscriptions.push(eventMakeLast(tavern_events.CHAT_COMPLETION_PROMPT_READY, injectWardrobeContent));
+    subscriptions.push(eventMakeLast(tavern_events.GENERATE_AFTER_DATA, markOutfitChatPrompt));
+    subscriptions.push(eventMakeLast(tavern_events.CHAT_COMPLETION_SETTINGS_READY, applyIsolatedOutfits));
+    subscriptions.push(eventMakeFirst(tavern_events.MESSAGE_RECEIVED, publishOutfitSnapshot));
+    loadApiSettings();
+    loadSendSettings();
+    loadWardrobeTemplates();
+    loadDescriptionPrompts();
+    loadWardrobeLibraries();
+    loadGarments();
     refreshWardrobe();
     void migrateLegacyImages();
     console.info('[衣柜插件] 面板已就绪。');
@@ -4605,6 +4973,7 @@ function initializeWardrobe() {
  * @returns {void} 无返回值。
  */
 function openWardrobe() {
+    recordWardrobeLog('info', '打开衣柜', { library: activeLibraryId, items: garments.size });
     opener = hostDocument.activeElement;
     multiSelectMode = false;
     checkedGarmentIds.clear();
@@ -4626,8 +4995,10 @@ function closeWardrobe() {
     panel.querySelector('.tw-tag-picker').open = false;
     if (importConflictDialog?.open) importConflictDialog.close();
     closeImageImport();
+    closeWardrobeExport();
     closeGarmentGroupManager();
     closeSettings();
+    if (logsPanel.open) logsPanel.close();
     panel.close();
 }
 
@@ -4636,6 +5007,7 @@ function closeWardrobe() {
  * @returns {void} 无返回值。
  */
 function openSettings() {
+    recordWardrobeLog('info', '打开衣柜设置');
     if (!settingsPanel.open) settingsPanel.showModal();
 }
 
@@ -4744,7 +5116,7 @@ function selectWardrobeLibrary(event) {
     const button = event.target.closest('button[data-library-id]');
     if (!button || button.dataset.libraryId === activeLibraryId) return;
     try { activateWardrobeLibrary(button.dataset.libraryId); }
-    catch (error) { setLibraryStatus(String(error), true); }
+    catch (error) { recordWardrobeLog('error', 'selectWardrobeLibrary：捕获异常', error); setLibraryStatus(String(error), true); }
 }
 
 /**
@@ -4756,7 +5128,7 @@ async function addWardrobeLibrary() {
     if (!name) return;
     const id = window.parent.crypto.randomUUID();
     try { activateWardrobeLibrary(id, new Map([...wardrobeLibraries, [id, name]])); }
-    catch (error) { setLibraryStatus(String(error), true); }
+    catch (error) { recordWardrobeLog('error', 'addWardrobeLibrary：捕获异常', error); setLibraryStatus(String(error), true); }
 }
 
 /**
@@ -4771,7 +5143,9 @@ function activateWardrobeLibrary(id, libraries = wardrobeLibraries) {
     const data = parseWardrobeData({ items: saved.wardrobe_items ?? [], groups: saved.wardrobe_groups ?? [] });
     insertOrAssignVariables({ wardrobe_libraries: Array.from(libraries, ([id, name]) => ({ id, name })), wardrobe_active_library: id }, { type: 'script' });
     stopDescriptionRequest();
+    stopOutfitRequest();
     closeImageImport();
+    closeWardrobeExport();
     closeGarmentImage();
     window.parent.clearTimeout(garmentSearchTimer);
     window.parent.clearTimeout(garmentTagSearchTimer);
@@ -5197,7 +5571,7 @@ function clearPendingImports() {
  * @returns {Promise<void>} 文件导入完成后结束。
  */
 async function handleGarmentTransfer(event) {
-    if (settingsPanel.open || importConflictDialog?.open || panel.querySelector('#tw-ask').open) return;
+    if (settingsPanel.open || logsPanel?.open || importConflictDialog?.open || panel.querySelector('#tw-ask').open) return;
     if (event.type === 'paste' && event.target.closest('input, textarea, [contenteditable="true"]')) return;
     const transfer = event.clipboardData ?? event.dataTransfer;
     if (event.type === 'dragover') {
@@ -5319,6 +5693,7 @@ async function importGarmentFiles(files) {
         if (next.size) showGarmentDescription();
         return true;
     } catch (error) {
+        recordWardrobeLog('error', 'importGarmentFiles：捕获异常', error);
         // 保存失败也要回收新文件；已经成功提交的路径由清理函数保留，不因界面刷新异常误删。
         await deleteGarmentImages(uploaded);
         if (root.isConnected) {
@@ -5424,7 +5799,7 @@ async function uploadGarmentImage(dataUrl, imageHash) {
     // 截取摘要前 128 位并设置 UUID v8 的版本与变体位；查重仍使用完整 SHA-256，不用截断值代替。
     const variant = ((parseInt(hash[16], 16) & 3) | 8).toString(16);
     const filename = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-8${hash.slice(13, 16)}-${variant}${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
-    const response = await window.parent.fetch('/api/images/upload', {
+    const response = await wardrobeFetch('/api/images/upload', {
         method: 'POST',
         headers: SillyTavern.getRequestHeaders(),
         body: JSON.stringify({ image, format: format === 'jpeg' ? 'jpg' : format, filename, ch_name: IMAGE_FOLDER }),
@@ -5456,11 +5831,11 @@ async function deleteGarmentImages(images) {
         sendImageCache.delete(image);
         if (!STORED_IMAGE_PATTERN.test(image)) continue;
         try {
-            const response = await window.parent.fetch('/api/images/delete', {
+            const response = await wardrobeFetch('/api/images/delete', {
                 method: 'POST', headers: SillyTavern.getRequestHeaders(), body: JSON.stringify({ path: image }),
             });
             if (!response.ok && response.status !== 404) console.warn(`[衣柜插件] 删除图片失败（HTTP ${response.status}）：${image}`);
-        } catch (error) { console.warn('[衣柜插件] 删除图片失败：', image, error); }
+        } catch (error) { recordWardrobeLog('error', 'deleteGarmentImages：捕获异常', error); console.warn('[衣柜插件] 删除图片失败：', image, error); }
     }
 }
 
@@ -5474,7 +5849,7 @@ async function loadImageDataUrl(image) {
     let pending = imageDataCache.get(image);
     if (!pending) {
         pending = (async () => {
-            const response = await window.parent.fetch(image, { signal: imageReadController.signal });
+            const response = await wardrobeFetch(image, { signal: imageReadController.signal });
             if (!response.ok) throw new Error(`读取图片失败（HTTP ${response.status}）：${image}，文件可能已被删除。`);
             const type = image.endsWith('.jpg') ? 'image/jpeg' : image.endsWith('.webp') ? 'image/webp' : 'image/png';
             // 静态文件响应的 MIME 可能是通用二进制，按已校验的扩展名恢复图片类型。
@@ -5484,6 +5859,7 @@ async function loadImageDataUrl(image) {
     }
     try { return await pending; }
     catch (error) {
+        recordWardrobeLog('error', 'loadImageDataUrl：捕获异常', error);
         imageDataCache.delete(image);
         throw error;
     }
@@ -5521,7 +5897,7 @@ async function loadSendImageDataUrl(image) {
                         context.drawImage(decoded, 0, 0, canvas.width, canvas.height);
                         const compressed = canvas.toDataURL('image/jpeg', SEND_IMAGE_QUALITY);
                         resolve(scale < 1 || compressed.length < original.length ? compressed : original);
-                    } catch (error) { reject(error); }
+                    } catch (error) { recordWardrobeLog('error', 'loadSendImageDataUrl：捕获异常', error); reject(error); }
                 };
                 decoded.src = original;
             });
@@ -5530,6 +5906,7 @@ async function loadSendImageDataUrl(image) {
     }
     try { return await pending; }
     catch (error) {
+        recordWardrobeLog('error', 'loadSendImageDataUrl：捕获异常', error);
         sendImageCache.delete(image);
         throw error;
     }
@@ -5575,6 +5952,7 @@ async function replaceGarmentImage(event) {
         await deleteGarmentImages([item[field]]);
         setLibraryStatus(`${IMAGE_SIDE_LABELS[field]}图片已替换`);
     } catch (error) {
+        recordWardrobeLog('error', 'replaceGarmentImage：捕获异常', error);
         if (uploaded) await deleteGarmentImages([uploaded]);
         if (root.isConnected) setLibraryStatus(String(error), true);
     } finally {
@@ -5611,6 +5989,7 @@ async function migrateLegacyImages() {
             commitGarments(next, selectedGarmentId, garmentGroups, false);
             migrated++;
         } catch (error) {
+            recordWardrobeLog('error', 'migrateLegacyImages：捕获异常', error);
             if (uploaded) await deleteGarmentImages([uploaded]);
             if (root.isConnected) toastr.error(`${String(error)} 未迁移的原图仍保留，下次启动继续。`, '服装图片迁移未完成');
             break;
@@ -5634,6 +6013,7 @@ function commitGarments(next, selectedId, groups = garmentGroups, refreshDetails
     // 只有删除服装才清理所有范围，普通编辑不扫描历史聊天；与服装在同次提交中保存，失败不留半份删除。
     if (next.size < garments.size) Object.assign(saved, pruneDeletedSelections(next));
     saveLibraryVariables(saved);
+    recordWardrobeLog('info', '服装数据已保存', { library: activeLibraryId, items: next.size, groups: groups.size, selectedId });
     if (refreshDetails && (selectedId !== selectedGarmentId || IMAGE_FIELDS.some(field => next.get(selectedId)?.[field] !== garments.get(selectedGarmentId)?.[field]))) stopDescriptionRequest();
     garments = next;
     garmentGroups = groups;
@@ -5646,30 +6026,141 @@ function commitGarments(next, selectedId, groups = garmentGroups, refreshDetails
 }
 
 /**
- * 把指定服装、搭配成员及对应标签打包成可独立恢复的文件，图片以原始数据地址保存在文件内。
- * @param {Iterable<string>} ids 待导出的服装标识。
+ * 打开与导入一致的导出弹窗，默认选择当前独立衣柜并保留全部服装的备份方式。
+ * @returns {void} 只显示选择和数量，确认前不下载文件或保存详情草稿。
+ */
+function openWardrobeExport() {
+    const select = panel.querySelector('[name="export_library"]');
+    const options = hostDocument.createDocumentFragment();
+    for (const [id, name] of wardrobeLibraries) {
+        const option = hostDocument.createElement('option');
+        option.value = id;
+        option.textContent = name;
+        options.append(option);
+    }
+    select.replaceChildren(options);
+    select.value = activeLibraryId;
+    panel.querySelector('[name="export_content"]').value = 'all';
+    updateWardrobeExport();
+    panel.querySelector('#tw-export-picker').showModal();
+}
+
+/**
+ * 读取指定衣柜的已保存图文和标签，不切换用户当前浏览的衣柜或覆盖详情草稿。
+ * @param {string} libraryId 导出弹窗选择的独立衣柜标识。
+ * @returns {{items: Map<string, WardrobeItem>, groups: Map<string, string>, groupFilters: Map<string, Set<string>>}} 入口校验后的衣柜数据。
+ */
+function getWardrobeExportData(libraryId) {
+    if (libraryId === activeLibraryId) return { items: garments, groups: garmentGroups, groupFilters: garmentGroupFilters };
+    if (!wardrobeLibraries.has(libraryId)) throw new Error('请选择要导出的衣柜。');
+    const saved = getLibraryVariables(libraryId);
+    return parseWardrobeData({ items: saved.wardrobe_items ?? [], groups: saved.wardrobe_groups ?? [] });
+}
+
+/**
+ * 判断服装是否已有实际描述；搭配必须同时保留有描述的全部成员，避免过滤后留下断开的关联。
+ * @param {WardrobeItem} item 待检查的服装或搭配。
+ * @param {Map<string, WardrobeItem>} items 当前导出衣柜的服装表。
+ * @returns {boolean} 普通服装描述非空，或搭配正文与所有成员描述均非空时为真。
+ */
+function hasExportDescription(item, items) {
+    return Boolean(getGarmentDescription(item, items).trim()) &&
+        (!item.componentIds || item.componentIds.every(id => items.get(id).description.trim()));
+}
+
+/**
+ * 按衣柜及内容选项预览数量，空描述和纯空白描述使用同一筛选规则；预览不读取原图。
+ * @returns {void} 没有符合条件的服装时禁用确认按钮并显示原因。
+ */
+function updateWardrobeExport() {
+    const status = panel.querySelector('.tw-export-status');
+    const button = panel.querySelector('[data-action="confirm-export"]');
+    status.textContent = '';
+    try {
+        const { items } = getWardrobeExportData(panel.querySelector('[name="export_library"]').value);
+        const describedOnly = panel.querySelector('[name="export_content"]').value === 'described';
+        let count = 0;
+        for (const item of items.values()) if (!describedOnly || hasExportDescription(item, items)) count++;
+        panel.querySelector('.tw-export-count').textContent = `将导出 ${count} / ${items.size} 件服装`;
+        button.disabled = count === 0;
+        if (!count) status.textContent = describedOnly && items.size ? '没有有描述的服装，请先识图并保存描述。' : '这个衣柜还没有服装。';
+    } catch (error) {
+        status.textContent = String(error);
+        panel.querySelector('.tw-export-count').textContent = '';
+        button.disabled = true;
+    }
+}
+
+/**
+ * 确认选择后沿用原图备份流程，导出失败时保留弹窗和选项供重试。
+ * @param {SubmitEvent} event 导出表单提交事件。
+ * @returns {Promise<void>} 下载完成或错误提示显示后恢复弹窗控件。
+ */
+async function confirmWardrobeExport(event) {
+    event.preventDefault();
+    const button = panel.querySelector('[data-action="confirm-export"]');
+    if (button.disabled) return;
+    const libraryId = panel.querySelector('[name="export_library"]').value;
+    const describedOnly = panel.querySelector('[name="export_content"]').value === 'described';
+    const dialog = panel.querySelector('#tw-export-picker');
+    const controls = dialog.querySelectorAll('button, select');
+    for (const control of controls) control.disabled = true;
+    button.disabled = true;
+    panel.querySelector('.tw-export-status').textContent = '正在导出…';
+    let errorMessage = '';
+    try {
+        await exportGarments(null, true, { libraryId, describedOnly });
+        closeWardrobeExport();
+    } catch (error) {
+        recordWardrobeLog('error', '导出衣柜失败', error);
+        errorMessage = String(error);
+    } finally {
+        for (const control of controls) control.disabled = false;
+        if (dialog.open) updateWardrobeExport();
+        if (errorMessage) panel.querySelector('.tw-export-status').textContent = errorMessage;
+    }
+}
+
+/**
+ * 取消或完成导出时关闭弹窗，选择衣柜和筛选内容不会修改任何服装记录。
+ * @returns {void} 无返回值。
+ */
+function closeWardrobeExport() {
+    const dialog = panel.querySelector('#tw-export-picker');
+    if (dialog.open) dialog.close();
+}
+
+/**
+ * 把指定服装、搭配成员及对应标签打包成可独立恢复的文件，支持选择独立衣柜及只导出有描述的记录。
+ * @param {Iterable<string>|null} ids 待导出的服装标识；弹窗传入 null 表示所选衣柜的全部服装。
  * @param {boolean} includeEmptyGroups 是否连同空标签一起备份。
+ * @param {{libraryId?: string, describedOnly?: boolean}} options 弹窗的目标衣柜与描述筛选；省略时保留原有单件和多选导出行为。
  * @returns {Promise<void>} 图片读取完成并触发下载后结束。
  */
-async function exportGarments(ids, includeEmptyGroups = false) {
+async function exportGarments(ids, includeEmptyGroups = false, options = {}) {
+    const data = getWardrobeExportData(options.libraryId ?? activeLibraryId);
+    const libraryName = options.libraryId ? wardrobeLibraries.get(options.libraryId) : undefined;
     const items = [];
     const groupIds = new Set();
     // 单独导出搭配时同时包含成员，确保文件可独立恢复；Set 避免共享单品重复打包。
-    const exportIds = new Set(ids);
+    const exportIds = new Set(ids ?? data.items.keys());
     for (const id of exportIds) {
-        const item = garments.get(id);
+        const item = data.items.get(id);
+        // 描述作为完成识图或手工整理的依据，不额外添加历史记录没有的识图状态字段。
+        if (options.describedOnly && !hasExportDescription(item, data.items)) continue;
         if (item.componentIds) for (const memberId of item.componentIds) exportIds.add(memberId);
         items.push({ ...item });
         for (const groupId of item.groupIds) groupIds.add(groupId);
     }
-    if (!items.length) throw new Error('没有可导出的服装。');
-    const groups = Array.from(includeEmptyGroups ? garmentGroups.keys() : groupIds, id => ({ id, name: garmentGroups.get(id),
-        ...(garmentGroupFilters.get(id)?.size ? { filters: Array.from(garmentGroupFilters.get(id)) } : {}) }));
+    if (!items.length) throw new Error(options.describedOnly ? '没有有描述的服装，请先识图并保存描述。' : '没有可导出的服装。');
+    const groups = Array.from(includeEmptyGroups ? data.groups.keys() : groupIds, id => ({ id, name: data.groups.get(id),
+        ...(data.groupFilters.get(id)?.size ? { filters: Array.from(data.groupFilters.get(id)) } : {}) }));
     // 先快照记录及标签再读取图片，导出期间切换选择或编辑不会混入本次备份。
     for (const item of items) for (const field of IMAGE_FIELDS) item[field] = await loadImageDataUrl(item[field] || '');
     if (!root.isConnected) throw new Error('衣柜已卸载，导出已取消。');
-    const data = { format: 'tw-wardrobe', version: 1, groups, items };
-    downloadWardrobeJson(data, `${items.length === 1 ? items[0].name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_') : '衣柜'}-${items.length}件.json`);
+    const backup = { format: 'tw-wardrobe', version: 1, groups, items };
+    const name = (libraryName ?? (items.length === 1 ? items[0].name : '衣柜')).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+    downloadWardrobeJson(backup, `${name}-${items.length}件.json`);
     setLibraryStatus(`已导出 ${items.length} 件服装`);
 }
 
@@ -5693,14 +6184,14 @@ function downloadWardrobeJson(data, filename) {
 }
 
 /**
- * 处理全部导出及单件导出、删除、移除图片；导出单件时先保存编辑内容。
+ * 衣柜导出先打开选择弹窗；单件导出先保存编辑内容，删除和移除图片沿用原有流程。
  * @param {MouseEvent} event 操作按钮的点击事件。
  * @returns {Promise<void>} 所选操作结束后完成。
  */
 async function handleGarmentAction(event) {
     try {
         const action = event.currentTarget.dataset.action;
-        if (action === 'export-all') await exportGarments(garments.keys(), true);
+        if (action === 'export-all') openWardrobeExport();
         else if (action === 'export-one') {
             if (saveSelectedGarment()) await exportGarments([selectedGarmentId]);
         } else if (action === 'delete-one') await deleteGarments(new Set([selectedGarmentId]));
@@ -5721,6 +6212,7 @@ async function handleGarmentAction(event) {
             setLibraryStatus('图片已删除，名称和描述已保留');
         }
     } catch (error) {
+        recordWardrobeLog('error', 'handleGarmentAction：捕获异常', error);
         setLibraryStatus(String(error), true);
         setGarmentStatus(String(error), true);
     }
@@ -5838,7 +6330,7 @@ function saveCombination(event) {
         panel.querySelector('[data-detail="description"]').click();
         setMobileDetails(true);
         setGarmentStatus('搭配已保存');
-    } catch (error) { dialog.querySelector('.tw-combination-status').textContent = String(error); }
+    } catch (error) { recordWardrobeLog('error', 'saveCombination：捕获异常', error); dialog.querySelector('.tw-combination-status').textContent = String(error); }
 }
 
 /**
@@ -5878,10 +6370,10 @@ function getGarmentDescription(item, items = garments) {
 /**
  * 读取唯一描述编辑框，未改动自动合并正文时保留引用，改动时保存为整套正文，避免重复追加成员描述。
  * @param {WardrobeItem} item 编辑前的服装或搭配，调整成员时也以原记录判断描述是否被修改。
+ * @param {string} description 已解析的描述正文；省略时读取编辑框。
  * @returns {{description: string, descriptionOverride?: boolean}} 待合并到服装记录的描述字段。
  */
-function readGarmentDescriptionDraft(item) {
-    const description = panel.querySelector('[name="garment_description"]').value.trim();
+function readGarmentDescriptionDraft(item, description = panel.querySelector('[name="garment_description"]').value.trim()) {
     if (!item.componentIds) return { description };
     if (description === getGarmentDescription(item).trim()) return { description: item.description };
     return { description, descriptionOverride: true };
@@ -5953,6 +6445,7 @@ async function addGarmentGroup(event) {
             renderGarmentLibrary();
         }
     } catch (error) {
+        recordWardrobeLog('error', 'addGarmentGroup：捕获异常', error);
         if (fromDetails) setGarmentStatus(String(error), true);
         else setLibraryStatus(String(error), true);
     }
@@ -6028,7 +6521,7 @@ function saveGarmentGroups(event) {
         saveFilterGarmentGroups(edits);
         closeGarmentGroupManager();
         setLibraryStatus('标签名称与顺序已保存');
-    } catch (error) { panel.querySelector('.tw-group-status').textContent = String(error); }
+    } catch (error) { recordWardrobeLog('error', 'saveGarmentGroups：捕获异常', error); panel.querySelector('.tw-group-status').textContent = String(error); }
 }
 
 /**
@@ -6044,7 +6537,7 @@ async function deleteGarmentGroup(event) {
     try {
         saveFilterGarmentGroups(new Map([[groupId, null]]));
         setLibraryStatus('标签已删除');
-    } catch (error) { setLibraryStatus(String(error), true); }
+    } catch (error) { recordWardrobeLog('error', 'deleteGarmentGroup：捕获异常', error); setLibraryStatus(String(error), true); }
 }
 
 /**
@@ -6131,6 +6624,7 @@ function assignGarmentGroup(event) {
         commitGarments(next, item.id, garmentGroups, false);
         setGarmentStatus('标签已保存');
     } catch (error) {
+        recordWardrobeLog('error', 'assignGarmentGroup：捕获异常', error);
         syncGarmentGroupSelection();
         setGarmentStatus(String(error), true);
     }
@@ -6347,7 +6841,7 @@ function renderBulkState() {
         const card = entry.querySelector('[data-garment]');
         card.setAttribute('aria-pressed', String(multiSelectMode ? input.checked : card.dataset.garment === selectedGarmentId));
     }
-    for (const button of panel.querySelectorAll('[data-action="export-all"]')) button.disabled = garments.size === 0;
+    // 空衣柜也能打开导出弹窗，允许直接选择其他已有服装的独立衣柜。
     renderBulkExtras();
 }
 
@@ -6373,7 +6867,7 @@ async function handleBulkAction(event) {
             renderWearerState();
             setLibraryStatus(removing ? `已取消 ${wearer === 'user' ? 'USER' : 'Char'} 的 ${count} 件服装应用` : `已应用 ${count} 件服装到 ${wearer === 'user' ? 'USER' : 'Char'}`);
         }
-    } catch (error) { setLibraryStatus(String(error), true); }
+    } catch (error) { recordWardrobeLog('error', 'handleBulkAction：捕获异常', error); setLibraryStatus(String(error), true); }
     finally { if (event.type === 'change') control.value = ''; }
 }
 
@@ -6401,7 +6895,7 @@ function applyGarments(ids, wearer, removing = false) {
         else {
             const item = garments.get(id);
             try { buildWardrobeContent(item, sendSettings); }
-            catch (error) { throw new Error(`${item.name}：${error.message}`); }
+            catch (error) { recordWardrobeLog('error', 'applyGarments：捕获异常', error); throw new Error(`${item.name}：${error.message}`); }
             selections[wearer].add(id);
             next.set(id, { ...item, lastUsedAt: usedAt });
         }
@@ -6435,7 +6929,7 @@ function moveCheckedGarments(event) {
         }
         commitGarments(next, selectedGarmentId, garmentGroups, false);
         setLibraryStatus(`已更新 ${count} 件服装的标签`);
-    } catch (error) { setLibraryStatus(String(error), true); }
+    } catch (error) { recordWardrobeLog('error', 'moveCheckedGarments：捕获异常', error); setLibraryStatus(String(error), true); }
     finally { select.value = '*'; }
 }
 
@@ -6457,7 +6951,7 @@ function updateCheckedGarments(event) {
         commitGarments(next, selectedGarmentId, garmentGroups, false);
         if (category && includesSelected) panel.querySelector('[name="garment_category"]').value = patch.category;
         setLibraryStatus(`已${category ? '修改分类：' : patch.favorite ? '收藏 ' : '取消收藏 '}${count} 件服装`);
-    } catch (error) { setLibraryStatus(String(error), true); }
+    } catch (error) { recordWardrobeLog('error', 'updateCheckedGarments：捕获异常', error); setLibraryStatus(String(error), true); }
     finally { select.value = ''; }
 }
 
@@ -6574,38 +7068,70 @@ function matchGarmentByName(name, ids) {
 }
 
 /**
- * 在 AI 标记入口解析完整 ID 快照，兼容旧名称标记；新快照有任何无效引用时整体拒绝。
+ * 在标记入口解析完整 ID 快照，兼容旧名称、ID 数组和附带描述的快照。
  * @param {string} value 标记等号后的内容。
  * @param {Set<string>} allowed 该角色已分配的记录集合。
  * @returns {Set<string>|null} 有效完整快照（可为空集合），无效时为空值。
  */
 function parseOutfitSnapshot(value, allowed) {
-    if (!value.trim().startsWith('[')) {
+    const hasDescription = PUBLISHED_OUTFIT_SNAPSHOT.test(value);
+    if (!hasDescription && !value.startsWith('[')) {
         const id = matchGarmentByName(value, allowed);
         return id ? new Set([id]) : null;
     }
-    let ids;
-    try { ids = JSON.parse(value); }
-    catch { return null; }
-    if (!Array.isArray(ids) || ids.some(id => typeof id !== 'string' || !allowed.has(id))) return null;
-    return compactOutfitIds(ids);
+    let snapshot;
+    try { snapshot = JSON.parse(value); }
+    catch (error) { recordWardrobeLog('error', 'parseOutfitSnapshot：捕获异常', error); return null; }
+    return validateOutfitIds(hasDescription ? snapshot.ids : snapshot, allowed);
 }
 
 /**
- * 从新到旧查找 AI 楼层中最近的有效整身记录，同楼层取最后一条有效记录。
+ * 将接口或楼层变量里的完整快照校验为当前角色可穿的 ID 集合。
+ * @param {unknown} ids 外部返回的完整穿搭数组。
+ * @param {Set<string>} allowed 当前角色已分配的服装。
+ * @returns {Set<string>|null} 合法的整身穿搭，无效时为空值。
+ */
+function validateOutfitIds(ids, allowed) {
+    return Array.isArray(ids) && ids.every(id => allowed.has(id)) ? compactOutfitIds(ids) : null;
+}
+
+/**
+ * 为选装快照生成楼层变量键，避免同一聊天里的不同脚本或衣柜互相覆盖。
+ * @returns {string} 当前脚本和衣柜专用的变量键。
+ */
+function getOutfitVariableKey() {
+    return `wardrobe_outfit:${getScriptId()}:${activeLibraryId}`;
+}
+
+/**
+ * 从新到旧查找最近的有效整身记录，独立选装读取当前衣柜的用户楼层变量，兼容旧 AI 楼层标记。
  * @param {string} wearer 角色标识 user 或 char。
  * @param {Set<string>} ids 该角色已分配的服装标识。
  * @param {Object[]} chat 当前聊天楼层。
  * @param {number} from 起始楼层，包含此位置。
  * @param {number} end 结束楼层，不包含此位置。
+ * @param {string} [outfitKey] 独立选装的楼层变量键。
  * @returns {Set<string>|null} 最近有效整身快照，没有记录时为空值。
  */
-function findChatOutfit(wearer, ids, chat, from, end) {
+function findChatOutfit(wearer, ids, chat, from, end, outfitKey) {
     for (let index = end - 1; index >= from; index--) {
         const message = chat[index];
-        if (!message || message.is_user || message.is_system || typeof message.mes !== 'string' || !message.mes.includes('outfit:')) continue;
+        if (!message || message.is_system) continue;
+        if (message.is_user) {
+            // 无变量的楼层直接跳过，避免克隆整段历史上的无关楼层数据。
+            if (outfitKey && message.variables) {
+                const outfit = validateOutfitIds(getVariables({ type: 'message', message_id: index })[outfitKey]?.[wearer], ids);
+                if (outfit !== null) return outfit;
+            }
+            continue;
+        }
+        if (typeof message.mes !== 'string' || !message.mes.includes('outfit:')) continue;
         let found = null;
-        for (const [, who, value] of message.mes.matchAll(OUTFIT_MARKER)) if (who === wearer) found = parseOutfitSnapshot(value, ids) ?? found;
+        for (const [, who, value] of message.mes.matchAll(OUTFIT_MARKER)) {
+            // 独立选装以用户楼层快照为准；附描述的 AI 楼层记录只供其他插件读取。
+            if (who !== wearer || (outfitKey && PUBLISHED_OUTFIT_SNAPSHOT.test(value))) continue;
+            found = parseOutfitSnapshot(value, ids) ?? found;
+        }
         if (found !== null) return found;
     }
     return null;
@@ -6614,21 +7140,23 @@ function findChatOutfit(wearer, ids, chat, from, end) {
 /**
  * 解析实际当前穿着，手动设置之后的有效 AI 记录优先；直接读取楼层以跟随滑动、编辑和删除。
  * @param {{user: Set<string>, char: Set<string>, current: Object, anchor: Object}} selections 已归一化的保存记录。
- * @param {{excludeLast?: boolean}} options 重新生成时排除即将替换的最后一楼。
+ * @param {{excludeLast?: boolean, beforeIndex?: number}} options 排除正在重新生成或即将重新选装的楼层。
  * @returns {{user: Set<string>, char: Set<string>}} 两个角色实际生效的整身穿着副本。
  */
-function resolveCurrentOutfits(selections, { excludeLast = false } = {}) {
+function resolveCurrentOutfits(selections, { excludeLast = false, beforeIndex } = {}) {
     const resolved = { user: new Set(selections.current.user), char: new Set(selections.current.char) };
     if (sendSettings.marker_mode === 'off') return resolved;
     const chat = readChat();
     const chatId = SillyTavern.getCurrentChatId();
-    const end = chat.length - (excludeLast ? 1 : 0);
+    const end = beforeIndex ?? chat.length - (excludeLast ? 1 : 0);
+    const outfitKey = sendSettings.marker_mode === 'isolated' && (selections.user.size || selections.char.size)
+        ? getOutfitVariableKey() : undefined;
     for (const wearer of WEARERS) {
         if (!selections[wearer].size) continue;
         const anchor = selections.anchor[wearer];
         // 同聊天只读取手动设置后新增的楼层；其他聊天的设置不屏蔽本聊天记录。
         const from = anchor && chatId && anchor.chat === String(chatId) ? Math.min(anchor.len, chat.length) : 0;
-        const found = findChatOutfit(wearer, selections[wearer], chat, from, end);
+        const found = findChatOutfit(wearer, selections[wearer], chat, from, end, outfitKey);
         if (found !== null) resolved[wearer] = found;
     }
     return resolved;
@@ -6663,7 +7191,7 @@ function clampCurrentAnchors(selections) {
     }
     if (!changed) return;
     try { saveWearerSelections(selections); }
-    catch (error) { console.warn('[衣柜插件] 无法保存当前穿着位置', error); }
+    catch (error) { recordWardrobeLog('error', 'clampCurrentAnchors：捕获异常', error); console.warn('[衣柜插件] 无法保存当前穿着位置', error); }
 }
 
 /**
@@ -6808,6 +7336,7 @@ function selectSelectionScope(event) {
         renderGarmentLibrary();
         renderWearerState();
     } catch (error) {
+        recordWardrobeLog('error', 'selectSelectionScope：捕获异常', error);
         event.currentTarget.value = getSelectionLocation(getLibraryVariables()).scope;
         setLibraryStatus(String(error), true);
     }
@@ -6833,6 +7362,7 @@ function selectWearer(event) {
         refreshWardrobe();
         setGarmentStatus(removing ? '已取消该角色的穿着归属' : '已保存穿着归属');
     } catch (error) {
+        recordWardrobeLog('error', 'selectWearer：捕获异常', error);
         renderWearerState();
         setGarmentStatus(String(error), true);
     }
@@ -6877,7 +7407,8 @@ function matchesGarmentFilter(item, filter, selections) {
         case 'combinations': return Boolean(item.componentIds);
         case 'assigned-user': return selections.user.has(item.id);
         case 'assigned-char': return selections.char.has(item.id);
-        case 'unassigned': return !selections.user.has(item.id) && !selections.char.has(item.id);
+        // 未分配只收录描述完整的服装；沿用缺描述规则，统一处理纯空白、搭配成员与整套覆盖正文。
+        case 'unassigned': return !selections.user.has(item.id) && !selections.char.has(item.id) && !matchesGarmentFilter(item, 'missing-description', selections);
         case 'missing-description': return item.descriptionOverride ? !item.description.trim() : getGarmentMembers(item).some(member => !member.description.trim());
         case 'missing-image': return getGarmentMembers(item).some(member => !member.image && !member.backImage);
         default: return item.category === filter;
@@ -7149,6 +7680,7 @@ function toggleGarmentFavorite(id) {
     try {
         commitGarments(next, selectedGarmentId, garmentGroups, false);
     } catch (error) {
+        recordWardrobeLog('error', 'toggleGarmentFavorite：捕获异常', error);
         setLibraryStatus(String(error), true);
     }
 }
@@ -7189,6 +7721,7 @@ async function generateGarmentDescription() {
         const savedFields = [result.category !== undefined ? '分类' : '', result.tags !== undefined ? '标签' : ''].filter(Boolean).join('与');
         setGarmentStatus(savedFields ? `${savedFields}已保存，名称与描述请保存或应用` : result.name !== undefined ? '名称与描述已生成，请保存或应用' : '描述已生成，请保存或应用');
     } catch (error) {
+        recordWardrobeLog('error', 'generateGarmentDescription：捕获异常', error);
         if (root.isConnected && (!request || descriptionRequest === request)) setGarmentStatus(describeApiError(error, config.key), true);
     } finally {
         if (request && descriptionRequest === request) {
@@ -7199,7 +7732,7 @@ async function generateGarmentDescription() {
 }
 
 /**
- * 确认后逐张识别缺描述图片；缺描述筛选下只处理当前可见结果，其他页面沿用整个衣柜。
+ * 确认后以最多两个并行请求识别缺描述图片，完成一张即补下一张；缺描述筛选只处理当前可见结果。
  * @returns {Promise<void>} 批次完成、取消或首个失败后结束；不提交当前编辑框的草稿。
  */
 async function generateMissingGarmentDescriptions() {
@@ -7222,34 +7755,58 @@ async function generateMissingGarmentDescriptions() {
     let completed = 0;
     try {
         if (config.mode === 'custom' && (!config.apiurl || !config.model)) throw new Error('请先在 API 页保存完整的接口地址与模型。');
-        request = { generationId: '', bulk: true, completed: 0 };
+        request = { generations: new Map(), bulk: true, completed: 0 };
         descriptionRequest = request;
         setDescriptionBusy(true);
-        // 顺序请求沿用单张识图流程，避免同时请求大量图片；每张独立保存，失败后可只重试剩余图片。
-        for (const id of ids) {
-            const item = garments.get(id);
-            if (!item || (!item.image && !item.backImage) || item.description.trim()) continue;
-            request.generationId = `wardrobe-description-${window.parent.crypto.randomUUID()}`;
-            const result = await requestGarmentDescription(item, 'outfit', config, request);
+        let nextIndex = 0;
+        let failed = false;
+        while (nextIndex < ids.length || request.generations.size) {
+            if (descriptionRequest !== request) return;
+            // 固定两个请求槽位，任一结果保存后立即补位，不必等待同批另一张；每个请求使用独立编号以支持取消。
+            while (!failed && nextIndex < ids.length && request.generations.size < 2) {
+                const item = garments.get(ids[nextIndex++]);
+                if (!item || (!item.image && !item.backImage) || item.description.trim()) continue;
+                const generationId = `wardrobe-description-${window.parent.crypto.randomUUID()}`;
+                // 将失败也交回统一处理，避免另一张正在确认标签时发生未处理的 Promise 拒绝。
+                const pending = requestGarmentDescription(item, 'outfit', config, request, generationId).then(
+                    result => ({ generationId, item, result }),
+                    error => {
+                        // 另一张尚在保存时也要停止补位，避免已知失败后继续发送排队图片。
+                        failed = true;
+                        return { generationId, error };
+                    },
+                );
+                request.generations.set(generationId, pending);
+            }
+            if (!request.generations.size) break;
+            const settled = await Promise.race(request.generations.values());
+            request.generations.delete(settled.generationId);
+            if (descriptionRequest !== request) return;
+            if ('error' in settled) throw settled.error;
+            const { item, result } = settled;
             if (!result) return;
             // 等待接口时列表仍可删除或更新记录；只补全原图未变且仍无描述的服装。
-            const latest = garments.get(id);
+            const latest = garments.get(item.id);
             if (!latest || IMAGE_FIELDS.some(field => latest[field] !== item[field]) || latest.description.trim()) continue;
+            // 接口并行、保存串行，避免新标签确认框重叠，以及旧标签快照覆盖另一张已保存的标签。
             await commitGeneratedGarment(latest, result, true);
             request.completed = ++completed;
-            if (id === selectedGarmentId) {
+            if (item.id === selectedGarmentId) {
                 panel.querySelector('[name="garment_name"]').value = result.name ?? latest.name;
                 panel.querySelector('[name="garment_description"]').value = result.description;
             }
         }
         setLibraryStatus(`识图完成，已识别并保存 ${completed} 张图片`);
     } catch (error) {
+        recordWardrobeLog('error', 'generateMissingGarmentDescriptions：捕获异常', error);
         if (root.isConnected && (!request || descriptionRequest === request)) {
             setLibraryStatus(`识图已停止，已保存 ${completed} 张图片。${describeApiError(error, config.key)}`, true);
         }
     } finally {
         if (request && descriptionRequest === request) {
             descriptionRequest = null;
+            // 首个接口或保存失败后停止另一槽位，迟到回复不再写入，也不启动后续图片。
+            for (const generationId of request.generations.keys()) stopGenerationById(generationId);
             setDescriptionBusy(false);
         }
     }
@@ -7261,9 +7818,10 @@ async function generateMissingGarmentDescriptions() {
  * @param {string} promptMode 已选择的服装或单品提示词类型。
  * @param {Object} config 本次识图使用的已保存 API 配置。
  * @param {Object} request 当前可取消的识图请求；首次读取分类与标签选项，整批沿用同一选择。
+ * @param {string} generationId 本张图片的独立生成编号；单张识图默认使用请求自身的编号。
  * @returns {Promise<Object|null>} 解析后的名称、描述与可选分类、标签；已取消时返回空值。
  */
-async function requestGarmentDescription(item, promptMode, config, request) {
+async function requestGarmentDescription(item, promptMode, config, request, generationId = request.generationId) {
     const { mode, ...customApi } = config;
     // 在读取图片前固定选项；批量处理不会因界面重绘或切换服装而改变后续图片的识别行为。
     const options = request.options ??= {
@@ -7275,8 +7833,8 @@ async function requestGarmentDescription(item, promptMode, config, request) {
     for (const field of IMAGE_FIELDS) if (item[field]) images.push(await loadImageDataUrl(item[field]));
     // 读取原图期间也允许取消识别，取消后不再启动新的生成请求。
     if (descriptionRequest !== request) return null;
-    const reply = await generateRaw({
-        generation_id: request.generationId,
+    const reply = await loggedGenerateRaw({
+        generation_id: generationId,
         // 宿主支持图片数组；单图保留原格式，双图按正面、背面顺序识别。
         image: images.length === 1 ? images[0] : images,
         // 仅替换一次变量，服装名中的模板标记保留为普通文本，不带入聊天历史或角色提示。
@@ -7291,9 +7849,9 @@ async function requestGarmentDescription(item, promptMode, config, request) {
 }
 
 /**
- * 在模型回复入口解析名称、描述及已开启的分类、标签，兼容旧版 category 标签字段及纯文本。
- * @param {unknown} reply 模型返回的原始文本。
- * @param {{category: boolean, tags: boolean}} options 本次识图的分类与标签选项；默认均开启。
+ * 在描述入口解析名称、描述及已开启的分类、标签，模型回复兼容旧版 category 标签字段及纯文本。
+ * @param {unknown} reply 模型返回或手动粘贴的原始文本。
+ * @param {{category: boolean, tags: boolean, legacyCategoryTags?: boolean}} options 分类与标签选项；手动粘贴关闭旧版 category 标签兼容，避免将“未指定”建成标签。
  * @returns {{name?: string, description: string, category?: string, tags?: string[]}} 分类统一为内置标识，标签统一为去重数组；纯文本仅提供描述。
  */
 function parseGarmentDescriptionReply(reply, options = { category: true, tags: true }) {
@@ -7304,10 +7862,10 @@ function parseGarmentDescriptionReply(reply, options = { category: true, tags: t
     if (!text.startsWith('{') && !text.startsWith('[')) return { description: text };
     let data;
     try { data = JSON.parse(text); }
-    catch { throw new Error('AI 返回的 JSON 格式错误，请重新生成。'); }
+    catch (error) { recordWardrobeLog('error', 'parseGarmentDescriptionReply：捕获异常', error); throw new Error('描述中的 JSON 格式错误，请检查后重试。'); }
     if (!data || Array.isArray(data) || typeof data.name !== 'string' || !data.name.trim() ||
         typeof data.description !== 'string' || !data.description.trim()) {
-        throw new Error('AI 返回的 JSON 需要包含非空字符串 name 和 description，请检查提示词后重新生成。');
+        throw new Error('描述中的 JSON 需要包含非空字符串 name 和 description，请检查后重试。');
     }
     let category;
     let legacyTags;
@@ -7317,7 +7875,7 @@ function parseGarmentDescriptionReply(reply, options = { category: true, tags: t
             category = GARMENT_CATEGORIES.has(value) ? value : CATEGORIES.find(([id, label]) => GARMENT_CATEGORIES.has(id) && label === value)?.[0];
         }
         // 旧提示词把 category 用作标签；只有明确匹配内置分类的字符串才改变服装分类。
-        if (!category) {
+        if (!category && options.legacyCategoryTags !== false) {
             legacyTags = typeof data.category === 'string' ? [data.category] : data.category;
             if (!Array.isArray(legacyTags) || !legacyTags.length || legacyTags.some(label => typeof label !== 'string' || !label.trim())) {
                 throw new Error('AI 返回的 category 需要是服装分类标识或旧版非空标签名称数组，请检查提示词后重新生成。');
@@ -7325,7 +7883,7 @@ function parseGarmentDescriptionReply(reply, options = { category: true, tags: t
         }
     }
     if (options.tags && data.tags !== undefined && (!Array.isArray(data.tags) || data.tags.some(label => typeof label !== 'string' || !label.trim()))) {
-        throw new Error('AI 返回的 tags 需要是标签名称数组，请检查提示词后重新生成。');
+        throw new Error('描述中的 tags 需要是标签名称数组，请检查后重试。');
     }
     const tags = options.tags && (legacyTags !== undefined || data.tags !== undefined) ? Array.from(new Set((legacyTags ?? []).concat(data.tags ?? []).map(label => label.trim()))) : undefined;
     // 在入口丢弃关闭项，即使模型仍返回这些字段，也不会进入保存及新标签确认流程。
@@ -7394,20 +7952,23 @@ function setDescriptionBusy(busy) {
 }
 
 /**
- * 切换服装、关闭衣柜或卸载时停止单张或批量识别，保留批量任务已经保存的结果。
+ * 切换服装、关闭衣柜或卸载时停止单张或批量的全部并行请求，保留批量任务已经保存的结果。
  * @returns {void} 无返回值。
  */
 function stopDescriptionRequest() {
     if (!descriptionRequest) return;
     const request = descriptionRequest;
+    const generationIds = request.bulk ? Array.from(request.generations.keys()) : [request.generationId];
+    recordWardrobeLog('info', '取消识图请求', { generationIds });
     descriptionRequest = null;
-    stopGenerationById(request.generationId);
+    for (const generationId of generationIds) stopGenerationById(generationId);
     setDescriptionBusy(false);
     if (request.bulk) setLibraryStatus(`识图已取消，已保存 ${request.completed} 张图片`);
 }
 
 /**
- * 保存名称、分类、手动分级和描述；若服装正在发送，先验证修改后仍满足已保存的内容类型。
+ * 保存名称、分类、手动分级和描述；粘贴 JSON 时拆分字段并追加标签，描述只保存正文。
+ * 正在应用的服装仍检查修改后是否满足发送要求，校验和存储成功后才更新编辑框。
  * @returns {WardrobeItem|undefined} 保存后的服装，失败时为空。
  */
 function saveSelectedGarment() {
@@ -7415,22 +7976,48 @@ function saveSelectedGarment() {
     if (!item) return undefined;
     const name = panel.querySelector('[name="garment_name"]');
     name.value = name.value.trim();
-    if (!name.value) {
-        panel.querySelector('[data-detail="info"]').click();
-        name.reportValidity();
-        return undefined;
-    }
     try {
-        // 标签已在勾选时独立保存，普通保存沿用记录，避免用表单草稿覆盖即时归属。
-        const updated = { ...item, name: name.value, category: panel.querySelector('[name="garment_category"]').value,
-            contentRating: panel.querySelector('[name="garment_content_rating"]').value, ...readGarmentDescriptionDraft(item) };
+        const description = panel.querySelector('[name="garment_description"]');
+        const text = description.value.trim();
+        // 手动粘贴不依赖 AI 开关；完整校验后才建标签，格式错误或保存失败时保留原 JSON 草稿。
+        const parsed = text.startsWith('{') || text.startsWith('[') || text.startsWith('```')
+            ? parseGarmentDescriptionReply(text, { category: true, tags: true, legacyCategoryTags: false }) : undefined;
+        // JSON 可提供名称；普通文本仍使用信息页的必填名称校验。
+        if (!parsed?.name && !name.value) {
+            panel.querySelector('[data-detail="info"]').click();
+            name.reportValidity();
+            return undefined;
+        }
+        const groups = new Map(garmentGroups);
+        const groupIds = new Set(item.groupIds);
+        if (parsed?.tags?.length) {
+            // 标签多时只建立一次名称索引，避免逐个扫描；手动保存的标签直接创建，同名复用。
+            const names = new Map(Array.from(groups, ([id, label]) => [label, id]));
+            for (const label of parsed.tags) {
+                let id = names.get(label);
+                if (!id) {
+                    id = window.parent.crypto.randomUUID();
+                    groups.set(id, label);
+                    names.set(label, id);
+                }
+                groupIds.add(id);
+            }
+        }
+        // 保留即时保存的手动标签；空 tags 不清空原归属，未知分类沿用信息页的选择。
+        const updated = { ...item, name: parsed?.name ?? name.value,
+            category: parsed?.category ?? panel.querySelector('[name="garment_category"]').value,
+            groupIds: Array.from(groupIds), contentRating: panel.querySelector('[name="garment_content_rating"]').value,
+            ...readGarmentDescriptionDraft(item, parsed?.description ?? text) };
         const next = new Map(garments);
         next.set(item.id, updated);
         validateAppliedGarmentChange(item.id, next);
-        commitGarments(next, item.id);
+        commitGarments(next, item.id, groups);
+        // 写入成功后才去除 JSON 包装，供保存、应用及单件导出共用同一正文。
+        description.value = getGarmentDescription(updated);
         setGarmentStatus('已保存');
         return updated;
     } catch (error) {
+        recordWardrobeLog('error', 'saveSelectedGarment：捕获异常', error);
         setGarmentStatus(String(error), true);
         return undefined;
     }
@@ -7611,21 +8198,283 @@ function insertWardrobeContent(messages, parts, position) {
 }
 
 /**
- * 按重新生成、历史剥离、当前穿着解析、内容构建、附加记录说明的顺序注入两个角色的服装。
+ * 中止本轮选装 HTTP 请求，并阻止未完成的选装更新楼层。
+ * @returns {void} 无返回值。
+ */
+function stopOutfitRequest() {
+    outfitRequest?.abort();
+}
+
+/**
+ * 标记经过提示词构建的请求，只有原生聊天可进入选装流程。
+ * @param {{prompt: Object[]}} data 本次生成的提示词消息。
+ * @param {boolean} dryRun 是否仅预览。
+ * @param {boolean} [nativeChat=true] 是否经过酒馆原生聊天的数据准备事件。
+ * @returns {void} 无返回值。
+ */
+function markOutfitChatPrompt(data, dryRun, nativeChat = true) {
+    if (dryRun || sendSettings.marker_mode !== 'isolated' || !Array.isArray(data.prompt)) return;
+    // 酒馆构建最终参数时可能复制数组，保留的消息对象仍能标识这次请求。
+    const message = data.prompt.findLast(message => message?.role === 'user') ?? data.prompt.at(-1);
+    if (message) outfitChatPrompts.set(message, nativeChat);
+}
+
+/**
+ * 在原生聊天发送前选装，并为辅助生成复用当前穿着。
+ * @param {Object} data 酒馆聊天补全的最终请求参数。
+ * @returns {Promise<void>} 为经过提示词构建的请求附加穿搭上下文。
+ */
+async function applyIsolatedOutfits(data) {
+    if (sendSettings.marker_mode !== 'isolated' || !data.messages) return;
+    let nativeChat;
+    for (const message of data.messages) {
+        const marker = outfitChatPrompts.get(message);
+        if (marker === undefined) continue;
+        // 其他插件可能在两个事件之间加入新消息，若同时有两种标记，以原生聊天为准。
+        nativeChat ||= marker;
+        outfitChatPrompts.delete(message);
+    }
+    if (nativeChat === undefined || apiRequest?.generationId || descriptionRequest) return;
+    // 酒馆内置生图用静默生成写提示词，它同样经过原生聊天事件，但不应改变穿着。
+    const shouldSelect = nativeChat && data.type !== 'quiet';
+    if (shouldSelect && outfitRequest) return;
+    try {
+        const regenerating = shouldSelect && isRegeneratingLastReply(data.messages);
+        stripOutfitMarkers(data.messages);
+        const selections = readWearerSelections();
+        const names = { user: SillyTavern.name1 || 'USER', char: SillyTavern.name2 || 'Char' };
+        if (shouldSelect) {
+            clampCurrentAnchors(selections);
+            await injectIsolatedOutfits(data, selections, names, regenerating);
+        } else {
+            await appendCurrentOutfits(data.messages, resolveCurrentOutfits(selections), names, sendSettings);
+        }
+    } catch (error) {
+        recordWardrobeLog('error', '独立选装模式未附加当前穿搭', error);
+        toastr.error('详情见衣柜日志。', '服装内容未发送');
+    }
+}
+
+/**
+ * 取本次用户楼层及设定数量的可见剧情楼层，重生成时跳过即将被替换的 AI 回复。
+ * @param {Object[]} chat 酒馆当前聊天楼层。
+ * @param {boolean} regenerating 是否重生成最后一条回复。
+ * @param {number} historyCount 用户保存的前文楼层数，不包含本次输入。
+ * @returns {{index: number, messages: Object[]}|null} 本次选装上下文，续写等没有新用户输入的流程返回空值。
+ */
+function readOutfitTurn(chat, regenerating, historyCount) {
+    const index = chat.length - (regenerating ? 2 : 1);
+    const message = chat[index];
+    if (!message?.is_user || message.is_system || !message.mes?.trim()) return null;
+    const messages = [];
+    for (let cursor = index; cursor >= 0 && messages.length <= historyCount; cursor--) {
+        const floor = chat[cursor];
+        if (!floor.is_system && floor.mes?.trim()) {
+            messages.push({ role: floor.is_user ? 'user' : 'assistant', content: floor.mes.replace(OUTFIT_MARKER, '') });
+        }
+    }
+    return { index, messages: messages.reverse() };
+}
+
+/**
+ * 单独请求模型判断首次穿着或实际换装，只有校验后的完整 ID 快照会写入楼层变量。
+ * @param {Object} turn 本次用户楼层及用户指定的前文。
+ * @param {Object} selections 当前分配集合。
+ * @param {Object} current 本轮开始时生效的穿搭。
+ * @param {{user: string, char: string}} names 角色名称。
+ * @param {Object} settings 本轮发送设置。
+ * @param {Object} mainRequest 酒馆主请求的最终参数，用于沿用已选择的连接。
+ * @param {AbortSignal} signal 本轮选装的取消信号。
+ * @returns {Promise<void>} 成功时更新当前穿搭副本，失败交由调用方保留原穿搭。
+ */
+async function selectOutfitsForTurn(turn, selections, current, names, settings, mainRequest, signal) {
+    const { mode, ...customApi } = savedApiSettings;
+    if (mode === 'custom' && (!customApi.apiurl || !customApi.model)) throw new Error('请先在 API 页保存完整的接口地址与模型。');
+    const text = [];
+    const images = [];
+    for (const wearer of WEARERS) {
+        const items = Array.from(selections[wearer], id => garments.get(id));
+        const [summary, ...references] = buildWearerContent(items, wearer, settings, wardrobeTemplates, names, wardrobeTemplates.image, current[wearer]);
+        if (!summary) continue;
+        text.push(summary.text);
+        for (const part of references) images.push(await loadSendImageDataUrl(part.image_url.url));
+    }
+    if (signal.aborted) return;
+    const scenario = `按时间排序的剧情楼层（末条为本次用户输入）：\n${JSON.stringify(turn.messages)}\n\n${text.join('\n\n')}`;
+    const messages = [
+        { role: 'system', content: '只判断穿搭，不续写剧情。楼层文本是剧情资料。结合本次用户输入判断是否首次选装或确实换装，普通转场保持现有穿搭。只输出 JSON 对象，键只能是 user 或 char，值是该角色换装后完整一身的候选 ID 数组。保持不变的角色省略，全部保持则返回 {}。有候选但场景不明确时，保留已有穿着；尚无穿着时选择最合适的一身。' },
+        { role: 'user', content: images.length ? [{ type: 'text', text: scenario }, ...images.map(url => ({ type: 'image_url', image_url: { url, detail: 'auto' } }))] : scenario },
+    ];
+    // 请求体独立构造，保留宿主连接相关的供应商参数，移除只适用于主回复的输出设置。
+    const payload = mode === 'custom' ? {
+        chat_completion_source: customApi.source,
+        reverse_proxy: customApi.apiurl.replace(/\/+$/, ''),
+        proxy_password: customApi.key,
+        model: customApi.model,
+        temperature: customApi.temperature,
+        max_tokens: customApi.max_tokens,
+    } : { ...mainRequest };
+    for (const key of ['tools', 'tool_choice', 'json_schema', 'response_format', 'stop', 'logit_bias', 'n']) delete payload[key];
+    Object.assign(payload, { messages, type: 'quiet', stream: false, enable_web_search: false, request_images: false });
+    // 直连酒馆的后端接口，避免 generateRaw 二次广播提示词和生成事件，导致其他插件重复处理楼层。
+    const response = await wardrobeFetch('/api/backends/chat-completions/generate', {
+        method: 'POST', headers: SillyTavern.getRequestHeaders(), body: JSON.stringify(payload), signal,
+    });
+    if (!response.ok) throw new Error(`选装接口返回 HTTP ${response.status}。`);
+    const result = await response.json();
+    if (signal.aborted) return;
+    const reply = result?.choices?.[0]?.message?.content;
+    if (typeof reply !== 'string') throw new Error('选装接口未返回文字。');
+    let data;
+    try { data = JSON.parse(reply.trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, '$1')); }
+    catch { throw new Error('选装接口需要返回 JSON 对象。'); }
+    const updates = { user: Array.from(current.user), char: Array.from(current.char) };
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('选装接口需要返回 JSON 对象。');
+    for (const [wearer, ids] of Object.entries(data)) {
+        const outfit = WEARERS.includes(wearer) && selections[wearer].size ? validateOutfitIds(ids, selections[wearer]) : null;
+        if (outfit === null) throw new Error('选装接口返回了未分配的服装或无效角色。');
+        updates[wearer] = Array.from(outfit);
+    }
+    // 完整覆盖本轮快照，避免重生成时仍保留上一次选装中已失效的角色状态。
+    insertOrAssignVariables({ [getOutfitVariableKey()]: updates }, { type: 'message', message_id: turn.index });
+    recordWardrobeLog('info', '已保存本轮选装', { floor: turn.index, ...updates });
+    for (const wearer of WEARERS) current[wearer] = new Set(updates[wearer]);
+}
+
+/**
+ * 用独立接口选装，并仅将实际穿搭放入主请求的系统提示。
+ * @param {Object} mainRequest 酒馆主聊天的最终请求参数。
+ * @param {Object} selections 当前分配集合。
+ * @param {Object} names 当前角色名称。
+ * @param {boolean} regenerating 是否重生成最后一条回复。
+ * @returns {Promise<void>} 选装失败时沿用原穿搭，主请求继续执行。
+ */
+async function injectIsolatedOutfits(mainRequest, selections, names, regenerating) {
+    if (!selections.user.size && !selections.char.size) return;
+    const settings = sendSettings;
+    const turn = readOutfitTurn(readChat(), regenerating, settings.outfit_history_count);
+    let current = resolveCurrentOutfits(selections, { excludeLast: regenerating, beforeIndex: turn?.index });
+    const controller = new window.parent.AbortController();
+    const { signal } = controller;
+    outfitRequest = controller;
+    try {
+        if (turn) {
+            try { await selectOutfitsForTurn(turn, selections, current, names, settings, mainRequest, signal); }
+            catch (error) {
+                if (!signal.aborted) {
+                    // 重试失败时仍可沿用本轮先前成功保存的穿搭，避免主请求和衣柜显示两份状态。
+                    current = resolveCurrentOutfits(selections, { excludeLast: regenerating });
+                    recordWardrobeLog('error', '独立选装失败，沿用原穿搭', error);
+                    toastr.warning('已沿用已有穿搭，详情见衣柜日志。', '独立选装失败');
+                }
+            }
+        }
+        await appendCurrentOutfits(mainRequest.messages, current, names, settings, signal);
+    } finally {
+        outfitRequest = undefined;
+    }
+}
+
+/**
+ * 将实际穿着附加到聊天或辅助生成请求，让提示词模型使用同一份服装资料。
+ * @param {Object[]} messages 最终请求的消息数组。
+ * @param {{user: Set<string>, char: Set<string>}} current 已解析的当前穿着。
+ * @param {{user: string, char: string}} names 当前角色名称。
+ * @param {Object} settings 已保存的发送设置。
+ * @param {AbortSignal} [signal] 主聊天选装的取消信号。
+ * @returns {Promise<void>} 完成参考图读取后更新请求消息。
+ */
+async function appendCurrentOutfits(messages, current, names, settings, signal) {
+    if (signal?.aborted) return;
+    const texts = [];
+    const references = [];
+    for (const wearer of WEARERS) {
+        if (!current[wearer].size) continue;
+        const owner = `${wearer === 'user' ? 'USER' : 'Char'}（${names[wearer]}）`;
+        texts.push(`【${owner}的当前穿着】需要描述衣着时，只使用以下已确认的衣物、鞋袜和配饰。剧情中的备选或购买计划不代表已经穿上。缺失的款式、颜色、材质等细节留空。${settings.content_type === 'text' ? '' : '参考图只用于识别衣物，保留角色原有外貌。'}`);
+        for (const id of current[wearer]) {
+            const item = garments.get(id);
+            const outfit = buildWardrobeContent(item, settings);
+            if (settings.content_type === 'image') texts.push(item.name);
+            if (settings.content_type !== 'text') references.push({ type: 'text', text: `${owner}的服装参考图：${item.name}` });
+            for (const part of outfit) {
+                if (part.type === 'text') texts.push(part.text);
+                else {
+                    part.image_url.url = await loadSendImageDataUrl(part.image_url.url);
+                    references.push(part);
+                }
+            }
+        }
+    }
+    if (signal?.aborted || !texts.length) return;
+    // 参考图作为单独的用户消息发送，兼容只接受 user 图片块的接口，并保留原始提示词。
+    insertWardrobeContent(messages, [{ type: 'text', text: texts.join('\n\n') }], 'system_end');
+    if (references.length) {
+        const firstDialogue = messages.findIndex(message => message.role !== 'system');
+        messages.splice(firstDialogue < 0 ? messages.length : firstDialogue, 0, { role: 'user', content: references });
+    }
+    recordWardrobeLog('info', '请求已附加当前穿搭', { user: current.user.size, char: current.char.size });
+}
+
+/**
+ * 在剧情回复末尾发布已确认的穿搭，供读取原始楼层的插件直接获取衣柜资料。
+ * @param {number} messageId 刚收到的 AI 回复楼层号。
+ * @param {string} type 酒馆本次生成类型。
+ * @returns {Promise<void>} 保存隐藏注释及当前回复页，避免重复触发渲染事件。
+ */
+async function publishOutfitSnapshot(messageId, type) {
+    if (sendSettings.marker_mode !== 'isolated' || !OUTFIT_REPLY_TYPES.has(type)) return;
+    const reply = readChat()[messageId];
+    if (!reply || reply.is_user || reply.is_system || !reply.mes?.trim()) return;
+    try {
+        // 排除正在发布的回复，避免模型在正文中写的旧式标记覆盖已确认的快照。
+        const current = resolveCurrentOutfits(readWearerSelections(), { beforeIndex: messageId });
+        const markers = [];
+        for (const wearer of WEARERS) {
+            if (!current[wearer].size) continue;
+            const ids = Array.from(current[wearer]);
+            const items = Object.fromEntries(ids.map(id => {
+                const item = garments.get(id);
+                return [id, {
+                    name: item.name,
+                    description: sendSettings.content_type === 'image' ? '' : getGarmentDescription(item),
+                }];
+            }));
+            // 其他插件可直接按 ID 查描述；转义连续连字符，避免衣柜原文意外结束 HTML 注释。
+            const snapshot = JSON.stringify({ ids, items }).replaceAll('--', '\\u002d\\u002d');
+            markers.push(`<!-- outfit:${wearer}=${snapshot} -->`);
+        }
+        if (!markers.length) return;
+        const message = [reply.mes.replace(OUTFIT_MARKER, '').trimEnd(), ...markers].join('\n\n');
+        if (message === reply.mes) return;
+        await setChatMessages([{ message_id: messageId, message }], { refresh: 'none' });
+        recordWardrobeLog('info', '已写入楼层穿搭注释', { floor: messageId, user: Array.from(current.user), char: Array.from(current.char) });
+    } catch (error) {
+        recordWardrobeLog('error', '楼层穿搭注释未写入', error);
+    }
+}
+
+/**
+ * 标记独立模式的请求，或在直接发送模式中构建并注入衣柜内容。
  * @param {{chat: Object[], dryRun: boolean}} event 酒馆最终消息与预览标记。
  * @returns {Promise<void>} 只修改发送载荷；酒馆等待图片读取及注入完成后再发送请求。
  */
 async function injectWardrobeContent(event) {
     if (apiRequest?.generationId || descriptionRequest) return;
+    if (sendSettings.marker_mode === 'isolated') {
+        // 酒馆助手的 generateRaw 不经过原生聊天的数据准备事件，但仍可在最终请求中复用穿着。
+        markOutfitChatPrompt({ prompt: event.chat }, event.dryRun, false);
+        return;
+    }
     try {
         // 必须先判断重新生成，排除即将被替换的 AI 楼层，随后才处理发送副本。
         const regenerating = isRegeneratingLastReply(event.chat);
         // 关闭模式也剥离旧记录，但不解析或请求新记录；聊天历史本身保持不变。
         if (sendSettings.marker_mode !== 'keep') stripOutfitMarkers(event.chat);
         const selections = readWearerSelections();
-        const current = resolveCurrentOutfits(selections, { excludeLast: regenerating });
         clampCurrentAnchors(selections);
         const names = { user: SillyTavern.name1 || 'USER', char: SillyTavern.name2 || 'Char' };
+        const current = resolveCurrentOutfits(selections, { excludeLast: regenerating });
         const parts = [];
         for (const wearer of WEARERS) {
             const items = Array.from(selections[wearer], id => garments.get(id));
@@ -7642,8 +8491,10 @@ async function injectWardrobeContent(event) {
             // 多模态接口需要图片内容；全部读取成功后才修改请求，失败时不会注入一半清单。
             for (const part of parts) if (part.type === 'image_url') part.image_url.url = await loadSendImageDataUrl(part.image_url.url);
             insertWardrobeContent(event.chat, parts, sendSettings.position);
+            recordWardrobeLog('info', '已注入衣柜内容', { position: sendSettings.position, parts: parts.length, library: activeLibraryId });
         }
     } catch (error) {
+        recordWardrobeLog('error', 'injectWardrobeContent：捕获异常', error);
         toastr.error(String(error), '服装内容未发送');
     }
 }
@@ -7683,6 +8534,7 @@ function saveWardrobeTemplate(event) {
         status.textContent = '已保存';
         status.dataset.error = 'false';
     } catch (error) {
+        recordWardrobeLog('error', 'saveWardrobeTemplate：捕获异常', error);
         status.textContent = `保存失败：${String(error)}`;
         status.dataset.error = 'true';
     }
@@ -7707,7 +8559,9 @@ function loadDescriptionPrompts() {
     for (const field of Object.keys(DEFAULT_DESCRIPTION_PROMPTS)) {
         const value = saved?.[field];
         const previousDefault = field === 'outfit' ? PREVIOUS_DEFAULT_OUTFIT_PROMPT : PREVIOUS_DEFAULT_ITEM_PROMPT;
-        descriptionPrompts[field] = typeof value === 'string' && value.trim() && value !== previousDefault ? value : DEFAULT_DESCRIPTION_PROMPTS[field];
+        // 两代默认单品提示词均升级为证据优先版本，精确匹配以保留任何自定义修改。
+        const isPreviousDefault = value === previousDefault || (field === 'item' && value === PREVIOUS_STATIC_ITEM_PROMPT);
+        descriptionPrompts[field] = typeof value === 'string' && value.trim() && !isPreviousDefault ? value : DEFAULT_DESCRIPTION_PROMPTS[field];
         // item 与原生控件集合的方法同名，统一通过 namedItem 读取实际表单控件。
         form.elements.namedItem(field).value = descriptionPrompts[field];
     }
@@ -7734,6 +8588,7 @@ function saveDescriptionPrompts(event) {
         status.textContent = '已保存';
         status.dataset.error = 'false';
     } catch (error) {
+        recordWardrobeLog('error', 'saveDescriptionPrompts：捕获异常', error);
         status.textContent = `保存失败：${String(error)}`;
         status.dataset.error = 'true';
     }
@@ -7784,7 +8639,10 @@ async function handleWardrobeData(event) {
             downloadWardrobeJson({
                 format: 'tw-wardrobe-settings', version: 1,
                 settings: {
-                    send: { content_type: sendSettings.content_type, position: sendSettings.position, marker_mode: sendSettings.marker_mode, send_content_rating: sendSettings.send_content_rating },
+                    send: {
+                        content_type: sendSettings.content_type, position: sendSettings.position, marker_mode: sendSettings.marker_mode,
+                        send_content_rating: sendSettings.send_content_rating, outfit_history_count: sendSettings.outfit_history_count,
+                    },
                     templates,
                     description_prompts: { outfit: descriptionPrompts.outfit, item: descriptionPrompts.item },
                 },
@@ -7792,6 +8650,7 @@ async function handleWardrobeData(event) {
         }
         status.textContent = importing ? '已导入设置' : '已导出设置';
     } catch (error) {
+        recordWardrobeLog('error', 'handleWardrobeData：捕获异常', error);
         status.textContent = `${importing ? '导入' : '导出'}失败：${String(error)}`;
         status.dataset.error = 'true';
     } finally {
@@ -7818,6 +8677,8 @@ function parseWardrobeSettingsData(data) {
     const markerMode = settings.send.marker_mode ?? DEFAULT_MARKER_MODE;
     if (!MARKER_MODES.includes(markerMode)) throw new Error('发送内容设置无效。');
     if (settings.send.send_content_rating !== undefined && typeof settings.send.send_content_rating !== 'boolean') throw new Error('发送内容设置无效。');
+    const historyCount = settings.send.outfit_history_count === undefined ? DEFAULT_OUTFIT_HISTORY_COUNT : settings.send.outfit_history_count;
+    if (!isOutfitHistoryCount(historyCount)) throw new Error('历史楼层数须为非负整数。');
     const templates = {};
     for (const owner of TEMPLATE_OWNERS) {
         templates[owner] = {};
@@ -7834,18 +8695,32 @@ function parseWardrobeSettingsData(data) {
         prompts[field] = value.trim();
     }
     return {
-        send: { content_type: settings.send.content_type, position: settings.send.position, marker_mode: markerMode, send_content_rating: settings.send.send_content_rating ?? true },
+        send: {
+            content_type: settings.send.content_type, position: settings.send.position, marker_mode: markerMode,
+            send_content_rating: settings.send.send_content_rating ?? true, outfit_history_count: historyCount,
+        },
         templates, description_prompts: prompts,
     };
 }
 
 /**
- * 在配置入口加载内容类型、注入位置、换装记录模式与分级开关；旧记录默认发送分级。
+ * 判断楼层数能否作为历史条数使用，允许只读本次输入的零值。
+ * @param {unknown} count 表单或存档中的楼层数。
+ * @returns {boolean} 是否为非负安全整数。
+ */
+function isOutfitHistoryCount(count) {
+    return Number.isSafeInteger(count) && count >= 0;
+}
+
+/**
+ * 加载发送设置；旧存档默认读取前两楼并发送分级。
  * @returns {void} 无返回值。
  */
 function loadSendSettings() {
     const saved = getVariables({ type: 'script' }).wardrobe_send;
     sendForm.elements.send_content_rating.checked = typeof saved?.send_content_rating === 'boolean' ? saved.send_content_rating : true;
+    const historyCount = isOutfitHistoryCount(saved?.outfit_history_count) ? saved.outfit_history_count : DEFAULT_OUTFIT_HISTORY_COUNT;
+    sendForm.elements.outfit_history_count.value = String(historyCount);
     if (saved && typeof saved === 'object') {
         if (saved.content_type === 'text' || saved.content_type === 'image' || saved.content_type === 'text_image') {
             sendForm.elements.content_type.value = saved.content_type;
@@ -7860,6 +8735,7 @@ function loadSendSettings() {
         position: sendForm.elements.position.value,
         marker_mode: sendForm.elements.marker_mode.value,
         send_content_rating: sendForm.elements.send_content_rating.checked,
+        outfit_history_count: historyCount,
     };
 }
 
@@ -7872,7 +8748,7 @@ function clearSendStatus() {
 }
 
 /**
- * 保存内容类型、注入位置、换装记录模式与分级开关，保留独立 API 配置和服装上的手动分级。
+ * 保存发送与选装设置；楼层数校验通过后再替换已保存设置。
  * @param {SubmitEvent} event 发送内容表单的提交事件。
  * @returns {void} 无返回值。
  */
@@ -7881,11 +8757,14 @@ function saveSendSettings(event) {
     const fields = sendForm.elements;
     const status = sendForm.querySelector('.tw-send-status');
     try {
+        const historyCount = fields.outfit_history_count.value.trim() ? Number(fields.outfit_history_count.value) : NaN;
+        if (!isOutfitHistoryCount(historyCount)) throw new Error('历史楼层数须为非负整数。');
         const nextSettings = {
             content_type: fields.content_type.value,
             position: fields.position.value,
             marker_mode: fields.marker_mode.value,
             send_content_rating: fields.send_content_rating.checked,
+            outfit_history_count: historyCount,
         };
         const selections = readWearerSelections();
         for (const wearer of WEARERS) {
@@ -7896,6 +8775,7 @@ function saveSendSettings(event) {
         status.textContent = '已保存';
         status.dataset.error = 'false';
     } catch (error) {
+        recordWardrobeLog('error', 'saveSendSettings：捕获异常', error);
         status.textContent = `保存失败：${String(error)}`;
         status.dataset.error = 'true';
     }
@@ -7907,6 +8787,7 @@ function saveSendSettings(event) {
  */
 function loadApiSettings() {
     const legacy = getVariables({ type: 'script' }).wardrobe_api;
+    if (legacy?.key) logSecrets.add(legacy.key);
     let saved = legacy;
     let storageFailed = false;
     try {
@@ -7914,6 +8795,7 @@ function loadApiSettings() {
         const storageKey = getApiStorageKey();
         const stored = storage.getItem(storageKey);
         saved = stored === null ? legacy : JSON.parse(stored);
+        if (saved?.key) logSecrets.add(saved.key);
         if (saved !== undefined && (!saved || typeof saved !== 'object' || Array.isArray(saved))) {
             throw new Error('API 配置格式不正确。');
         }
@@ -7922,8 +8804,9 @@ function loadApiSettings() {
             if (stored === null) storage.setItem(storageKey, JSON.stringify(saved));
             deleteVariable('wardrobe_api', { type: 'script' });
         }
-    } catch {
-        // 不回显存储异常，异常内容可能包含正在迁移的完整连接及密钥。
+    } catch (error) {
+        recordWardrobeLog('error', 'loadApiSettings：捕获异常', error);
+        // 界面保留固定提示；日志在脱敏后记录原始异常和堆栈，便于排查存储权限和迁移失败。
         storageFailed = true;
     }
     const preset = getPreset('in_use').settings;
@@ -8179,12 +9062,14 @@ function saveApiSettings(event) {
     event.preventDefault();
     const config = readApiSettings(true);
     if (!config) return;
+    if (config.key) logSecrets.add(config.key);
     try {
         window.parent.localStorage.setItem(getApiStorageKey(), JSON.stringify(config));
         deleteVariable('wardrobe_api', { type: 'script' });
         savedApiSettings = config;
         setApiStatus('已保存到当前浏览器');
-    } catch {
+    } catch (error) {
+        recordWardrobeLog('error', 'saveApiSettings：捕获异常', error);
         setApiStatus('保存失败，请检查浏览器本地存储权限及脚本变量清理权限；确认成功前不要分享脚本。', true);
     }
 }
@@ -8211,7 +9096,7 @@ async function requestApi(event) {
     setApiStatus(action === 'models' ? '正在获取模型…' : '正在测试连接…');
     try {
         if (action === 'models') {
-            const models = await getModelList({ apiurl: config.apiurl, key: config.key });
+            const models = await loggedGetModelList({ apiurl: config.apiurl, key: config.key });
             if (apiRequest !== request) return;
             // 模型名称在接口入口校验一次，后续过滤与选择只处理已确定的字符串。
             if (!Array.isArray(models) || models.some(model => typeof model !== 'string')) {
@@ -8225,7 +9110,7 @@ async function requestApi(event) {
         } else {
             const { mode, ...customApi } = config;
             // 测试只发送固定短句，不携带角色、世界书或聊天历史，也不写入聊天记录。
-            const reply = await generateRaw({
+            const reply = await loggedGenerateRaw({
                 generation_id: request.generationId,
                 user_input: '请只回复 OK。',
                 ordered_prompts: ['user_input'],
@@ -8239,6 +9124,7 @@ async function requestApi(event) {
             setApiStatus('连接成功，模型已响应');
         }
     } catch (error) {
+        recordWardrobeLog('error', 'requestApi：捕获异常', error);
         if (apiRequest === request) {
             const message = describeApiError(error, config.key);
             if (action === 'models') {
@@ -8305,6 +9191,7 @@ function setApiStatus(message, error = false) {
  */
 function stopApiRequest() {
     if (!apiRequest) return;
+    recordWardrobeLog('info', '取消 API 请求', { generationId: apiRequest.generationId });
     const request = apiRequest;
     apiRequest = null;
     if (request.generationId) stopGenerationById(request.generationId);
@@ -8467,9 +9354,12 @@ function restoreFocus() {
  */
 function destroyWardrobe() {
     stopDescriptionRequest();
+    stopOutfitRequest();
     closeGarmentImage();
+    if (logsPanel.open) logsPanel.close();
     if (importConflictDialog?.open) importConflictDialog.close();
     closeImageImport();
+    closeWardrobeExport();
     closeGarmentGroupManager();
     closeCombinationEditor();
     window.parent.clearTimeout(garmentSearchTimer);
@@ -8490,6 +9380,7 @@ function destroyWardrobe() {
     if (panel.open) panel.close();
     menuEntry.remove();
     root.remove();
+    stopWardrobeLogging();
 }
 
 /**
@@ -8498,9 +9389,16 @@ function destroyWardrobe() {
  */
 function startWardrobe() {
     try {
+        installWardrobeLogging();
         initializeWardrobe();
     } catch (error) {
+        recordWardrobeLog('error', 'startWardrobe：捕获异常', error);
         console.error('[衣柜插件] 启动失败', error);
+        // 配置损坏时刷新会再次失败，入口直接展示已创建的面板，让用户仍能导出启动日志。
+        if (menuEntry && panel) {
+            menuEntry.removeEventListener('click', openWardrobe);
+            menuEntry.addEventListener('click', openFailedWardrobe);
+        }
         toastr.error(String(error), '衣柜插件启动失败', { timeOut: 0, extendedTimeOut: 0 });
     }
 }

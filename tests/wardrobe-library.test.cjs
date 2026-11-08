@@ -1079,6 +1079,8 @@ async function checkLibraryImprovements() {
         { ...blue, image: original }, { ...red, image: portrait },
         { ...red, id: 'shared-improvement', description: '', image: '' },
         { ...red, id: 'empty-improvement', description: ' \n ', image: '' },
+        { ...red, id: 'blank-improvement', description: '' },
+        { ...red, id: 'ready-improvement', description: '已有描述，等待分配' },
     ];
     scriptVariables.wardrobe_groups = [{ id: 'slim', name: '修身' }, { id: 'daily', name: '日常' }];
     scriptVariables.wardrobe_selection_scope = 'global';
@@ -1091,8 +1093,8 @@ async function checkLibraryImprovements() {
     for (const [filter, expected] of [
         ['assigned-user', ['blue', 'shared-improvement']],
         ['assigned-char', ['red', 'shared-improvement']],
-        ['unassigned', ['empty-improvement']],
-        ['missing-description', ['shared-improvement', 'empty-improvement']],
+        ['unassigned', ['ready-improvement']],
+        ['missing-description', ['shared-improvement', 'empty-improvement', 'blank-improvement']],
         ['missing-image', ['shared-improvement', 'empty-improvement']],
     ]) {
         api.selectCategory(filter);
@@ -1387,6 +1389,8 @@ async function checkCombinations() {
     assert.ok(api.matchesGarmentFilter(casual, 'combinations', selections));
     assert.ok(!api.matchesGarmentFilter(members[3], 'combinations', selections), '套装分类本身不是关联搭配');
     assert.ok(!api.matchesGarmentFilter(casual, 'missing-description', selections), '搭配使用成员描述，无需再填一份');
+    assert.ok(api.matchesGarmentFilter(casual, 'unassigned', selections), '成员描述完整的未分配搭配可以待分配');
+    assert.ok(!api.matchesGarmentFilter({ ...casual, descriptionOverride: true, description: ' \n ' }, 'unassigned', selections), '整套覆盖正文为空白时归入缺描述');
     assert.ok(!api.matchesGarmentFilter(casual, 'missing-image', selections), '搭配使用成员图片，无需拼接封面');
     for (const componentIds of [[], ['missing'], ['casual'], [members[0].id, members[0].id], 'bad']) {
         assert.throws(() => api.parseWardrobeData({ groups: [], items: [...members, { ...casual, componentIds }] }), /搭配/);
@@ -1422,6 +1426,9 @@ async function checkCombinations() {
     currentMember.description = '更新后的上装描述';
     assert.ok(api.getGarmentDescription(casual).includes(currentMember.description), '共享成员编辑后所有搭配立即生效');
     currentMember.description = '';
+    // 未分配与缺描述互斥，不能把自动合并时生成的成员名称误当作有效描述。
+    assert.ok(!api.matchesGarmentFilter(casual, 'unassigned', selections), '任一成员缺描述时搭配不显示在未分配');
+    assert.ok(api.matchesGarmentFilter({ ...casual, descriptionOverride: true, description: '已编辑整套描述' }, 'unassigned', selections), '手动整套描述有效时不再要求成员描述');
     assert.throws(() => api.buildWardrobeContent(casual, { content_type: 'text' }), /服装0.*描述/);
     assert.equal(api.buildWardrobeContent(casual, { content_type: 'image' }).length, 3, '图片模式不要求成员描述');
     currentMember.description = members[0].description;

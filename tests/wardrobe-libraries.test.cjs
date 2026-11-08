@@ -33,6 +33,10 @@ function createHost(saved) {
             focus() {},
             querySelector: control, querySelectorAll: () => [],
             click() { downloads.push({ name: this.download, blob: blobs.get(this.href) }); },
+            /** 模拟原生弹窗打开；无参数，无返回值。 */
+            showModal() { this.open = true; },
+            /** 模拟原生弹窗关闭；无参数，无返回值。 */
+            close() { this.open = false; },
             remove() {},
         };
     }
@@ -78,6 +82,7 @@ function createHost(saved) {
         globalThis.api = { loadWardrobeLibraries, loadGarments, selectWardrobeLibrary, activateWardrobeLibrary,
             addWardrobeLibrary, importGarmentFiles, applyGarments, readWearerSelections, selectSelectionScope,
             exportGarments, deleteGarments, injectWardrobeContent, deleteGarmentImages, toggleGarmentFavorite,
+            handleGarmentAction, openWardrobeExport, updateWardrobeExport, confirmWardrobeExport, closeWardrobeExport, parseWardrobeData,
             moveGarmentsToLibrary, renderBulkMenu, handleBulkMenu,
             state: () => ({ activeLibraryId, wardrobeLibraries, garments, garmentGroups, checkedGarmentIds, selectedGarmentId, currentCategory, currentGroup, garmentSearch, multiSelectMode }),
             /** 指定批量勾选；参数为服装标识数组，无返回值。 */
@@ -143,6 +148,116 @@ test('大分类保留旧衣柜，隔离导入、标签、穿搭、发送、导�
     assert.equal(api.readWearerSelections().char.size, 0);
     assert.deepEqual(saved.wardrobe_items.map(item => item.id), ['mine']);
     assert.equal(controls.get('.tw-library-tabs').children.length, 2);
+});
+
+test('导出弹窗保留全量备份，按独立衣柜筛选已保存描述，并保留可恢复的搭配', async () => {
+    const ready = { id: 'ready', name: '已识图外套', description: '蓝色外套', image: '', groupIds: ['home'] };
+    const pending = { ...ready, id: 'pending', name: '未识图', description: '', groupIds: [] };
+    const blank = { ...pending, id: 'blank', description: ' \n\t ' };
+    const combination = { ...pending, id: 'combination', componentIds: ['ready'] };
+    const incomplete = { ...combination, id: 'incomplete', componentIds: ['ready', 'pending'] };
+    const emptyOverride = { ...combination, id: 'empty-override', descriptionOverride: true };
+    const foreign = { ...ready, name: '另一衣柜同 ID 的服装', description: '另一衣柜的描述', groupIds: ['foreign'] };
+    const saved = {
+        wardrobe_items: [ready, pending, blank, combination, incomplete, emptyOverride],
+        wardrobe_selections: { user: [], char: [] },
+        wardrobe_groups: [{ id: 'home', name: '居家' }, { id: 'empty', name: '空标签' }],
+        wardrobe_libraries: [{ id: 'default-1', name: 'SFW' }, { id: 'default-2', name: 'NSFW' }, { id: 'custom', name: '旅行/衣柜' }],
+        wardrobe_library_data: {
+            'default-2': { wardrobe_items: [foreign], wardrobe_groups: [{ id: 'foreign', name: '另一衣柜标签' }] },
+            custom: { wardrobe_items: [foreign], wardrobe_groups: [{ id: 'foreign', name: '旅行标签' }] },
+        },
+    };
+    const { api, controls, downloads, state } = createHost(saved);
+    const before = JSON.stringify(saved);
+    await api.handleGarmentAction({ currentTarget: { dataset: { action: 'export-all' } } });
+    const dialog = controls.get('#tw-export-picker');
+    const library = controls.get('[name="export_library"]');
+    const content = controls.get('[name="export_content"]');
+    const count = controls.get('.tw-export-count');
+    assert.equal(dialog.open, true, '桌面与手机共用的入口先打开弹窗');
+    assert.equal(downloads.length, 0, '确认前不下载');
+    assert.deepEqual(library.children.map(option => option.textContent), ['SFW', 'NSFW', '旅行/衣柜']);
+    assert.equal(library.value, 'default-1');
+    assert.equal(content.value, 'all', '保留全部导出为默认选项');
+    assert.equal(count.textContent, '将导出 6 / 6 件服装');
+    // 列表导出只使用已保存的描述，详情草稿不触发隐式保存。
+    controls.set('[name="garment_description"]', { value: '未保存的描述草稿' });
+    content.value = 'described';
+    api.updateWardrobeExport();
+    assert.equal(count.textContent, '将导出 2 / 6 件服装');
+    await api.confirmWardrobeExport({ preventDefault() {} });
+    assert.equal(dialog.open, false);
+    assert.equal(downloads[0].name, 'SFW-2件.json');
+    let backup = JSON.parse(await downloads[0].blob.text());
+    assert.deepEqual(backup.items.map(item => item.id), ['ready', 'combination'], '跳过空白、空正文和成员未完成的搭配');
+    assert.deepEqual(backup.items[1].componentIds, ['ready']);
+    assert.equal(api.parseWardrobeData(backup).items.size, 2, '共享成员去重且导出可重新解析');
+    assert.deepEqual(backup.groups.map(group => group.name), ['居家', '空标签']);
+    api.openWardrobeExport();
+    await api.confirmWardrobeExport({ preventDefault() {} });
+    backup = JSON.parse(await downloads[1].blob.text());
+    assert.equal(backup.items.length, 6, '全部导出仍包含尚未识图的服装和搭配');
+    assert.equal(downloads[1].name, 'SFW-6件.json');
+    api.openWardrobeExport();
+    library.value = 'default-2';
+    content.value = 'described';
+    api.updateWardrobeExport();
+    assert.equal(count.textContent, '将导出 1 / 1 件服装');
+    await api.confirmWardrobeExport({ preventDefault() {} });
+    backup = JSON.parse(await downloads[2].blob.text());
+    assert.equal(downloads[2].name, 'NSFW-1件.json');
+    assert.equal(backup.items[0].description, foreign.description, '同 ID 的其他衣柜记录不会串入当前衣柜');
+    assert.deepEqual(backup.groups.map(group => group.name), ['另一衣柜标签']);
+    api.openWardrobeExport();
+    library.value = 'custom';
+    api.updateWardrobeExport();
+    await api.confirmWardrobeExport({ preventDefault() {} });
+    assert.equal(downloads[3].name, '旅行_衣柜-1件.json', '自建衣柜名称中的路径字符只在文件名中替换');
+    assert.equal(api.state().activeLibraryId, 'default-1', '选择导出目标不会切换当前浏览的衣柜');
+    assert.equal(controls.get('[name="garment_description"]').value, '未保存的描述草稿');
+    assert.equal(state.writes, 0);
+    assert.equal(JSON.stringify(saved), before, '导出不修改已保存数据');
+});
+
+test('空衣柜及无描述时不下载，取消不改数据，原图读取失败保留选项可重试', async () => {
+    const pending = { id: 'pending', name: '待识图', description: '  ', image: 'user/images/tavern_wardrobe/missing.png', groupIds: [] };
+    const saved = { wardrobe_items: [pending], wardrobe_groups: [], wardrobe_selections: { user: [], char: [] } };
+    const { api, controls, downloads, state } = createHost(saved);
+    api.openWardrobeExport();
+    const dialog = controls.get('#tw-export-picker');
+    const library = controls.get('[name="export_library"]');
+    const content = controls.get('[name="export_content"]');
+    const button = controls.get('[data-action="confirm-export"]');
+    content.value = 'described';
+    api.updateWardrobeExport();
+    assert.equal(button.disabled, true);
+    assert.match(controls.get('.tw-export-status').textContent, /先识图并保存描述/);
+    await api.confirmWardrobeExport({ preventDefault() {} });
+    assert.equal(downloads.length, 0, '被排除的记录不读取缺失原图');
+    library.value = 'default-2';
+    api.updateWardrobeExport();
+    assert.match(controls.get('.tw-export-status').textContent, /还没有服装/);
+    api.closeWardrobeExport();
+    assert.equal(dialog.open, false);
+    api.openWardrobeExport();
+    const exporting = api.confirmWardrobeExport({ preventDefault() {} });
+    assert.equal(button.disabled, true, '开始导出立即禁止重复提交');
+    await api.confirmWardrobeExport({ preventDefault() {} });
+    await exporting;
+    assert.equal(dialog.open, true, '缺失原图时保留弹窗');
+    assert.equal(library.value, 'default-1');
+    assert.equal(content.value, 'all');
+    assert.equal(button.disabled, false, '失败后允许重新导出');
+    assert.ok(controls.get('.tw-export-status').textContent);
+    assert.equal(downloads.length, 0, '不生成缺失原图的文件');
+    assert.equal(state.writes, 0);
+    api.activateWardrobeLibrary('default-2');
+    api.openWardrobeExport();
+    assert.equal(dialog.open, true, '当前衣柜为空时仍能打开弹窗选择其他衣柜');
+    library.value = 'default-1';
+    api.updateWardrobeExport();
+    assert.equal(button.disabled, false);
 });
 
 test('旧默认名称升级为 SFW、NSFW，保留自定义名称和原分区数据', () => {
