@@ -193,24 +193,26 @@ renderBulkState = () => {};
 showGarmentDescription = () => {};
 globalThis.api = { parseWardrobeData, parseWardrobeFile, loadGarments, exportGarments, importGarmentFiles, importGarments, applyGarments,
     assignGarmentGroup, handleGarmentTagPicker, filterGarmentGroupOptions, setLibraryStatus, toggleGarmentFavorite, selectGarment,
-    migrateLegacyImages, loadImageDataUrl, handleGarmentAction, injectWardrobeContent, deleteGarmentImages,
+    migrateLegacyImages, loadImageDataUrl, readGarmentImage, loadCachedGarmentImage, handleGarmentAction, injectWardrobeContent, deleteGarmentImages,
     deleteGarments, addGarmentGroup, deleteGarmentGroup, moveCheckedGarments, selectAllGarments,
     readWearerSelections, selectWearer, renderWearerState, handleBulkAction, toggleMultiSelect, checkGarment, renderBulkState: actualRenderBulkState,
     searchGarments, sortGarments,
     handleGarmentTransfer, selectSelectionScope,
     loadSendImageDataUrl, openImageReplacement, replaceGarmentImage, updateCheckedGarments,
-    openGarmentGroupManager, saveGarmentGroups, reorderGarmentGroup, getFilterGarmentGroups, updateCategory,
+    openGarmentGroupManager, saveGarmentGroups, reorderDraftRow, dragDraftRow, getFilterGarmentGroups, updateCategory,
     updateGarmentGroupSelection, deleteManagedGarmentGroups,
     renderGarmentImage, openGarmentImage, closeGarmentImage,
     openCombinationEditor, closeCombinationEditor, saveCombination, saveSelectedGarment,
     buildWardrobeContent, buildWearerContent, getGarmentDescription, matchesGarmentFilter, renderGarmentDetails,
     openImageImport, closeImageImport, addPendingImports, addImportLink, selectPendingImports, confirmImageImport,
+    setDetailsDirty,
     pendingImports: () => pendingGarmentImports,
     state: () => ({ garments, garmentGroups, garmentGroupFilters, currentCategory, currentGroup, selectedGarmentId, checkedGarmentIds, multiSelectMode }),
     selectGroup: id => { currentGroup = id; },
     showIds: ids => { visibleGarmentIds = new Set(ids); },
     selectItem: id => { selectedGarmentId = id; },
     sendType: type => { sendSettings.content_type = type; },
+    sendImageQuality: quality => { sendSettings.image_quality = quality; },
     selectCategory: id => { currentCategory = id; },
     renderLibrary: () => { renderGarmentGroups = () => {}; actualRenderGarmentLibrary(); },
     renderFullLibrary: actualRenderGarmentLibrary,
@@ -316,11 +318,25 @@ async function main() {
     control('[name="garment_description"]').value = blue.description;
     api.renderWearerState();
     assert.ok(wearerInputs.every(input => !input.checked), '未分配的服装不能默认允许任一角色穿');
-    // 通过真实的复选框处理函数验证：保存详情刷新控件后仍应保留本次勾选意图。
+    control('[name="garment_name"]').value = '未保存的新名称';
+    control('[name="garment_description"]').value = '未保存的新描述';
+    api.setDetailsDirty(true);
+    const beforeWearer = detailRefreshes;
+    // 通过真实的复选框处理函数验证：角色勾选与详情草稿独立保存。
     wearerInputs[1].checked = true;
     api.selectWearer({ target: { closest: () => wearerInputs[1] } });
     assert.equal(api.readWearerSelections().char.has('blue'), true, '只勾选 Char 时保存 Char 归属');
     assert.equal(api.readWearerSelections().user.has('blue'), false, 'Char 服装不得自动分配给 USER');
+    assert.equal(api.state().garments.get('blue').name, blue.name, '勾选角色不提交名称草稿');
+    assert.equal(api.state().garments.get('blue').description, blue.description, '勾选角色不提交描述草稿');
+    assert.equal(control('[name="garment_description"]').value, '未保存的新描述');
+    assert.equal(detailRefreshes, beforeWearer, '角色勾选不重填详情');
+    confirmation = false;
+    await api.selectGarment({ target: { closest: selector => selector === '[data-garment]' ? { dataset: { garment: 'red' } } : null } });
+    confirmation = true;
+    assert.equal(api.state().selectedGarmentId, 'blue', '取消切换留在当前服装');
+    assert.equal(control('[name="garment_name"]').value, '未保存的新名称');
+    assert.equal(control('[data-action="save-garment"]').dataset.dirty, 'true');
     wearerInputs[0].checked = true;
     api.selectWearer({ target: { closest: () => wearerInputs[0] } });
     assert.ok(wearerInputs.every(input => input.checked), '手动分别勾选两边才允许共享');
@@ -335,6 +351,10 @@ async function main() {
     wearerInputs[0].checked = false;
     api.selectWearer({ target: { closest: () => wearerInputs[0] } });
     assert.ok(wearerInputs.every(input => !input.checked), '全部取消后不向任一角色分配');
+    assert.equal(control('[name="garment_description"]').value, '未保存的新描述', '取消归属也保留草稿');
+    control('[name="garment_name"]').value = blue.name;
+    control('[name="garment_description"]').value = blue.description;
+    api.setDetailsDirty(false);
     api.applyGarments(['blue', 'red'], 'user');
     api.applyGarments(['blue'], 'char');
     assert.equal(scriptVariables.wardrobe_selections.user.length, 2, '首页应用保存到共用脚本变量');
@@ -411,7 +431,7 @@ async function main() {
     }
     api.applyGarments(['blue', 'red'], 'user');
     api.applyGarments(['blue'], 'char');
-    api.moveCheckedGarments({ currentTarget: { value: 'add:empty' } });
+    api.moveCheckedGarments('add:empty');
     assert.equal(api.state().garments.get('red').groupIds[0], 'empty');
     assert.deepEqual(scriptVariables.wardrobe_items.find(item => item.id === 'blue').groupIds, ['slim', 'empty'], '批量添加保留原标签并写入存档');
 
@@ -581,6 +601,7 @@ async function main() {
     await checkFilterGroups();
     checkOriginalImage();
     await checkImageSides();
+    await checkImageCacheLimit();
     console.log('通过多选与操作栏显隐、衣柜导出回读、标签存储、可见范围全选、批量归类与角色应用、删除及失败回滚检查。');
     console.log('通过图片落盘、逐张迁移及重试、读取缓存、多模态注入、自包含备份、原图格式及删除和导入回滚检查。');
 }
@@ -812,6 +833,11 @@ async function checkLibraryBrowsing() {
     assert.equal(api.state().checkedGarmentIds.size, 0, '修改搜索清除旧勾选');
     assert.deepEqual(list.cards.map(entry => entry.children[2].dataset.garment), ['blue'], '描述搜索忽略大小写与首尾空格');
     assert.equal(control('count-all').textContent, '1', '分类数量跟随搜索结果');
+    api.searchGarments({ currentTarget: { value: '  UNUSED  ' } });
+    api.renderLibrary();
+    assert.deepEqual(list.cards.map(entry => entry.children[2].dataset.garment), ['unused'], '可按 ID 搜索');
+    api.searchGarments({ currentTarget: { value: 'BLUE' } });
+    api.renderLibrary();
     api.selectAllGarments({ currentTarget: { checked: true } });
     assert.deepEqual(Array.from(api.state().checkedGarmentIds), ['blue'], '搜索后全选只包含可见结果');
     api.searchGarments({ currentTarget: { value: '修身' } });
@@ -905,6 +931,33 @@ async function checkImportDuplicatesAndTransfers() {
     assert.equal(uploads, beforeUploads, '覆盖无需重复上传相同原图');
     assert.equal(api.readWearerSelections().user.has('blue'), true, '覆盖保留原 ID 和应用关联');
     assert.equal(api.readWearerSelections().char.has('red'), true);
+
+    const beforeRawImage = JSON.stringify(scriptVariables);
+    assert.equal(await api.importGarmentFiles([new File(['hello'], `${blue.name}.png`, { type: 'image/png' })]), true);
+    assert.equal(JSON.stringify(scriptVariables), beforeRawImage, '纯图片覆盖按跳过处理，保留已有资料');
+    assert.match(control('.tw-library-status').textContent, /跳过 1 件/);
+    const oldBackup = { ...backup, items: [{ id: blue.id, name: blue.name, description: '旧备份正文', image: blue.image }] };
+    const legacyFile = { name: '旧备份.json', text: async () => JSON.stringify(oldBackup) };
+    api.selectItem('red');
+    api.setDetailsDirty(true);
+    control('[name="garment_description"]').value = '导入期间继续编辑的草稿';
+    const beforeImportRefresh = detailRefreshes;
+    assert.equal(await api.importGarmentFiles([legacyFile]), true);
+    assert.equal(api.state().selectedGarmentId, 'red', '导入成功时有草稿就保留当前选择');
+    assert.equal(control('[name="garment_description"]').value, '导入期间继续编辑的草稿');
+    assert.equal(detailRefreshes, beforeImportRefresh);
+    api.setDetailsDirty(false);
+    assert.equal(api.state().garments.get('blue').description, '旧备份正文');
+    assert.equal(api.state().garments.get('blue').favorite, true, '旧备份缺少收藏时保留已有值');
+    assert.equal(api.state().garments.get('blue').category, 'coats', '旧备份缺少分类时保留已有值');
+    oldBackup.items[0].favorite = false;
+    assert.equal(await api.importGarmentFiles([legacyFile]), true);
+    assert.equal(api.state().garments.get('blue').favorite, false, '明确提供的 false 可以覆盖收藏');
+    oldBackup.items[0].description = '';
+    assert.equal(await api.importGarmentFiles([legacyFile]), false, '拒绝使已应用的服装缺少描述的覆盖');
+    assert.equal(api.state().garments.get('blue').description, '旧备份正文');
+    oldBackup.items[0].description = backup.items[0].description;
+    assert.equal(await api.importGarmentFiles([legacyFile]), true);
 
     const beforeOverwriteFailure = JSON.stringify(scriptVariables);
     backup.items[0].description = '保存失败时不能写入的描述';
@@ -1131,6 +1184,13 @@ async function checkLibraryImprovements() {
     const sent = { chat: [{ role: 'user', content: '继续' }] };
     await api.injectWardrobeContent(sent);
     assert.ok(sent.chat[0].content.filter(part => part.type === 'image_url').every(part => part.image_url.url === encodedImage), '聊天发送缓存参考图');
+    const beforeOriginal = imageDecodes;
+    api.sendImageQuality('original');
+    const originalRequest = { chat: [{ role: 'user', content: '继续' }] };
+    await api.injectWardrobeContent(originalRequest);
+    assert.deepEqual(Array.from(originalRequest.chat[0].content.filter(part => part.type === 'image_url'), part => part.image_url.url), [original, portrait]);
+    assert.equal(imageDecodes, beforeOriginal, '切换原图后绕过压缩缓存与画布');
+    api.sendImageQuality('compressed');
     await api.exportGarments(['blue', 'red']);
     const backup = JSON.parse(await blobs.get(downloads.at(-1).href).text());
     assert.deepEqual(backup.items.map(item => item.image), [original, portrait], '压缩不影响备份原图');
@@ -1224,9 +1284,9 @@ async function checkLibraryImprovements() {
     const second = rows.children[1];
     second.previousElementSibling = first;
     first.before = row => { rows.children = [row, first]; second.previousElementSibling = null; };
-    const up = { dataset: { groupMove: 'up' }, closest: () => second, focus() {} };
-    api.reorderGarmentGroup({ target: { closest: () => up } });
-    api.reorderGarmentGroup({ target: { closest: () => up } });
+    const up = { dataset: { sortMove: 'up' }, closest: () => second, focus() {} };
+    api.reorderDraftRow({ target: { closest: () => up } });
+    api.reorderDraftRow({ target: { closest: () => up } });
     assert.equal(rows.children[0].dataset.groupId, 'daily', '上移及到顶边界不丢失编辑行');
     first.querySelector('input[type="text"]').value = '  新修身  ';
     api.selectGroup('slim');
@@ -1378,11 +1438,13 @@ async function checkImportPicker() {
         const releaseUrl = 'https://github.com/example/wardrobe/releases/download/v1/backup.json';
         const proxyUrl = `/proxy/${encodeURIComponent(releaseUrl)}`;
         let proxyResponse = new Response(null, { status: 404 });
+        let proxySignal;
         /** 模拟 GitHub 的跨域拒绝及酒馆代理响应，返回下载结果或原有图片请求结果。 */
         sandbox.window.parent.fetch = async (url, options) => {
             if (url === releaseUrl) throw new TypeError('Failed to fetch');
             if (url !== proxyUrl) return previousFetch(url, options);
             assert.equal(options.credentials, 'omit', '酒馆登录凭据不交给下载代理');
+            proxySignal = options.signal;
             return proxyResponse;
         };
         api.openImageImport();
@@ -1391,6 +1453,27 @@ async function checkImportPicker() {
         await api.confirmImageImport();
         assert.match(status.textContent, /GitHub Release.*添加图片\/文件/);
         assert.equal(dialog.open, true, '代理不可用时保留本次选择');
+        let startBody;
+        const bodyStarted = new Promise(resolve => { startBody = resolve; });
+        proxyResponse = {
+            ok: true,
+            /** 模拟一直挂起的响应体；无参数，超时中止时拒绝。 */
+            json() {
+                startBody();
+                return new Promise((_, reject) => proxySignal.addEventListener('abort', () => reject(proxySignal.reason), { once: true }));
+            },
+        };
+        const beforeTimeout = JSON.stringify(scriptVariables);
+        const pendingDownload = api.confirmImageImport();
+        await bodyStarted;
+        const [timeoutId, timeout] = Array.from(statusTimers).find(([, timer]) => timer.delay === 60_000);
+        timeout.callback();
+        await pendingDownload;
+        assert.equal(statusTimers.has(timeoutId), false, '响应体超时后清理定时器');
+        assert.match(status.textContent, /backup\.json.*超时/);
+        assert.equal(JSON.stringify(scriptVariables), beforeTimeout, '超时不提交部分导入结果');
+        assert.equal(dialog.open, true);
+        assert.equal(control('[data-action="confirm-import"]').disabled, false, '超时恢复导入按钮，保留待选项');
         proxyResponse = Response.json({ format: 'tw-wardrobe', version: 1, groups: [], items: [red] });
         await api.confirmImageImport();
         assert.equal(dialog.open, false, '代理下载后走同一套备份导入');
@@ -1558,6 +1641,22 @@ async function checkCombinations() {
     api.openCombinationEditor({ currentTarget: { dataset: { action: 'create-combination' } } });
     assert.equal(rows.children.length, members.length, '可选所有分类的普通服装，禁止嵌套搭配');
     assert.equal(dialog.querySelectorAll().length, 4, '以现有搭配继续组合时展开并去重成员');
+    const firstRow = rows.children[0];
+    const secondRow = rows.children[1];
+    firstRow.parentElement = rows;
+    secondRow.getBoundingClientRect = () => ({ top: 0, height: 40 });
+    secondRow.after = row => { rows.children.splice(0, 2, secondRow, row); };
+    const transfer = { setData() {} };
+    api.dragDraftRow({
+        type: 'dragstart', currentTarget: rows, dataTransfer: transfer,
+        target: { closest: selector => selector === '[data-sort-row]' ? firstRow : {} },
+    });
+    const dropEvent = { currentTarget: rows, dataTransfer: transfer, clientY: 30, preventDefault() {}, stopPropagation() {}, target: { closest: () => secondRow } };
+    api.dragDraftRow({ ...dropEvent, type: 'dragover' });
+    assert.equal(secondRow.dataset.dropPosition, 'after');
+    api.dragDraftRow({ ...dropEvent, type: 'drop' });
+    assert.equal(secondRow.dataset.dropPosition, undefined, '放下后清除位置提示');
+    assert.equal(JSON.stringify(scriptVariables), beforeOpening, '拖动只调整草稿顺序');
     nameInput.value = '自定义搭配';
     const beforeSave = JSON.stringify(scriptVariables);
     writesFail = true;
@@ -1571,12 +1670,14 @@ async function checkCombinations() {
     const created = api.state().garments.get(api.state().selectedGarmentId);
     assert.equal(created.name, '自定义搭配');
     assert.equal(created.componentIds.length, 4);
+    assert.equal(created.componentIds[0], secondRow.children[0].value, '按拖拽后的顺序保存搭配');
     assert.equal(api.state().multiSelectMode, false);
     assert.equal(api.readWearerSelections().user.size, 0, '合成搭配不擅自修改角色应用选择');
     control('[name="garment_name"]').value = created.name;
     control('[name="garment_description"]').value = '手动编辑后的整套描述';
     control('[name="garment_category"]').value = 'outfits';
     api.openCombinationEditor({ currentTarget: { dataset: { action: 'edit-combination' } } });
+    assert.deepEqual(rows.children.slice(0, 4).map(row => row.children[0].value), Array.from(created.componentIds), '编辑搭配按已保存顺序还原成员');
     nameInput.value = '修改后的搭配';
     rows.children[0].children[0].checked = false;
     api.saveCombination({ preventDefault() {} });
@@ -1682,7 +1783,6 @@ async function checkMultipleTags() {
     document.createElement = tag => tag === 'dialog' ? createImportDialog() : createLibraryNode();
     document.createDocumentFragment = createLibraryNode;
     controls.set('.tw-group-tabs', createLibraryNode());
-    controls.set('.tw-bulk-group', createLibraryNode());
     const fieldset = createLibraryNode();
     // 详情标签只有复选框行，此处保持与真实 DOM 相同的后代查询结果。
     fieldset.querySelectorAll = () => fieldset.children.map(label => label.children[0]);
@@ -1726,15 +1826,15 @@ async function checkMultipleTags() {
     assert.equal(control('[name="garment_description"]').value, '未保存描述');
     api.showIds(['blue', 'red']);
     api.selectAllGarments({ currentTarget: { checked: true } });
-    api.moveCheckedGarments({ currentTarget: { value: 'add:summer' } });
-    api.moveCheckedGarments({ currentTarget: { value: 'add:summer' } });
+    api.moveCheckedGarments('add:summer');
+    api.moveCheckedGarments('add:summer');
     assert.deepEqual(scriptVariables.wardrobe_items[0].groupIds, ['home', 'summer', 'formal'], '重复批量添加不重复也不覆盖');
     assert.deepEqual(scriptVariables.wardrobe_items[1].groupIds, ['summer']);
-    api.moveCheckedGarments({ currentTarget: { value: 'remove:home' } });
+    api.moveCheckedGarments('remove:home');
     assert.deepEqual(scriptVariables.wardrobe_items[0].groupIds, ['summer', 'formal'], '批量移除只影响指定标签');
     const beforeFailure = JSON.stringify(scriptVariables);
     writesFail = true;
-    api.moveCheckedGarments({ currentTarget: { value: '' } });
+    api.moveCheckedGarments('');
     writesFail = false;
     assert.equal(JSON.stringify(scriptVariables), beforeFailure, '批量保存失败保留全部标签');
     await api.exportGarments(['blue']);
@@ -1752,7 +1852,7 @@ async function checkMultipleTags() {
     api.selectGroup('*');
     api.renderFullLibrary();
     api.selectAllGarments({ currentTarget: { checked: true } });
-    api.moveCheckedGarments({ currentTarget: { value: '' } });
+    api.moveCheckedGarments('');
     assert.ok(scriptVariables.wardrobe_items.every(item => item.groupIds.length === 0), '清空后所有所选服装回到未分组');
     // 用数百个标签验证下拉搜索只过滤选项，不把搜索外的勾选从存档中删掉。
     scriptVariables.wardrobe_groups = Array.from({ length: 300 }, (_, index) => ({ id: `large-${index}`, name: index === 0 ? 'Summer' : `标签${String(index).padStart(3, '0')}` }));
@@ -2198,6 +2298,43 @@ async function checkImageSides() {
     assert.ok(preview.children.every(button => button.disabled));
     document.createElement = previousCreate;
     console.log('通过正背面独立替换、双图迁移备份恢复、失败回滚、图号复用与共享文件清理检查。');
+}
+
+/**
+ * 验证缓存合并并发、按最近使用淘汰及超限单图释放，并检查 Blob 读取错误。
+ * @returns {Promise<void>} 所有缓存与读取器断言完成。
+ */
+async function checkImageCacheLimit() {
+    const cache = { entries: new Map(), bytes: 0 };
+    let reads = 0;
+    /** 返回约占 6 MiB 的参考图数据；无参数，返回数据地址。 */
+    const load = async () => {
+        reads++;
+        return `data:image/png;base64,${'A'.repeat(3 * 1024 * 1024)}`;
+    };
+    const first = api.loadCachedGarmentImage(cache, 'first', load);
+    assert.equal(api.loadCachedGarmentImage(cache, 'first', load), first, '同图共用进行中的读取任务');
+    await first;
+    await api.loadCachedGarmentImage(cache, 'second', load);
+    await api.loadCachedGarmentImage(cache, 'first', load);
+    await api.loadCachedGarmentImage(cache, 'third', load);
+    assert.equal(reads, 3);
+    assert.deepEqual([...cache.entries.keys()], ['first', 'third'], '淘汰最近最少使用的条目');
+    assert.ok(cache.bytes <= 16 * 1024 * 1024);
+    await api.loadCachedGarmentImage(cache, 'oversized', async () => 'A'.repeat(9 * 1024 * 1024));
+    assert.equal(cache.entries.has('oversized'), false, '超限单图返回后不留缓存');
+
+    const previousReader = sandbox.window.parent.FileReader;
+    sandbox.window.parent.FileReader = class {
+        /** 模拟读取失败；无参数，无返回值。 */
+        readAsDataURL() { this.onerror(); this.onloadend(); }
+    };
+    try {
+        await assert.rejects(api.readGarmentImage(new Blob([], { type: 'image/png' })), { message: '无法读取图片。' });
+        await assert.rejects(api.readGarmentImage(new File([], '文件.png', { type: 'image/png' })), /无法读取图片：文件.png/);
+    } finally {
+        sandbox.window.parent.FileReader = previousReader;
+    }
 }
 
 // 使用已有的内置测试运行器等待主流程，异步流程意外悬空时必须失败，避免漏跑后续断言。

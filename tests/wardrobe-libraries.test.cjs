@@ -384,7 +384,7 @@ test('从移动菜单将 NSFW 服装移入 SFW，保留资料并清理原衣柜�
         wardrobe_items: [{ ...other, id: 'same', name: '目标原有服装' }],
         wardrobe_groups: [{ id: 'target-home', name: '居家', filters: ['tops'] }, { id: 'collision', name: '目标独有标签' }],
         wardrobe_selections: targetChoices,
-        wardrobe_library_data: { 'default-2': { wardrobe_items: [item, other],
+        wardrobe_library_data: { 'default-2': { wardrobe_items: [item, other], wardrobe_active_id: 'same',
             wardrobe_groups: [{ id: 'home', name: '居家', filters: ['coats'] }, { id: 'collision', name: '源标签', filters: ['favorites'] }],
             wardrobe_selections: choices, wardrobe_scoped_selections: { character: choices, chat: choices }, wardrobe_selection_scope: 'chat' } },
     };
@@ -413,6 +413,7 @@ test('从移动菜单将 NSFW 服装移入 SFW，保留资料并清理原衣柜�
     assert.equal(saved.wardrobe_groups.find(group => group.id === 'collision').name, '目标独有标签');
     assert.deepEqual(saved.wardrobe_selections, targetChoices, '不改动目标已有应用，不自动应用新服装');
     const source = saved.wardrobe_library_data['default-2'];
+    assert.equal(source.wardrobe_active_id, null, '同次提交清理源衣柜的旧单选 ID');
     for (const record of [source.wardrobe_selections, ...Object.values(source.wardrobe_scoped_selections)]) {
         assert.deepEqual(record.user, ['stay']);
         assert.deepEqual(record.char, []);

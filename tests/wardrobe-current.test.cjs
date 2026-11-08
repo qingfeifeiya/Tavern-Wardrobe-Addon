@@ -10,11 +10,12 @@ const saved = {};
 let chat = [];
 let chatId = 'chat-a';
 let writesFail = false;
+let messageVariableReads = 0;
 const controls = new Map();
 const wearerInputs = ['user', 'char'].map(wearer => ({ dataset: { wearer }, disabled: false, checked: false }));
 const sendStatus = { textContent: '', dataset: {} };
 const sendForm = {
-    elements: { content_type: { value: 'text' }, position: { value: 'user_end' }, marker_mode: { value: 'strip' }, send_content_rating: { checked: true }, outfit_history_count: { value: '2' } },
+    elements: { content_type: { value: 'text' }, position: { value: 'user_end' }, marker_mode: { value: 'strip' }, send_content_rating: { checked: true }, outfit_history_count: { value: '2' }, image_quality: { value: 'compressed' } },
     querySelector: () => sendStatus,
 };
 const sandbox = {
@@ -24,11 +25,18 @@ const sandbox = {
         getContext: () => ({ chat, characterId: 0, characters: [{ avatar: 'card.png' }] }),
     },
     getScriptId: () => 'wardrobe-test',
-    getVariables: option => option.type === 'message' ? chat[option.message_id].variables?.[0] ?? {} : saved,
+    /** 记录整楼变量读取次数；参数为变量作用域，返回当前存档。 */
+    getVariables(option) {
+        if (option.type !== 'message') return saved;
+        messageVariableReads++;
+        const floor = chat[option.message_id];
+        return floor.variables?.[floor.swipe_id ?? 0] ?? {};
+    },
     /** 模拟存档提交及失败；参数为更新对象，无返回值。 */
     insertOrAssignVariables(data, option) {
         if (writesFail) throw new Error('存储失败');
-        const target = option.type === 'message' ? (chat[option.message_id].variables ??= [{}])[0] : saved;
+        const floor = chat[option.message_id];
+        const target = option.type === 'message' ? ((floor.variables ??= [])[floor.swipe_id ?? 0] ??= {}) : saved;
         Object.assign(target, structuredClone(data));
     },
     /** 模拟按楼层写入原文和当前回复页；参数为更新列表及刷新选项，保存后完成。 */
@@ -56,7 +64,7 @@ const hooks = `
 panel = testPanel;
 sendForm = testSendForm;
 renderGarmentLibrary = () => {};
-loadSendImageDataUrl = async image => image;
+loadSendImageDataUrl = async (image, quality) => quality === 'original' ? image : '压缩:' + image;
 globalThis.api = {
     loadGarments, readWearerSelections, saveWearerSelections, pruneDeletedSelections, applyGarments,
     resolveCurrentOutfits, readEffectiveSelections, clampCurrentAnchors, renderWearerState,
@@ -511,8 +519,13 @@ async function checkIsolatedOutfits() {
 
     sendForm.elements.outfit_history_count.value = '4';
     sendForm.elements.content_type.value = 'text_image';
+    sendForm.elements.image_quality.value = 'original';
     api.saveSendSettings({ preventDefault() {} });
-    chat.push({ mes: '即将替换的回复' });
+    assert.equal(saved.wardrobe_send.image_quality, 'original', '表单保存画质选项');
+    const turn = chat.at(-1);
+    turn.swipe_id = 1;
+    turn.variables = [{ 'wardrobe_outfit:wardrobe-test:default-1': { user: ['blue'], char: ['pants'] } }];
+    chat.push({ is_system: true, mes: '用户和回复之间的系统楼层' }, { mes: '即将替换的回复' }, { is_system: true, mes: '回复后的系统楼层' });
     reply = '{}';
     const input = { role: 'user', content: '继续剧情' };
     const regenerated = { messages: [input], model: 'host-model', proxy_password: 'host-key' };
@@ -523,11 +536,15 @@ async function checkIsolatedOutfits() {
     assert.deepEqual(JSON.parse(parts[0].text.split('\n')[1]).map(floor => floor.content.trim()),
         ['最近用户楼层', '最近角色楼层', '本次输入', '上一轮正文', '继续剧情']);
     assert.equal(parts.filter(part => part.type === 'image_url').length, 3, '候选图片送到选装请求');
+    assert.ok(parts.filter(part => part.type === 'image_url').every(part => part.image_url.url === image), '独立选装使用原图选项');
+    assert.deepEqual(turn.variables[1]['wardrobe_outfit:wardrobe-test:default-1'].user, ['red'], '跨过系统楼层写回原始用户楼层与当前回复页');
+    assert.equal(messageVariableReads, 0, '直接读取当前回复页的衣柜快照，无需克隆整楼变量');
     assert.equal(received[2].reverse_proxy, 'https://wardrobe.example.test/v1');
     assert.equal(received[2].proxy_password, 'wardrobe-key');
     assert.equal(received[2].model, 'wardrobe-model');
     assert.equal(regenerated.proxy_password, 'host-key', '独立连接不覆盖主连接的鉴权');
     assert.equal(regenerated.messages[1].content.filter(part => part.type === 'image_url').length, 2, '主请求仅附两个角色选中的参考图');
+    assert.ok(regenerated.messages[1].content.filter(part => part.type === 'image_url').every(part => part.image_url.url === image), '独立选装的主请求也使用原图');
     assert.equal(regenerated.messages[2], input);
 
     const imageRequest = { messages: [{ role: 'user', content: '编写生图提示词' }] };
@@ -535,6 +552,11 @@ async function checkIsolatedOutfits() {
     await api.applyIsolatedOutfits(imageRequest);
     assert.deepEqual(imageRequest.messages[1], regenerated.messages[1], '图文模式下辅助生成复用主请求的实际穿着参考图');
     assert.equal(received.length, 3, '附加参考图也不触发选装');
+    const continuation = { type: 'continue', messages: [{ role: 'user', content: '保留已选穿搭' }] };
+    api.markOutfitChatPrompt({ prompt: continuation.messages }, false);
+    await api.applyIsolatedOutfits(continuation);
+    assert.equal(received.length, 3, '续写没有新用户楼层，不重复选装');
+    assert.match(continuation.messages[0].content, /红衣独有描述/);
 
     sendForm.elements.outfit_history_count.value = '2.5';
     api.saveSendSettings({ preventDefault() {} });

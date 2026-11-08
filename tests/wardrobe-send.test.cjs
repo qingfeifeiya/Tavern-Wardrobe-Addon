@@ -171,9 +171,15 @@ sandbox.insertOrAssignVariables = (data, option) => {
     assert.equal(option.type, 'script', '旧选择迁移只写入共用脚本变量');
     Object.assign(scriptVariables, structuredClone(data));
 };
+sandbox.deleteVariable = (key, option) => {
+    assert.equal(option.type, 'chat');
+    assert.deepEqual(scriptVariables.wardrobe_selections.char, [item.id], '先写入迁移结果再删除聊天旧字段');
+    delete chatVariables[key];
+};
 loadGarments();
 assert.equal(readWearerSelections().char.has(item.id), true, '旧版单套服装应保留为 Char 选择');
 assert.deepEqual(scriptVariables.wardrobe_selections.char, [item.id], '旧选择持久迁移到共用存档');
+assert.equal(Object.hasOwn(chatVariables, 'wardrobe_active_id'), false, '只清理已迁移的旧聊天单选字段');
 chatVariables.wardrobe_selections = { user: [item.id, item.id, 'missing'], char: [second.id] };
 assert.equal(readWearerSelections().char.has(item.id), true, '迁移后其他聊天旧值不覆盖共用选择');
 delete scriptVariables.wardrobe_selections;

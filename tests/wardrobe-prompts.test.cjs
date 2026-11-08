@@ -27,7 +27,7 @@ function createForm(fields, owner = '') {
 const forms = new Map(['user', 'char', 'image'].map(owner => [`[data-template-owner="${owner}"]`, createForm(['single', 'wardrobe'], owner)]));
 const descriptionForm = createForm(['outfit', 'item']);
 forms.set('.tw-description-form', descriptionForm);
-const sendForm = createForm(['content_type', 'position', 'marker_mode', 'send_content_rating', 'outfit_history_count']);
+const sendForm = createForm(['content_type', 'position', 'marker_mode', 'send_content_rating', 'outfit_history_count', 'image_quality']);
 sendForm.elements.content_type.value = 'text';
 sendForm.elements.position.value = 'user_end';
 sendForm.elements.marker_mode.value = 'strip';
@@ -372,7 +372,8 @@ async function main() {
     assert.deepEqual(Object.keys(backup).sort(), ['format', 'settings', 'version']);
     assert.equal(backup.format, 'tw-wardrobe-settings');
     assert.deepEqual(Object.keys(backup.settings).sort(), ['description_prompts', 'send', 'templates']);
-    assert.deepEqual(Object.keys(backup.settings.send).sort(), ['content_type', 'marker_mode', 'outfit_history_count', 'position', 'send_content_rating']);
+    assert.deepEqual(Object.keys(backup.settings.send).sort(), ['content_type', 'image_quality', 'marker_mode', 'outfit_history_count', 'position', 'send_content_rating']);
+    assert.equal(backup.settings.send.image_quality, 'compressed', '旧设置默认发送压缩参考图');
     assert.equal(backup.settings.send.send_content_rating, true, '设置备份包含分级开关');
     assert.equal(backup.settings.send.marker_mode, 'strip', '导出包含默认换装记录模式');
     assert.deepEqual(Object.keys(backup.settings.description_prompts).sort(), ['item', 'outfit']);
@@ -389,6 +390,7 @@ async function main() {
     backup.settings.send.position = 'context_end';
     backup.settings.send.marker_mode = 'keep';
     backup.settings.send.outfit_history_count = 6;
+    backup.settings.send.image_quality = 'original';
     backup.settings.send.send_content_rating = false;
     backup.settings.templates.user.single = '恢复的 USER 模板 {{name}}';
     backup.settings.description_prompts.outfit = '恢复的服装提示词';
@@ -409,12 +411,19 @@ async function main() {
     assert.equal(saved.wardrobe_send.marker_mode, 'keep', '导入保存换装记录模式');
     assert.equal(sendForm.elements.marker_mode.value, 'keep', '导入后刷新换装记录选项');
     assert.equal(sendForm.elements.outfit_history_count.value, '6', '历史楼层数随设置备份恢复');
+    assert.equal(saved.wardrobe_send.image_quality, 'original', '设置备份保留参考图画质');
+    assert.equal(sendForm.elements.image_quality.value, 'original', '导入后回填画质设置');
     assert.equal(saved.wardrobe_send.send_content_rating, false, '设置导入保留关闭分级');
     assert.equal(sendForm.elements.send_content_rating.checked, false, '设置导入回填分级开关');
     const legacyBackup = structuredClone(backup);
     delete legacyBackup.settings.send.marker_mode;
     delete legacyBackup.settings.send.outfit_history_count;
     delete legacyBackup.settings.send.send_content_rating;
+    delete legacyBackup.settings.send.image_quality;
+    assert.equal(api.parseWardrobeSettingsData(legacyBackup).send.image_quality, 'compressed', '旧备份默认发送压缩参考图');
+    const invalidQuality = structuredClone(backup);
+    invalidQuality.settings.send.image_quality = null;
+    assert.throws(() => api.parseWardrobeSettingsData(invalidQuality), /画质设置无效/);
     assert.equal(api.parseWardrobeSettingsData(legacyBackup).send.send_content_rating, true, '旧设置备份默认开启分级');
     const invalidRating = structuredClone(backup);
     invalidRating.settings.send.send_content_rating = 'false';
