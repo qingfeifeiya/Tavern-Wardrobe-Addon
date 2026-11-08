@@ -200,6 +200,7 @@ globalThis.api = { parseWardrobeData, parseWardrobeFile, loadGarments, exportGar
     handleGarmentTransfer, selectSelectionScope,
     loadSendImageDataUrl, openImageReplacement, replaceGarmentImage, updateCheckedGarments,
     openGarmentGroupManager, saveGarmentGroups, reorderGarmentGroup, getFilterGarmentGroups, updateCategory,
+    updateGarmentGroupSelection, deleteManagedGarmentGroups,
     renderGarmentImage, openGarmentImage, closeGarmentImage,
     openCombinationEditor, closeCombinationEditor, saveCombination, saveSelectedGarment,
     buildWardrobeContent, buildWearerContent, getGarmentDescription, matchesGarmentFilter, renderGarmentDetails,
@@ -680,6 +681,22 @@ function createLibraryNode() {
         /** 模拟下载链接移除；节点替身不持有父节点，无参数，无返回值。 */
         remove() {},
     };
+}
+
+/**
+ * 模拟标签管理器的名称和勾选控件，删除行后同步列表，供排序和批量删除共用。
+ * @returns {Object} 保留标签行子控件的节点替身。
+ */
+function createGroupManagerNode() {
+    const node = createLibraryNode();
+    /** 按控件类型读取行内输入框；参数为选择器，返回对应控件。 */
+    node.querySelector = selector => selector === 'input[type="text"]' ? node.children[1] : node.children[0].children[0];
+    /** 模拟行从管理器中移除；无参数，无返回值。 */
+    node.remove = () => {
+        const rows = control('.tw-group-rows');
+        rows.children = rows.children.filter(row => row !== node);
+    };
+    return node;
 }
 
 /**
@@ -1196,17 +1213,13 @@ async function checkLibraryImprovements() {
     dialog.showModal = () => { dialog.open = true; };
     dialog.close = () => { dialog.open = false; };
     const previousCreateElement = document.createElement;
-    document.createElement = () => {
-        const node = createLibraryNode();
-        node.querySelector = () => node.children[0];
-        return node;
-    };
+    document.createElement = createGroupManagerNode;
     api.openGarmentGroupManager();
     document.createElement = previousCreateElement;
     const previousQueryAll = sandbox.testPanel.querySelectorAll;
     sandbox.testPanel.querySelectorAll = selector => selector === '.tw-group-row' ? rows.children : previousQueryAll(selector);
     assert.equal(dialog.open, true);
-    assert.deepEqual(rows.children.map(row => row.children[0].value), ['修身', '日常']);
+    assert.deepEqual(rows.children.map(row => row.querySelector('input[type="text"]').value), ['修身', '日常']);
     const first = rows.children[0];
     const second = rows.children[1];
     second.previousElementSibling = first;
@@ -1215,7 +1228,7 @@ async function checkLibraryImprovements() {
     api.reorderGarmentGroup({ target: { closest: () => up } });
     api.reorderGarmentGroup({ target: { closest: () => up } });
     assert.equal(rows.children[0].dataset.groupId, 'daily', '上移及到顶边界不丢失编辑行');
-    first.children[0].value = '  新修身  ';
+    first.querySelector('input[type="text"]').value = '  新修身  ';
     api.selectGroup('slim');
     const submit = { preventDefault() {} };
     writesFail = true;
@@ -1223,10 +1236,10 @@ async function checkLibraryImprovements() {
     writesFail = false;
     assert.equal(dialog.open, true, '保存失败保留管理表单');
     assert.equal(api.state().garmentGroups.get('slim'), '修身');
-    second.children[0].value = '  ';
+    second.querySelector('input[type="text"]').value = '  ';
     api.saveGarmentGroups(submit);
     assert.match(control('.tw-group-status').textContent, /不能为空/);
-    second.children[0].value = '日常';
+    second.querySelector('input[type="text"]').value = '日常';
     api.saveGarmentGroups(submit);
     assert.equal(dialog.open, false);
     assert.equal(api.state().currentGroup, 'slim', '重命名不改变当前标签 ID');
@@ -1902,17 +1915,18 @@ async function checkFilterGroups() {
     const rows = control('.tw-group-rows');
     const previousCreate = document.createElement;
     const previousQuery = sandbox.testPanel.querySelectorAll;
-    document.createElement = () => {
-        const node = createLibraryNode();
-        node.querySelector = () => node.children[0];
-        return node;
+    document.createElement = createGroupManagerNode;
+    /** 提供管理器行与复选框；参数为选择器，返回当前表单中的控件。 */
+    sandbox.testPanel.querySelectorAll = selector => {
+        if (selector === '.tw-group-row') return rows.children;
+        if (selector === '.tw-group-check input') return rows.children.map(row => row.querySelector('input[type="checkbox"]'));
+        return previousQuery(selector);
     };
-    sandbox.testPanel.querySelectorAll = selector => selector === '.tw-group-row' ? rows.children : previousQuery(selector);
     const submit = { preventDefault() {} };
     api.updateCategory('tops');
     api.openGarmentGroupManager();
-    assert.deepEqual(rows.children.map(row => row.children[0].value), ['日常', '上装专用'], '管理器只管理当前筛选分组');
-    rows.children.find(row => row.dataset.groupId === 'daily').children[0].value = '上装日常';
+    assert.deepEqual(rows.children.map(row => row.querySelector('input[type="text"]').value), ['日常', '上装专用'], '管理器只管理当前筛选分组');
+    rows.children.find(row => row.dataset.groupId === 'daily').querySelector('input[type="text"]').value = '上装日常';
     const beforeFailure = JSON.stringify(scriptVariables);
     writesFail = true;
     api.saveGarmentGroups(submit);
@@ -1930,7 +1944,7 @@ async function checkFilterGroups() {
 
     api.updateCategory('all');
     api.openGarmentGroupManager();
-    rows.children.find(row => row.dataset.groupId === renamed).children[0].value = '日常';
+    rows.children.find(row => row.dataset.groupId === renamed).querySelector('input[type="text"]').value = '日常';
     api.saveGarmentGroups(submit);
     const daily = Array.from(api.state().garmentGroups).find(([, name]) => name === '日常')[0];
     assert.equal(Array.from(api.state().garmentGroups.values()).filter(name => name === '日常').length, 1, '重命名重名直接合并');
@@ -1963,9 +1977,76 @@ async function checkFilterGroups() {
     assert.deepEqual(Array.from(duplicate.items.get('blue').groupIds), ['a']);
     assert.deepEqual(Array.from(duplicate.groupFilters.get('a')), ['tops', 'shoes']);
     assert.throws(() => api.parseWardrobeData({ items: [], groups: [{ id: 'a', name: '无效', filters: ['unknown'] }] }), /筛选归属/);
+
+    // 同时删除已关联服装的标签和跨筛选的空标签，验证批量提交仍遵循单个删除的范围。
+    const keptId = 'keep';
+    scriptVariables.wardrobe_items = [
+        { ...blue, id: 'top', category: 'tops', image: '', groupIds: ['daily'] },
+        { ...red, id: 'shoe', category: 'shoes', image: '', groupIds: ['daily', keptId] },
+    ];
+    scriptVariables.wardrobe_groups = [
+        { id: 'daily', name: '日常' },
+        { id: 'empty', name: '上装专用', filters: ['shoes', 'bottoms'] },
+        { id: keptId, name: '保留标签' },
+    ];
+    api.loadGarments();
+    api.updateCategory('shoes');
+    api.selectGroup('daily');
+    api.openGarmentGroupManager();
+    const selectAll = control('.tw-group-select-all');
+    const deleteButton = control('[data-action="delete-groups"]');
+    const count = control('.tw-group-selection-count');
+    selectAll.type = 'checkbox';
+    selectAll.focus = () => {};
+    control('[data-action="add-group"]').focus = () => {};
+    assert.equal(deleteButton.disabled, true);
+    selectAll.checked = true;
+    api.updateGarmentGroupSelection({ target: selectAll });
+    assert.equal(count.textContent, '已选 3 个');
+    selectAll.checked = false;
+    api.updateGarmentGroupSelection({ target: selectAll });
+    assert.equal(deleteButton.disabled, true, '取消全选后禁用删除');
+    selectAll.checked = true;
+    api.updateGarmentGroupSelection({ target: selectAll });
+    const keptRow = rows.children.find(row => row.dataset.groupId === keptId);
+    const keepCheckbox = keptRow.querySelector('input[type="checkbox"]');
+    keepCheckbox.checked = false;
+    api.updateGarmentGroupSelection({ target: keepCheckbox });
+    assert.equal(selectAll.indeterminate, true);
+    assert.equal(count.textContent, '已选 2 个');
+    keptRow.querySelector('input[type="text"]').value = '未保存的名称';
+    const beforeDelete = JSON.stringify(scriptVariables);
+    confirmation = false;
+    await api.deleteManagedGarmentGroups();
+    confirmation = true;
+    assert.equal(JSON.stringify(scriptVariables), beforeDelete, '取消确认不修改存档');
+    writesFail = true;
+    await api.deleteManagedGarmentGroups();
+    writesFail = false;
+    assert.equal(JSON.stringify(scriptVariables), beforeDelete, '保存失败不产生部分删除');
+    assert.equal(count.textContent, '已选 2 个', '失败保留勾选以便重试');
+    await api.deleteManagedGarmentGroups();
+    assert.deepEqual(rows.children, [keptRow], '批量删除后保留其余草稿行');
+    assert.equal(keptRow.querySelector('input[type="text"]').value, '未保存的名称');
+    assert.equal(api.state().garmentGroups.get(keptId), '保留标签', '删除时不提交重命名草稿');
+    assert.deepEqual(Array.from(api.state().garments.get('shoe').groupIds), [keptId], '保留范围内服装的其他标签');
+    assert.equal(api.state().garments.get('top').groupIds.length, 1, '范围外服装保留标签');
+    assert.ok(Array.from(api.getFilterGarmentGroups('bottoms').values()).includes('上装专用'), '范围外空标签继续保留');
+    assert.equal(api.state().currentGroup, '*', '当前标签被移除后回到全部标签');
+    assert.equal(deleteButton.disabled, true, '删除后清除勾选');
+    control('#tw-group-manager').close();
+    api.updateCategory('all');
+    api.openGarmentGroupManager();
+    selectAll.checked = true;
+    api.updateGarmentGroupSelection({ target: selectAll });
+    await api.deleteManagedGarmentGroups();
+    api.loadGarments();
+    assert.equal(control('#tw-group-manager').open, false, '删完所有标签后退出管理器');
+    assert.equal(api.state().garmentGroups.size, 0, '全部筛选中删除整个衣柜的标签');
+    assert.equal(api.state().garments.size, 2, '删除标签保留服装');
     document.createElement = previousCreate;
     sandbox.testPanel.querySelectorAll = previousQuery;
-    console.log('通过筛选独立空分组、快捷筛选、选择记忆、局部重命名删除、同名合并、备份恢复与失败回滚检查。');
+    console.log('通过筛选独立空分组、快捷筛选、选择记忆、局部重命名、批量删除、同名合并、备份恢复与失败回滚检查。');
 }
 
 /**

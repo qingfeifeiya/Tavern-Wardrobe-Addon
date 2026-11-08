@@ -325,7 +325,7 @@ const PANEL_HTML = `
                     <nav class="tw-group-tabs" aria-label="服装标签"></nav>
                     <div class="tw-group-tools">
                         <button type="button" data-action="add-group" title="新增标签">${icon('plus')}<span>标签</span></button>
-                        <button type="button" data-action="manage-groups" aria-label="管理标签" title="重命名与排序标签">${icon('pencil')}</button>
+                        <button type="button" data-action="manage-groups" aria-label="管理标签" title="重命名、排序或删除标签">${icon('pencil')}</button>
                     </div>
                 </div>
                 <div class="tw-library-toolbar" role="group" aria-label="服装操作">
@@ -464,10 +464,10 @@ const PANEL_HTML = `
         <input class="tw-folder-import" type="file" accept="image/png,image/jpeg,image/webp" webkitdirectory multiple hidden>
         <input class="tw-image-replace" type="file" accept="image/png,image/jpeg,image/webp" hidden>
     </div>
-    <dialog id="tw-ask" aria-labelledby="tw-ask-title" data-danger="false">
+    <dialog id="tw-ask" aria-labelledby="tw-ask-title" aria-describedby="tw-ask-message" data-danger="false">
         <form method="dialog" class="tw-ask-form">
             <h2 id="tw-ask-title"></h2>
-            <p class="tw-ask-message"></p>
+            <p id="tw-ask-message" class="tw-ask-message"></p>
             <input class="tw-ask-input" type="text" autocomplete="off" spellcheck="false" hidden>
             <div class="tw-ask-actions"><button type="button" class="tw-ask-cancel">取消</button><button type="submit" value="ok" class="tw-ask-ok">确定</button></div>
         </form>
@@ -513,7 +513,12 @@ const PANEL_HTML = `
     <dialog id="tw-group-manager" aria-labelledby="tw-group-manager-title">
         <form class="tw-group-form">
             <h2 id="tw-group-manager-title">管理标签</h2>
-            <div class="tw-group-rows"></div>
+            <div class="tw-group-toolbar">
+                <label><input type="checkbox" class="tw-group-select-all" aria-controls="tw-group-rows">全选</label>
+                <span class="tw-group-selection-count" role="status">已选 0 个</span>
+                <button type="button" data-action="delete-groups" aria-haspopup="dialog" aria-controls="tw-ask" disabled>${icon('trash')}<span>删除所选</span></button>
+            </div>
+            <div id="tw-group-rows" class="tw-group-rows"></div>
             <div class="tw-send-actions"><button type="button" data-action="cancel-groups">取消</button><button type="submit">保存</button></div>
             <p class="tw-group-status" role="status" aria-live="polite"></p>
         </form>
@@ -3122,13 +3127,57 @@ const PANEL_CSS = `
 #tw-panel .tw-combination-status,
 #tw-panel .tw-group-status {
     margin-top: 8px;
-    color: var(--tw-danger);
+    color: var(--tw-ink-secondary);
     font-size: 13px;
+}
+
+#tw-panel .tw-combination-status,
+#tw-panel .tw-group-status[data-error="true"] {
+    color: var(--tw-danger);
 }
 
 #tw-panel .tw-combination-status:empty,
 #tw-panel .tw-group-status:empty {
     display: none;
+}
+
+/* 批量操作栏独立于滚动列表，便于长列表选完后直接确认。 */
+#tw-panel .tw-group-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    margin-bottom: 8px;
+    color: var(--tw-ink-secondary);
+    font-size: 13px;
+}
+
+#tw-panel .tw-group-toolbar label,
+#tw-panel .tw-group-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 38px;
+    padding: 0 9px;
+    cursor: pointer;
+}
+
+#tw-panel .tw-group-toolbar button {
+    min-height: 38px;
+    margin-inline-start: auto;
+    padding: 0 10px;
+    border-color: var(--tw-line-strong);
+    color: var(--tw-ink-secondary);
+    font-weight: 600;
+}
+
+#tw-panel .tw-group-toolbar button:not(:disabled) {
+    border-color: var(--tw-danger-border);
+    color: var(--tw-danger);
+}
+
+#tw-panel .tw-group-toolbar button:hover:not(:disabled) {
+    background: var(--tw-danger-bg);
 }
 
 #tw-panel .tw-group-rows {
@@ -3145,11 +3194,17 @@ const PANEL_CSS = `
     gap: 6px;
 }
 
-#tw-panel .tw-group-row input {
+#tw-panel .tw-group-row input[type="text"] {
     flex: 1;
 }
 
+#tw-panel .tw-group-row:has(:checked) input[type="text"] {
+    border-color: var(--tw-selected-border);
+    background: var(--tw-selected);
+}
+
 #tw-panel .tw-group-row button {
+    flex: 0 0 36px;
     width: 36px;
     height: 36px;
     border-color: var(--tw-line-strong);
@@ -4944,7 +4999,9 @@ function initializeWardrobe() {
     panel.querySelector('[data-action="add-garment-group"]').addEventListener('click', addGarmentGroup);
     panel.querySelector('[data-action="manage-groups"]').addEventListener('click', openGarmentGroupManager);
     panel.querySelector('[data-action="cancel-groups"]').addEventListener('click', closeGarmentGroupManager);
+    panel.querySelector('[data-action="delete-groups"]').addEventListener('click', deleteManagedGarmentGroups);
     panel.querySelector('.tw-group-rows').addEventListener('click', reorderGarmentGroup);
+    panel.querySelector('.tw-group-form').addEventListener('change', updateGarmentGroupSelection);
     panel.querySelector('.tw-group-form').addEventListener('submit', saveGarmentGroups);
     for (const button of panel.querySelectorAll('[data-action="toggle-multi"]')) button.addEventListener('click', toggleMultiSelect);
     panel.querySelector('.tw-bulk-actions').addEventListener('click', handleBulkMenu);
@@ -6586,7 +6643,7 @@ async function addGarmentGroup(event) {
 }
 
 /**
- * 只填充当前筛选的标签与排序控件，“全部”管理汇总；取消时丢弃全部草稿。
+ * 只填充当前筛选的标签与操作控件；每次打开时重新建立编辑草稿并清除删除勾选。
  * @returns {void} 打开原生标签管理对话框。
  */
 function openGarmentGroupManager() {
@@ -6596,11 +6653,18 @@ function openGarmentGroupManager() {
         const row = hostDocument.createElement('div');
         row.className = 'tw-group-row';
         row.dataset.groupId = id;
+        const checkLabel = hostDocument.createElement('label');
+        checkLabel.className = 'tw-group-check';
+        const checkbox = hostDocument.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.setAttribute('aria-label', `选择标签：${name}`);
+        checkLabel.append(checkbox);
         const input = hostDocument.createElement('input');
+        input.type = 'text';
         input.value = name;
         input.required = true;
         input.setAttribute('aria-label', `标签名称：${name}`);
-        row.append(input);
+        row.append(checkLabel, input);
         for (const [direction, label] of [['up', '上移'], ['down', '下移']]) {
             const button = hostDocument.createElement('button');
             button.type = 'button';
@@ -6612,7 +6676,62 @@ function openGarmentGroupManager() {
         rows.append(row);
     }
     panel.querySelector('.tw-group-status').textContent = '';
+    updateGarmentGroupSelection();
     panel.querySelector('#tw-group-manager').showModal();
+}
+
+/**
+ * 同步删除工具栏和全选框的半选状态；直接读取表单，排序后勾选仍随原行保留。
+ * @param {Event} [event] 复选框变化事件；不传时只根据当前行刷新状态。
+ * @returns {void} 只更新表单，不写入存档。
+ */
+function updateGarmentGroupSelection(event) {
+    if (event && event.target.type !== 'checkbox') return;
+    const selectAll = panel.querySelector('.tw-group-select-all');
+    const checkboxes = panel.querySelectorAll('.tw-group-check input');
+    let selected = 0;
+    for (const checkbox of checkboxes) {
+        if (event?.target === selectAll) checkbox.checked = selectAll.checked;
+        if (checkbox.checked) selected++;
+    }
+    selectAll.checked = selected > 0 && selected === checkboxes.length;
+    selectAll.indeterminate = selected > 0 && selected < checkboxes.length;
+    panel.querySelector('.tw-group-selection-count').textContent = `已选 ${selected} 个`;
+    panel.querySelector('[data-action="delete-groups"]').disabled = selected === 0;
+}
+
+/**
+ * 确认后一次提交当前筛选的所选标签；其余行保留原节点，避免丢失未保存的名称或顺序。
+ * @returns {Promise<void>} 保存失败保留原勾选，便于直接重试。
+ */
+async function deleteManagedGarmentGroups() {
+    const rows = panel.querySelectorAll('.tw-group-row');
+    const selected = Array.from(rows).filter(row => row.querySelector('input[type="checkbox"]').checked);
+    if (!selected.length) return;
+    const count = selected.length;
+    const scope = currentCategory === 'all' ? '当前衣柜' : `「${CATEGORY_LABELS.get(currentCategory)}」筛选`;
+    if (!await askConfirm('删除所选标签', `将从${scope}移除 ${count} 个标签。服装会保留。`, { confirmText: `删除 ${count} 个标签`, danger: true })) return;
+    const status = panel.querySelector('.tw-group-status');
+    try {
+        saveFilterGarmentGroups(new Map(selected.map(row => [row.dataset.groupId, null])));
+    } catch (error) {
+        recordWardrobeLog('error', 'deleteManagedGarmentGroups：捕获异常', error);
+        status.dataset.error = 'true';
+        status.textContent = String(error);
+        return;
+    }
+    for (const row of selected) row.remove();
+    const message = `已删除 ${count} 个标签`;
+    if (count === rows.length) {
+        closeGarmentGroupManager();
+        panel.querySelector('[data-action="add-group"]').focus();
+        setLibraryStatus(message);
+    } else {
+        updateGarmentGroupSelection();
+        panel.querySelector('.tw-group-select-all').focus();
+        status.dataset.error = 'false';
+        status.textContent = message;
+    }
 }
 
 /**
@@ -6645,17 +6764,22 @@ function reorderGarmentGroup(event) {
  */
 function saveGarmentGroups(event) {
     event.preventDefault();
+    const status = panel.querySelector('.tw-group-status');
     try {
         const edits = new Map();
         for (const row of panel.querySelectorAll('.tw-group-row')) {
-            const name = row.querySelector('input').value.trim();
+            const name = row.querySelector('input[type="text"]').value.trim();
             if (!name) throw new Error('标签名称不能为空。');
             edits.set(row.dataset.groupId, name);
         }
         saveFilterGarmentGroups(edits);
         closeGarmentGroupManager();
         setLibraryStatus('标签名称与顺序已保存');
-    } catch (error) { recordWardrobeLog('error', 'saveGarmentGroups：捕获异常', error); panel.querySelector('.tw-group-status').textContent = String(error); }
+    } catch (error) {
+        recordWardrobeLog('error', 'saveGarmentGroups：捕获异常', error);
+        status.dataset.error = 'true';
+        status.textContent = String(error);
+    }
 }
 
 /**
