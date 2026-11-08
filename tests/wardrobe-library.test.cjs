@@ -149,6 +149,7 @@ const document = {
     createElement: tag => createImageTestNode(tag) ?? (tag === 'dialog' ? createImportDialog() : ({ click() { downloads.push({ href: this.href, name: this.download }); }, remove() {} })),
 };
 const sandbox = {
+    URL,
     window: { parent: {
         document, matchMedia: () => ({ matches: false }), Blob, AbortController,
         FileReader: ImageReader, fetch: imageFetch,
@@ -202,7 +203,7 @@ globalThis.api = { parseWardrobeData, parseWardrobeFile, loadGarments, exportGar
     renderGarmentImage, openGarmentImage, closeGarmentImage,
     openCombinationEditor, closeCombinationEditor, saveCombination, saveSelectedGarment,
     buildWardrobeContent, buildWearerContent, getGarmentDescription, matchesGarmentFilter, renderGarmentDetails,
-    openImageImport, closeImageImport, addPendingImports, selectPendingImports, confirmImageImport,
+    openImageImport, closeImageImport, addPendingImports, addImportLink, selectPendingImports, confirmImageImport,
     pendingImports: () => pendingGarmentImports,
     state: () => ({ garments, garmentGroups, garmentGroupFilters, currentCategory, currentGroup, selectedGarmentId, checkedGarmentIds, multiSelectMode }),
     selectGroup: id => { currentGroup = id; },
@@ -1238,7 +1239,7 @@ async function checkLibraryImprovements() {
 }
 
 /**
- * 验证无需修饰键的文件夹勾选、分次添加、确认前不上传，以及失败重试和对象地址清理。
+ * 验证文件夹勾选、本地文件与链接混合导入，以及确认前不发请求、失败重试和对象地址清理。
  * @returns {Promise<void>} 所有待选面板与真实导入断言通过后结束。
  */
 async function checkImportPicker() {
@@ -1316,7 +1317,75 @@ async function checkImportPicker() {
     assert.equal(api.pendingImports().size, 0, '取消关闭清空待选文件');
     assert.equal(blobs.size, beforeUrls, '取消也释放对象地址');
     assert.equal(api.state().garments.size, 2, '取消不改变现有服装');
-    console.log('通过文件夹直接勾选、分次添加与取消、选择去重、确认前零上传、仅导入所选、失败重试及缩略图释放检查。');
+
+    api.openImageImport();
+    api.addPendingImports([second]);
+    promptValue = 'file:///backup.json';
+    await api.addImportLink();
+    const status = control('.tw-import-status');
+    assert.match(status.textContent, /HTTP 或 HTTPS/);
+    assert.equal(api.pendingImports().size, 1, '无效链接不影响已有本地文件');
+
+    const backupUrl = 'https://files.example.test/download?token=temporary';
+    const previousFetch = sandbox.window.parent.fetch;
+    let downloads = 0;
+    const responses = [new Response(null, { status: 404 }), new Response('<html>分享页面</html>'), Response.json({
+        format: 'tw-wardrobe', version: 1, groups: [{ id: 'slim', name: '修身' }], items: [blue],
+    })];
+    /** 提供备份的失败与成功响应，图片请求继续走原有存储替身；返回本次响应。 */
+    sandbox.window.parent.fetch = async (url, options) => {
+        if (url !== backupUrl) return previousFetch(url, options);
+        assert.equal(options.signal.aborted, false, '备份请求使用可在卸载时取消的信号');
+        return responses[downloads++];
+    };
+    try {
+        promptValue = ` ${backupUrl}#preview `;
+        await api.addImportLink();
+        promptValue = backupUrl;
+        await api.addImportLink();
+        assert.equal(api.pendingImports().size, 2, '链接和本地文件共用待选列表，同一地址只列出一次');
+        assert.equal(downloads, 0, '确认前不下载备份');
+        const uploadsBeforeLink = uploads;
+        await api.confirmImageImport();
+        assert.match(status.textContent, /HTTP 404/);
+        await api.confirmImageImport();
+        assert.match(status.textContent, /未返回有效的 JSON/);
+        assert.equal(uploads, uploadsBeforeLink, '整批备份校验前不上传本地图片');
+        assert.equal(dialog.open, true, '链接失败时保留待选项供重试');
+        await api.confirmImageImport();
+        assert.equal(downloads, 3);
+        assert.equal(dialog.open, false);
+        assert.equal(api.pendingImports().size, 0);
+        const restored = Array.from(api.state().garments.values()).find(item => item.name === blue.name);
+        assert.equal(restored.description, blue.description);
+        assert.equal(api.state().garmentGroups.get(restored.groupIds[0]), '修身');
+        assert.equal(imageFiles.get(restored.image).toString(), 'hello');
+        assert.ok(Array.from(api.state().garments.values()).some(item => item.name === '第二张'));
+
+        const releaseUrl = 'https://github.com/example/wardrobe/releases/download/v1/backup.json';
+        const proxyUrl = `/proxy/${encodeURIComponent(releaseUrl)}`;
+        let proxyResponse = new Response(null, { status: 404 });
+        /** 模拟 GitHub 的跨域拒绝及酒馆代理响应，返回下载结果或原有图片请求结果。 */
+        sandbox.window.parent.fetch = async (url, options) => {
+            if (url === releaseUrl) throw new TypeError('Failed to fetch');
+            if (url !== proxyUrl) return previousFetch(url, options);
+            assert.equal(options.credentials, 'omit', '酒馆登录凭据不交给下载代理');
+            return proxyResponse;
+        };
+        api.openImageImport();
+        promptValue = releaseUrl;
+        await api.addImportLink();
+        await api.confirmImageImport();
+        assert.match(status.textContent, /GitHub Release.*添加图片\/文件/);
+        assert.equal(dialog.open, true, '代理不可用时保留本次选择');
+        proxyResponse = Response.json({ format: 'tw-wardrobe', version: 1, groups: [], items: [red] });
+        await api.confirmImageImport();
+        assert.equal(dialog.open, false, '代理下载后走同一套备份导入');
+        assert.ok(Array.from(api.state().garments.values()).some(item => item.name === red.name));
+    } finally {
+        sandbox.window.parent.fetch = previousFetch;
+    }
+    console.log('通过文件夹勾选、本地与链接混合导入、确认前零下载和上传、失败重试及缩略图释放检查。');
 }
 
 /**

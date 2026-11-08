@@ -16,7 +16,7 @@ function createHost(saved) {
     const downloads = [];
     const blobs = new Map();
     const deleted = [];
-    const state = { fail: false, name: '他人的衣柜', sequence: 0, writes: 0 };
+    const state = { fail: false, name: '他人的衣柜', confirm: true, ask: null, sequence: 0, writes: 0 };
     /** 创建可记录属性的节点；无参数，返回最小 DOM 替身。 */
     function node() {
         return {
@@ -62,13 +62,23 @@ function createHost(saved) {
             state.writes++;
             Object.assign(saved, structuredClone(update));
         },
+        /** 模拟整表替换；参数为新变量表，无返回值，失败时原表保持原样。 */
+        replaceVariables(variables) {
+            if (state.fail) throw new Error('存储失败');
+            state.writes++;
+            for (const key of Object.keys(saved)) delete saved[key];
+            Object.assign(saved, structuredClone(variables));
+        },
         SillyTavern: {
             name1: '用户', name2: '角色', getCurrentChatId: () => 'chat', getRequestHeaders: () => ({}),
             getContext: () => ({ chat: [], characterId: 0, characters: [{ avatar: 'card.png' }] }),
         },
         testPanel: { dataset: {}, querySelector: control, querySelectorAll: () => [], setAttribute() {} },
         /** 返回模拟的异步弹窗结果；参数为弹窗配置，返回确认结果或输入名称。 */
-        testAsk: options => Promise.resolve(options.input === undefined ? true : state.name),
+        testAsk: options => {
+            state.ask = options;
+            return Promise.resolve(options.input === undefined ? state.confirm : state.name);
+        },
         toastr: { error: message => assert.fail(message) }, console,
     };
     const hooks = `
@@ -80,7 +90,7 @@ function createHost(saved) {
         // 此宿主只验证分区业务，弹窗选择异步返回，真实弹窗交互由界面测试覆盖。
         askDialog = testAsk;
         globalThis.api = { loadWardrobeLibraries, loadGarments, selectWardrobeLibrary, activateWardrobeLibrary,
-            addWardrobeLibrary, importGarmentFiles, applyGarments, readWearerSelections, selectSelectionScope,
+            addWardrobeLibrary, deleteWardrobeLibrary, importGarmentFiles, applyGarments, readWearerSelections, selectSelectionScope,
             exportGarments, deleteGarments, injectWardrobeContent, deleteGarmentImages, toggleGarmentFavorite,
             handleGarmentAction, openWardrobeExport, updateWardrobeExport, confirmWardrobeExport, closeWardrobeExport, parseWardrobeData,
             moveGarmentsToLibrary, renderBulkMenu, handleBulkMenu,
@@ -298,6 +308,68 @@ test('新建、取消和保存失败不覆盖现有分区，其他分区引用�
     api.selectWardrobeLibrary({ target: { closest: () => ({ dataset: { libraryId: 'default-1' } }) } });
     assert.notEqual(api.state().activeLibraryId, 'default-1');
     assert.match(controls.get('.tw-library-status').textContent, /等待当前导入/);
+});
+
+test('可确认删除空衣柜和已有服装的自建衣柜，保留默认分区及共享图片', async () => {
+    const shared = 'user/images/tavern_wardrobe/shared.png';
+    const unused = 'user/images/tavern_wardrobe/unused.png';
+    const item = { id: 'coat', name: '外套', description: '', image: shared, backImage: unused, groupIds: ['tag'] };
+    const sfw = [{ ...item, id: 'mine', backImage: '', groupIds: [] }];
+    const nsfw = { wardrobe_items: [{ ...sfw[0], id: 'other' }] };
+    const saved = {
+        wardrobe_active_library: 'custom',
+        wardrobe_libraries: [{ id: 'default-1', name: 'SFW' }, { id: 'default-2', name: 'NSFW' }, { id: 'custom', name: '衣柜3' }],
+        wardrobe_items: sfw, wardrobe_selections: { char: ['mine'] }, wardrobe_send: { content_type: 'text' },
+        wardrobe_library_data: { 'default-2': nsfw, custom: {
+            wardrobe_items: [item], wardrobe_groups: [{ id: 'tag', name: '标签' }],
+            wardrobe_selections: { char: ['coat'] }, wardrobe_scoped_selections: { chat: { char: ['coat'] } },
+        } },
+    };
+    const { api, state, controls, deleted } = createHost(saved);
+    const button = controls.get('[data-action="delete-library"]');
+    assert.equal(button.hidden, false);
+    const before = JSON.stringify(saved);
+    state.confirm = false;
+    await api.deleteWardrobeLibrary();
+    assert.match(state.ask.message, /衣柜3.*1 件服装/);
+    assert.equal(state.ask.danger, true);
+    assert.equal(JSON.stringify(saved), before);
+    state.confirm = true;
+    api.busy(true);
+    await api.deleteWardrobeLibrary();
+    assert.match(controls.get('.tw-library-status').textContent, /等待当前导入.*再删除衣柜/);
+    assert.equal(JSON.stringify(saved), before);
+    api.busy(false);
+    state.fail = true;
+    await api.deleteWardrobeLibrary();
+    assert.match(controls.get('.tw-library-status').textContent, /存储失败/);
+    assert.equal(JSON.stringify(saved), before);
+    assert.equal(api.state().activeLibraryId, 'custom');
+    assert.deepEqual(deleted, []);
+    state.fail = false;
+    await api.deleteWardrobeLibrary();
+    assert.equal(state.writes, 1, '目录、入口和分区数据在一次存储中更新');
+    assert.equal(button.hidden, true);
+    assert.deepEqual(controls.get('.tw-library-tabs').children.map(tab => tab.textContent), ['SFW', 'NSFW']);
+    assert.deepEqual(saved.wardrobe_library_data, { 'default-2': nsfw });
+    assert.deepEqual(saved.wardrobe_items, sfw);
+    assert.deepEqual(saved.wardrobe_selections, { char: ['mine'] });
+    assert.deepEqual(saved.wardrobe_send, { content_type: 'text' });
+    assert.deepEqual(deleted, [unused]);
+    const reloaded = createHost(saved).api;
+    assert.equal(reloaded.state().activeLibraryId, 'default-1');
+    assert.equal(reloaded.state().wardrobeLibraries.has('custom'), false);
+    await api.deleteWardrobeLibrary();
+    api.activateWardrobeLibrary('default-2');
+    assert.equal(button.hidden, true);
+    await api.deleteWardrobeLibrary();
+    assert.equal(state.writes, 2, '两个固定分区都不执行删除');
+    await api.addWardrobeLibrary();
+    assert.equal(api.state().garments.size, 0);
+    assert.equal(button.hidden, false);
+    await api.deleteWardrobeLibrary();
+    assert.equal(api.state().activeLibraryId, 'default-1');
+    assert.equal(api.state().wardrobeLibraries.size, 2);
 });
 
 test('从移动菜单将 NSFW 服装移入 SFW，保留资料并清理原衣柜全部范围的应用', async () => {

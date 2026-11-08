@@ -71,6 +71,8 @@ const IMAGE_SIDE_LABELS = { image: '正面', backImage: '背面' };
 const IMAGE_FOLDER = 'tavern_wardrobe';
 const DATA_IMAGE_PATTERN = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/;
 const STORED_IMAGE_PATTERN = /^user\/images\/tavern_wardrobe\/[^/\\?#%]+\.(png|jpg|webp)$/;
+// GitHub Release 下载跳转缺少跨域许可，只有这种链接尝试使用酒馆自带的代理。
+const GITHUB_RELEASE_DOWNLOAD = /^https:\/\/github\.com\/[^/]+\/[^/]+\/releases\/download\//;
 // 限制聊天参考图的像素和 JPEG 质量，减少多套服装请求体积；不改动保存的原图。
 const SEND_IMAGE_MAX_EDGE = 1280;
 const SEND_IMAGE_QUALITY = 0.82;
@@ -286,6 +288,7 @@ const PANEL_HTML = `
             <div class="tw-library-switcher">
                 <nav class="tw-library-tabs" aria-label="衣柜大分类"></nav>
                 <button type="button" class="tw-add-library" data-action="add-library" title="新增空衣柜" aria-label="新增空衣柜">${icon('plus')}</button>
+                <button type="button" class="tw-delete-library" data-action="delete-library" title="删除当前衣柜" aria-label="删除当前衣柜" aria-haspopup="dialog" aria-controls="tw-ask" hidden>${icon('trash')}</button>
             </div>
             <label class="tw-search">${icon('search')}<input type="search" placeholder="搜索名称、描述、标签…" aria-label="搜索服装"></label>
             <button type="button" class="tw-log-button" data-action="open-logs" aria-haspopup="dialog" aria-controls="tw-logs">${icon('file')}日志</button>
@@ -474,10 +477,11 @@ const PANEL_HTML = `
         <div class="tw-import-tools">
             <button type="button" data-action="add-import-files">添加图片/文件</button>
             <button type="button" data-action="add-import-folder">选择图片文件夹</button>
+            <button type="button" data-action="add-import-link">添加 JSON 链接</button>
             <button type="button" data-import-selection="all" disabled>全选</button>
             <button type="button" data-import-selection="none" disabled>全不选</button>
         </div>
-        <p class="tw-import-empty">先选择图片或图片文件夹</p>
+        <p class="tw-import-empty">添加本地文件或 JSON 链接</p>
         <div class="tw-import-grid" aria-label="待导入文件"></div>
         <p class="tw-import-status" role="status" aria-live="polite"></p>
         <footer><span class="tw-import-count" aria-live="polite">已选 0 / 0 个文件</span><button type="button" data-action="confirm-import" disabled>导入所选</button></footer>
@@ -1045,7 +1049,7 @@ const PANEL_CSS = `
     text-transform: uppercase;
 }
 
-/* 大分类：分段页签，新增入口收成末尾的小图标 */
+/* 大分类：末尾的操作按钮在窄屏保持可点击尺寸，页签区域可以横向滚动。 */
 #tw-panel .tw-library-switcher {
     display: flex;
     flex: 0 1 auto;
@@ -1091,12 +1095,17 @@ const PANEL_CSS = `
     color: var(--tw-accent-ink);
 }
 
-#tw-panel .tw-add-library {
+#tw-panel :is(.tw-add-library, .tw-delete-library) {
+    flex: 0 0 auto;
     width: 32px;
     height: 32px;
-    border: 1px dashed var(--tw-line-strong);
+    border: 1px solid var(--tw-line-strong);
     border-radius: 10px;
     color: var(--tw-muted);
+}
+
+#tw-panel .tw-add-library {
+    border-style: dashed;
 }
 
 #tw-panel .tw-add-library:hover {
@@ -1105,7 +1114,13 @@ const PANEL_CSS = `
     color: var(--tw-accent-ink);
 }
 
-#tw-panel .tw-add-library .tw-icon {
+#tw-panel .tw-delete-library:hover {
+    border-color: var(--tw-danger-border);
+    background: var(--tw-danger-bg);
+    color: var(--tw-danger);
+}
+
+#tw-panel :is(.tw-add-library, .tw-delete-library) .tw-icon {
     width: 16px;
     height: 16px;
 }
@@ -4179,11 +4194,17 @@ const imageDataCache = new Map();
 // 聊天发图缓存有损参考副本，避免衣柜模式每次重复解码、缩放和发送大原图；备份仍走原图缓存。
 const sendImageCache = new Map();
 const imageDecoders = new Set();
-const imageReadController = new window.parent.AbortController();
+const wardrobeReadController = new window.parent.AbortController();
 let exportUrl;
 let libraryStatusTimer;
 let importingGarments = false;
-/** @type {Map<string, {file: File, url: string, selected: boolean}>} 待选本地文件，确认导入前不读取 Base64 或上传。 */
+/**
+ * 待导入的远程 JSON，只保存地址，确认后才下载备份内容。
+ * @typedef {Object} WardrobeImportLink
+ * @property {string} name 待选列表中的文件名。
+ * @property {string} backupUrl 已校验的 HTTP 或 HTTPS 地址。
+ */
+/** @type {Map<string, {file: File|WardrobeImportLink, url: string, selected: boolean}>} 本地文件和远程备份共用待选列表。 */
 const pendingGarmentImports = new Map();
 let replacingImage = false;
 let importConflictDialog;
@@ -4844,6 +4865,7 @@ function initializeWardrobe() {
     panel.querySelector('[data-action="close"]').addEventListener('click', closeWardrobe);
     panel.querySelector('.tw-library-tabs').addEventListener('click', selectWardrobeLibrary);
     panel.querySelector('[data-action="add-library"]').addEventListener('click', addWardrobeLibrary);
+    panel.querySelector('[data-action="delete-library"]').addEventListener('click', deleteWardrobeLibrary);
     panel.querySelector('[data-action="open-settings"]').addEventListener('click', openSettings);
     settingsPanel.querySelector('[data-action="close-settings"]').addEventListener('click', closeSettings);
     settingsPanel.querySelector('.tw-settings-nav').addEventListener('click', selectSettingsPage);
@@ -4878,6 +4900,7 @@ function initializeWardrobe() {
     panel.querySelector('.tw-folder-import').addEventListener('change', importGarments);
     panel.querySelector('[data-action="add-import-files"]').addEventListener('click', chooseImportFiles);
     panel.querySelector('[data-action="add-import-folder"]').addEventListener('click', chooseImportFiles);
+    panel.querySelector('[data-action="add-import-link"]').addEventListener('click', addImportLink);
     panel.querySelector('[data-action="cancel-import"]').addEventListener('click', closeImageImport);
     panel.querySelector('[data-action="confirm-import"]').addEventListener('click', confirmImageImport);
     panel.querySelector('.tw-import-grid').addEventListener('change', selectPendingImports);
@@ -5088,8 +5111,17 @@ function saveLibraryVariables(update) {
 }
 
 /**
+ * 两个内置分区是存档目录的固定入口，通过标识区分，允许自建衣柜使用同名标签。
+ * @param {string} id 大分类标识。
+ * @returns {boolean} 是否为固定分区。
+ */
+function isDefaultWardrobeLibrary(id) {
+    return id === 'default-1' || id === 'default-2';
+}
+
+/**
  * 用原生按钮渲染独立衣柜入口，动态名称按文本写入，支持键盘与选中状态朗读。
- * @returns {void} 更新页签，不重绘服装或改动数据。
+ * @returns {void} 更新页签和删除入口，不重绘服装或改动数据。
  */
 function renderWardrobeLibraries() {
     const list = hostDocument.createDocumentFragment();
@@ -5104,6 +5136,7 @@ function renderWardrobeLibraries() {
         list.append(button);
     }
     panel.querySelector('.tw-library-tabs').replaceChildren(list);
+    panel.querySelector('[data-action="delete-library"]').hidden = isDefaultWardrobeLibrary(activeLibraryId);
     selectedButton.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
 
@@ -5132,16 +5165,51 @@ async function addWardrobeLibrary() {
 }
 
 /**
+ * 确认后删除当前自建衣柜及其存档，再复用切换流程回到 SFW。
+ * @returns {Promise<void>} 取消或保存失败时保留衣柜，保存后清理无引用的原图。
+ */
+async function deleteWardrobeLibrary() {
+    const id = activeLibraryId;
+    if (isDefaultWardrobeLibrary(id)) return;
+    const name = wardrobeLibraries.get(id);
+    if (!await askConfirm('删除衣柜', `删除“${name}”及其中的 ${garments.size} 件服装、标签和穿搭设置？\n此操作不可撤销。`, { confirmText: '删除衣柜', danger: true })) return;
+    try {
+        const removedGarments = garments;
+        const libraries = new Map(wardrobeLibraries);
+        libraries.delete(id);
+        activateWardrobeLibrary('default-1', libraries, id);
+        const images = [];
+        for (const item of removedGarments.values()) {
+            for (const field of IMAGE_FIELDS) if (item[field]) images.push(item[field]);
+        }
+        // 切换成功后才清理原图，保留其他分区引用的正背面图片；没有图片就无需扫描其余分区。
+        if (images.length) void deleteGarmentImages(images);
+        panel.querySelector('.tw-library-tabs [aria-pressed="true"]').focus();
+        setLibraryStatus(`已删除衣柜“${name}”`);
+    } catch (error) { recordWardrobeLog('error', 'deleteWardrobeLibrary：捕获异常', error); setLibraryStatus(String(error), true); }
+}
+
+/**
  * 校验目标存档并保存当前入口后切换数据，清空上个分区的筛选、多选和本地待导入文件。
  * @param {string} id 已由目录或新建入口确定的大分类标识。
- * @param {Map<string, string>} [libraries] 新建时包含新分区的目录。
+ * @param {Map<string, string>} [libraries] 新建或删除后的大分类目录。
+ * @param {string} [removedId] 要随目录一起删除的自建分区标识。
  * @returns {void} 导入或换图未结束时提示等待，避免异步提交写入另一分区。
  */
-function activateWardrobeLibrary(id, libraries = wardrobeLibraries) {
-    if (importingGarments || replacingImage) throw new Error('请等待当前导入或图片替换完成后再切换大分类。');
+function activateWardrobeLibrary(id, libraries = wardrobeLibraries, removedId) {
+    if (importingGarments || replacingImage) {
+        throw new Error(`请等待当前导入或图片替换完成后再${removedId ? '删除衣柜' : '切换大分类'}。`);
+    }
     const saved = getLibraryVariables(id);
     const data = parseWardrobeData({ items: saved.wardrobe_items ?? [], groups: saved.wardrobe_groups ?? [] });
-    insertOrAssignVariables({ wardrobe_libraries: Array.from(libraries, ([id, name]) => ({ id, name })), wardrobe_active_library: id }, { type: 'script' });
+    const update = { wardrobe_libraries: Array.from(libraries, ([id, name]) => ({ id, name })), wardrobe_active_library: id };
+    if (removedId) {
+        // 一次替换目录、当前入口和分区数据，保存失败时旧目录和原图仍能一起读取。
+        const variables = getVariables({ type: 'script' });
+        const libraryData = { ...variables.wardrobe_library_data };
+        delete libraryData[removedId];
+        replaceVariables({ ...variables, ...update, wardrobe_library_data: libraryData }, { type: 'script' });
+    } else insertOrAssignVariables(update, { type: 'script' });
     stopDescriptionRequest();
     stopOutfitRequest();
     closeImageImport();
@@ -5337,8 +5405,8 @@ function mergeNamedGarmentGroups(items, groups, groupFilters) {
 }
 
 /**
- * 在文件入口识别本衣柜与 Outfit Manager 备份，转换后复用现有合并、上传和回滚流程。
- * @param {unknown} data JSON 文件解析结果，支持 User、单角色、全部角色及完整备份。
+ * 在备份入口识别本衣柜与 Outfit Manager 数据，转换后复用现有合并、上传和回滚流程。
+ * @param {unknown} data 本地或远程 JSON 的解析结果，支持 User、单角色、全部角色及完整备份。
  * @returns {{items: Map<string, WardrobeItem>, groups: Map<string, string>, groupFilters: Map<string, Set<string>>}} 已校验的服装、标签及筛选归属。
  */
 function parseWardrobeFile(data) {
@@ -5425,6 +5493,64 @@ function chooseImportFiles(event) {
 }
 
 /**
+ * 校验用户填写的备份地址并加入待选列表，确认前不发起网络请求。
+ * @returns {Promise<void>} 用户取消、地址无效或更新待选列表后结束。
+ */
+async function addImportLink() {
+    const value = await askDialog({ title: '添加 JSON 链接', message: '粘贴 JSON 备份文件的直链。', input: '', confirmText: '添加' });
+    if (value === null) return;
+    const status = panel.querySelector('.tw-import-status');
+    let url;
+    try { url = new URL(value); }
+    catch { /* 无法解析的地址与不支持的协议使用同一条提示。 */ }
+    if (!url || (url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) {
+        status.textContent = '请输入有效的 HTTP 或 HTTPS 下载链接。';
+        return;
+    }
+    // 片段不参与下载，同一地址重复添加时保留已有的勾选状态。
+    url.hash = '';
+    const key = `link:${url.href}`;
+    if (!pendingGarmentImports.has(key)) {
+        let name = url.pathname.split('/').at(-1) || url.hostname;
+        try { name = decodeURIComponent(name); }
+        catch { /* 文件名无法解码时保留原样，仍可用原地址下载。 */ }
+        pendingGarmentImports.set(key, { file: { name, backupUrl: url.href }, url: '', selected: true });
+    }
+    status.textContent = '';
+    renderPendingImports();
+}
+
+/**
+ * 从直链读取原始 JSON，GitHub Release 跨域下载失败时尝试酒馆代理，直接解析响应以节省大备份内存。
+ * @param {string} url 已校验的备份地址。
+ * @returns {Promise<unknown>} 尚未通过衣柜格式校验的备份数据。
+ */
+async function readWardrobeImportLink(url) {
+    const signal = wardrobeReadController.signal;
+    let response;
+    // 下载地址可能含临时访问令牌，避免把完整链接和响应正文写入衣柜日志。
+    try { response = await window.parent.fetch(url, { signal }); }
+    catch {
+        if (signal.aborted) throw new Error('备份读取已取消。');
+        if (!GITHUB_RELEASE_DOWNLOAD.test(url)) {
+            throw new Error('无法下载 JSON，请检查链接是否可访问，以及来源是否允许跨域读取（CORS）。');
+        }
+        // 代理会转发部分请求头，省略酒馆登录凭据，避免将身份验证信息发给下载站点。
+        try { response = await window.parent.fetch(`/proxy/${encodeURIComponent(url)}`, { signal, credentials: 'omit' }); }
+        catch { /* 酒馆无法连通时也可通过浏览器下载后从本地导入。 */ }
+        if (!response?.ok) {
+            throw new Error('GitHub Release 限制网页跨域读取，酒馆代理未能下载。请在浏览器打开原链接下载，再通过「添加图片/文件」导入。');
+        }
+    }
+    if (!response.ok) throw new Error(`下载 JSON 失败（HTTP ${response.status}）。`);
+    try { return await response.json(); }
+    catch (error) {
+        if (error.name === 'SyntaxError') throw new Error('链接未返回有效的 JSON，请使用备份文件的直链。');
+        throw new Error('读取 JSON 下载内容失败，请重试。');
+    }
+}
+
+/**
  * 累积本次选择，文件夹只列出支持的图片；取消文件选择不清空之前已添加的文件。
  * @param {Event} event 图片选择器变化事件。
  * @returns {void} 更新待选缩略图，不读取原图数据或提交存档。
@@ -5454,19 +5580,21 @@ function addPendingImports(files, folder = false) {
 }
 
 /**
- * 用对象地址绘制本地缩略图，避免在勾选阶段提前把整批原图转成 Base64。
+ * 用对象地址绘制本地缩略图，备份只显示文件名，避免确认前读取大文件。
  * @returns {void} 添加文件后重建列表，勾选时不重建图片。
  */
 function renderPendingImports() {
     const list = hostDocument.createDocumentFragment();
     for (const [key, entry] of pendingGarmentImports) {
+        const file = entry.file;
+        const path = 'backupUrl' in file ? file.name : file.webkitRelativePath || file.name;
         const label = hostDocument.createElement('label');
         label.className = 'tw-import-card';
         const checkbox = hostDocument.createElement('input');
         checkbox.type = 'checkbox';
         checkbox.dataset.importKey = key;
         checkbox.checked = entry.selected;
-        checkbox.setAttribute('aria-label', `导入${entry.file.webkitRelativePath || entry.file.name}`);
+        checkbox.setAttribute('aria-label', `导入${path}`);
         if (entry.url) {
             const image = hostDocument.createElement('img');
             image.src = entry.url;
@@ -5476,8 +5604,8 @@ function renderPendingImports() {
             label.append(image);
         } else label.innerHTML = icon('file');
         const name = hostDocument.createElement('span');
-        name.textContent = entry.file.name;
-        label.title = entry.file.webkitRelativePath || entry.file.name;
+        name.textContent = file.name;
+        label.title = path;
         label.append(checkbox, name);
         list.append(label);
     }
@@ -5515,7 +5643,7 @@ function updatePendingImportCount() {
 }
 
 /**
- * 把勾选文件交给原有整批导入流程，成功后关闭；失败保留本地选择供重试。
+ * 把勾选的本地文件和链接交给整批导入，成功后关闭；失败保留选择供重试。
  * @returns {Promise<void>} 导入完成并恢复面板控件后结束。
  */
 async function confirmImageImport() {
@@ -5524,10 +5652,9 @@ async function confirmImageImport() {
     if (!files.length || importingGarments) return;
     const dialog = panel.querySelector('#tw-import-picker');
     for (const control of dialog.querySelectorAll('button, input')) control.disabled = true;
-    panel.querySelector('.tw-import-status').textContent = '';
+    const status = panel.querySelector('.tw-import-status');
     try {
-        if (await importGarmentFiles(files)) closeImageImport();
-        else panel.querySelector('.tw-import-status').textContent = '导入未完成，已保留当前选择，可调整后重试。';
+        if (await importGarmentFiles(files, status)) closeImageImport();
     } finally {
         for (const control of dialog.querySelectorAll('button, input')) control.disabled = false;
         updatePendingImportCount();
@@ -5554,7 +5681,7 @@ function closeImageImport() {
 }
 
 /**
- * 在取消、导入成功或卸载时释放全部本地文件及对象地址，避免重复打开时累积内存。
+ * 在取消、导入成功或卸载时清空待选项并释放缩略图地址，避免重复打开时累积内存。
  * @returns {void} 无返回值。
  */
 function clearPendingImports() {
@@ -5591,13 +5718,15 @@ async function handleGarmentTransfer(event) {
 }
 
 /**
- * 先校验整批文件并按名称与原图哈希处理重复项，再上传及一次提交；任一失败回收新图。
- * @param {File[]} files 选择、拖放或粘贴获得的文件。
+ * 先校验整批本地和远程文件并按名称与原图哈希处理重复项，再上传及一次提交；任一失败回收新图。
+ * @param {(File|WardrobeImportLink)[]} files 待导入的本地文件或 JSON 链接。
+ * @param {HTMLElement} [status] 导入弹窗内的状态区域；直接拖放或粘贴时省略。
  * @returns {Promise<boolean>} 成功保存或全部跳过时为真，取消、忙碌或失败时为假。
  */
-async function importGarmentFiles(files) {
+async function importGarmentFiles(files, status) {
     if (!files.length || importingGarments) return false;
     importingGarments = true;
+    if (status) status.textContent = '正在导入…';
     for (const button of panel.querySelectorAll('[data-action="import"]')) button.disabled = true;
     const uploaded = [];
     try {
@@ -5608,8 +5737,9 @@ async function importGarmentFiles(files) {
         const groupNames = new Map(Array.from(groups, ([id, name]) => [name, id]));
         const importGroup = currentGroup === '*' ? '' : currentGroup;
         for (const file of files) {
-            if (/\.json$/i.test(file.name) || file.type === 'application/json') {
-                const data = parseWardrobeFile(JSON.parse(await file.text()));
+            const isLink = 'backupUrl' in file;
+            if (isLink || /\.json$/i.test(file.name) || file.type === 'application/json') {
+                const data = parseWardrobeFile(isLink ? await readWardrobeImportLink(file.backupUrl) : JSON.parse(await file.text()));
                 const groupIds = new Map();
                 // 每份文件先获得独立的临时 ID，防止多文件原 ID 相同；查重后再映射到最终记录。
                 const itemIds = new Map(Array.from(data.items.keys(), id => [id, window.parent.crypto.randomUUID()]));
@@ -5656,7 +5786,10 @@ async function importGarmentFiles(files) {
             const existing = fingerprints.get(key);
             if (existing) {
                 duplicateAction ??= await chooseImportDuplicate(item.name);
-                if (!duplicateAction) return false;
+                if (!duplicateAction) {
+                    if (status) status.textContent = '已取消导入，保留当前选择。';
+                    return false;
+                }
                 if (duplicateAction === 'skip') { importedIds.set(item.id, existing.id); skipped++; continue; }
             }
             const replacing = existing && duplicateAction === 'overwrite';
@@ -5697,6 +5830,7 @@ async function importGarmentFiles(files) {
         // 保存失败也要回收新文件；已经成功提交的路径由清理函数保留，不因界面刷新异常误删。
         await deleteGarmentImages(uploaded);
         if (root.isConnected) {
+            if (status) status.textContent = String(error);
             setGarmentStatus(String(error), true);
             setLibraryStatus(String(error), true);
             toastr.error(String(error), '服装导入失败');
@@ -5849,7 +5983,7 @@ async function loadImageDataUrl(image) {
     let pending = imageDataCache.get(image);
     if (!pending) {
         pending = (async () => {
-            const response = await wardrobeFetch(image, { signal: imageReadController.signal });
+            const response = await wardrobeFetch(image, { signal: wardrobeReadController.signal });
             if (!response.ok) throw new Error(`读取图片失败（HTTP ${response.status}）：${image}，文件可能已被删除。`);
             const type = image.endsWith('.jpg') ? 'image/jpeg' : image.endsWith('.webp') ? 'image/webp' : 'image/png';
             // 静态文件响应的 MIME 可能是通用二进制，按已校验的扩展名恢复图片类型。
@@ -5875,7 +6009,7 @@ async function loadSendImageDataUrl(image) {
     if (!pending) {
         pending = (async () => {
             const original = await loadImageDataUrl(image);
-            if (imageReadController.signal.aborted) throw new Error('图片读取已取消。');
+            if (wardrobeReadController.signal.aborted) throw new Error('图片读取已取消。');
             return new Promise((resolve, reject) => {
                 const decoded = hostDocument.createElement('img');
                 imageDecoders.add(decoded);
@@ -9349,7 +9483,7 @@ function restoreFocus() {
 }
 
 /**
- * 停用或重载时中止图片读取、注销请求和聊天监听，并清理界面。
+ * 停用或重载时中止图片和备份读取、注销请求和聊天监听，并清理界面。
  * @returns {void} 无返回值。
  */
 function destroyWardrobe() {
@@ -9366,7 +9500,7 @@ function destroyWardrobe() {
     window.parent.clearTimeout(garmentTagSearchTimer);
     window.parent.clearTimeout(libraryStatusTimer);
     for (const subscription of subscriptions) subscription.stop();
-    imageReadController.abort();
+    wardrobeReadController.abort();
     for (const reader of imageReaders) reader.abort();
     for (const decoded of imageDecoders) {
         decoded.onerror();
