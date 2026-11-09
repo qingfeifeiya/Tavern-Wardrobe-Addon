@@ -118,6 +118,8 @@ const sandbox = {
 };
 vm.createContext(sandbox);
 const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+const previousOutfitPrompt = '旧整套测试文本';
+const previousItemPrompt = '旧单品测试文本';
 const hooks = `
 /** 用现有确认替身驱动识图标签流程；参数为弹窗说明，返回模拟选择。 */
 askDialog = async ({ message }) => window.parent.confirm(message);
@@ -127,10 +129,10 @@ panel = testPanel;
 root = { isConnected: true };
 refreshWardrobe = () => {};
 renderGarmentLibrary = () => {};
+// 在测试中登记短样本的预计算指纹，覆盖迁移路径而无需保存历史提示词全文。
+LEGACY_DESCRIPTION_PROMPT_FINGERPRINTS.outfit.add(0x79ad38f784fa8524n);
+LEGACY_DESCRIPTION_PROMPT_FINGERPRINTS.item.add(0x59f7761139e5737fn);
 globalThis.api = { loadWardrobeTemplates, saveWardrobeTemplate, loadDescriptionPrompts, saveDescriptionPrompts,
-    previousOutfitPrompt: PREVIOUS_DEFAULT_OUTFIT_PROMPT,
-    previousItemPrompt: PREVIOUS_DEFAULT_ITEM_PROMPT,
-    previousStaticItemPrompt: PREVIOUS_STATIC_ITEM_PROMPT,
     loadGarments, generateGarmentDescription, generateMissingGarmentDescriptions, stopDescriptionRequest, saveSelectedGarment, buildWearerContent,
     handleWardrobeData, parseWardrobeSettingsData, loadSendSettings,
     filterMissing: ids => { currentCategory = 'missing-description'; visibleGarmentIds = new Set(ids); },
@@ -165,40 +167,29 @@ async function main() {
 
     // 升级仅替换原始默认提示词，用户编辑的两种提示词都应完整保留。
     const defaultOutfitPrompt = api.state().descriptionPrompts.outfit;
-    assert.ok(defaultOutfitPrompt.includes('整套穿搭') && defaultOutfitPrompt.includes('最多 280 字，无最低字数'), '整套模式限制范围和长度，允许短描述');
-    assert.ok(defaultOutfitPrompt.includes('系统追加的最终输出格式'), '整套模式服从分类和标签开关对应的格式');
-    saved.wardrobe_description_prompts = { outfit: api.previousOutfitPrompt, item: '自定义单品提示词' };
-    api.loadDescriptionPrompts();
-    assert.equal(api.state().descriptionPrompts.outfit, defaultOutfitPrompt, '旧默认服装提示词自动升级');
-    assert.equal(descriptionForm.elements.outfit.value, defaultOutfitPrompt, '设置表单同步显示新版服装提示词');
-    assert.equal(api.state().descriptionPrompts.item, '自定义单品提示词', '升级不改写单品提示词');
-    saved.wardrobe_description_prompts.outfit = '自定义服装提示词';
-    api.loadDescriptionPrompts();
-    assert.equal(api.state().descriptionPrompts.outfit, '自定义服装提示词', '升级不改写自定义服装提示词');
-    saved.wardrobe_description_prompts.item = api.previousItemPrompt;
-    api.loadDescriptionPrompts();
     const upgradedItemPrompt = api.state().descriptionPrompts.item;
-    assert.ok(upgradedItemPrompt.includes('省略其他服装和独立配饰') && upgradedItemPrompt.includes('无法辨认目标时'), '单品模式限制范围并处理目标缺失');
-    assert.ok(upgradedItemPrompt.includes('{{name}}') && upgradedItemPrompt.includes('{{category}}'), '新版保留目标名称和预设分类占位符');
+    assert.match(defaultOutfitPrompt, /【第零步：套装硬性规则】/);
+    assert.match(defaultOutfitPrompt, /category 固定为 "outfits"/);
+    assert.match(defaultOutfitPrompt, /【层叠与连接关系】/);
+    assert.match(defaultOutfitPrompt, /整段总长控制在400–900字/);
+    assert.ok(defaultOutfitPrompt.includes('系统追加的最终输出格式'), '整套模式服从分类和标签开关对应的格式');
+    const customizedItemPrompt = previousItemPrompt + '。';
+    saved.wardrobe_description_prompts = { outfit: previousOutfitPrompt, item: customizedItemPrompt };
+    api.loadDescriptionPrompts();
+    assert.equal(api.state().descriptionPrompts.outfit, defaultOutfitPrompt, '已知旧整套提示词自动升级');
+    assert.equal(descriptionForm.elements.outfit.value, defaultOutfitPrompt, '整套表单同步升级');
+    assert.equal(api.state().descriptionPrompts.item, customizedItemPrompt, '只改了一个字符的旧单品提示词保持原文');
+    const customizedOutfitPrompt = previousOutfitPrompt + '。';
+    saved.wardrobe_description_prompts.outfit = customizedOutfitPrompt;
+    saved.wardrobe_description_prompts.item = previousItemPrompt;
+    api.loadDescriptionPrompts();
+    assert.equal(api.state().descriptionPrompts.outfit, customizedOutfitPrompt, '只改了一个字符的旧整套提示词保持原文');
+    assert.equal(api.state().descriptionPrompts.item, upgradedItemPrompt, '已知旧单品提示词自动升级');
     assert.equal(descriptionForm.elements.namedItem('item').value, upgradedItemPrompt, '单品表单同步升级');
-    assert.equal(api.state().descriptionPrompts.outfit, '自定义服装提示词', '单品升级保留自定义服装提示词');
-    // 上一版静态提示词也应升级，但仅改动过一句的用户版本仍属于自定义内容。
-    saved.wardrobe_description_prompts.item = api.previousStaticItemPrompt;
-    api.loadDescriptionPrompts();
-    assert.equal(api.state().descriptionPrompts.item, upgradedItemPrompt, '上一版静态单品默认值自动升级');
-    assert.equal(descriptionForm.elements.namedItem('item').value, upgradedItemPrompt, '上一版升级后表单同步');
-    assert.equal(api.state().descriptionPrompts.outfit, '自定义服装提示词', '上一版单品升级不影响服装提示词');
-    // 整套和单品的结构证据与人物排除口径一致，防止只更新其中一种识图入口。
-    for (const prompt of [defaultOutfitPrompt, upgradedItemPrompt]) {
-        assert.match(prompt, /忽略人物的身材、比例/);
-        assert.match(prompt, /背面、闭合件、画外长度和材质成分只写能从参考图确认/);
-        assert.match(prompt, /自由端按自然垂落写/);
-        assert.doesNotMatch(prompt, /补全|默认完整/);
-    }
-    const customizedStaticItemPrompt = api.previousStaticItemPrompt.replace('不可见/后背结构的合理补全', '我自己的背面规则');
-    saved.wardrobe_description_prompts.item = customizedStaticItemPrompt;
-    api.loadDescriptionPrompts();
-    assert.equal(api.state().descriptionPrompts.item, customizedStaticItemPrompt, '编辑过的上一版静态提示词保持原文');
+    assert.match(upgradedItemPrompt, /【单品】：只描述画面中最主体的一件服饰/);
+    assert.match(upgradedItemPrompt, /单品模式禁止输出 outfits/);
+    assert.match(upgradedItemPrompt, /特殊剪裁款写法：几何图块与物理连线/);
+    assert.match(upgradedItemPrompt, /特殊剪裁款：250–350字/);
     saved.wardrobe_description_prompts.item = '自定义单品提示词';
     api.loadDescriptionPrompts();
     assert.equal(api.state().descriptionPrompts.item, '自定义单品提示词', '升级不改写自定义单品提示词');
@@ -774,6 +765,9 @@ async function checkGeneratedOrganization() {
  * @returns {Promise<void>} 单张、旧字段兼容及批量断言通过后结束。
  */
 async function checkDescriptionOptions() {
+    saved.wardrobe_description_prompts.outfit = previousOutfitPrompt;
+    api.loadDescriptionPrompts();
+    controls['[name="description_mode"]'].value = 'outfit';
     const image = 'data:image/png;base64,aGVsbG8=';
     for (const category of ['on', 'off']) for (const tags of ['on', 'off']) {
         controls['[name="description_category"]'].value = category;
@@ -784,15 +778,18 @@ async function checkDescriptionOptions() {
         controls['[name="garment_category"]'].value = 'tops';
         const previousConfirmations = confirmations.length;
         // 故意让模型始终返回全部字段，确保关闭项在回复入口被丢弃，而不只是修改提示词。
-        modelReply = JSON.stringify({ name: '生成名称', description: '生成描述', category: 'coats', tags: ['冬季'] });
+        modelReply = JSON.stringify({ name: '生成名称', description: '生成描述', category: 'outfits', tags: ['套装', '冬季', '外套'] });
         await api.generateGarmentDescription();
         const request = requests.at(-1).user_input;
-        assert.ok(request.includes(category === 'on' ? 'category 为一个服装分类标识' : 'AI 分类已关闭'));
-        assert.ok(request.includes(tags === 'on' ? 'tags 为标签名称数组' : 'AI 标签已关闭'));
-        assert.equal(saved.wardrobe_items[0].category, category === 'on' ? 'coats' : 'tops');
-        assert.equal(controls['[name="garment_category"]'].value, category === 'on' ? 'coats' : 'tops');
-        assert.equal(saved.wardrobe_groups.length, tags === 'on' ? 2 : 1);
-        assert.deepEqual(saved.wardrobe_items[0].groupIds.map(id => api.state().garmentGroups.get(id)), tags === 'on' ? ['日常', '冬季'] : ['日常']);
+        assert.ok(request.startsWith(api.state().descriptionPrompts.outfit), '单张整套识图发送新版全文');
+        const format = request.split('\n\n最终输出格式（此处要求优先）').at(-1);
+        assert.ok(format.includes(category === 'on' ? '固定为 outfits，即使图中只有一件服饰' : '不返回 category 字段'));
+        assert.ok(format.includes(tags === 'on' ? '首项固定为“套装”' : '不返回 tags 字段'));
+        assert.doesNotMatch(format, /独立单品按类型分类/);
+        assert.equal(saved.wardrobe_items[0].category, category === 'on' ? 'outfits' : 'tops');
+        assert.equal(controls['[name="garment_category"]'].value, category === 'on' ? 'outfits' : 'tops');
+        assert.equal(saved.wardrobe_groups.length, tags === 'on' ? 4 : 1);
+        assert.deepEqual(saved.wardrobe_items[0].groupIds.map(id => api.state().garmentGroups.get(id)), tags === 'on' ? ['日常', '套装', '冬季', '外套'] : ['日常']);
         assert.equal(confirmations.length - previousConfirmations, tags === 'on' ? 1 : 0, '关闭标签时不弹出创建确认');
         assert.equal(controls['[name="garment_name"]'].value, '生成名称');
         assert.equal(controls['[name="garment_description"]'].value, '生成描述');
@@ -822,6 +819,20 @@ async function checkDescriptionOptions() {
     assert.equal(saved.wardrobe_groups.length, 1);
     controls['[name="description_category"]'].value = 'on';
     controls['[name="description_tags"]'].value = 'on';
+
+    // 单品正文限制分类，系统追加的格式也必须只提供单品可选的九类。
+    saved.wardrobe_description_prompts.item = previousItemPrompt;
+    api.loadDescriptionPrompts();
+    controls['[name="description_mode"]'].value = 'item';
+    modelReply = JSON.stringify({ name: '外套', description: '外套描述', category: 'coats', tags: ['日常'] });
+    await api.generateGarmentDescription();
+    const itemRequest = requests.at(-1).user_input;
+    assert.ok(itemRequest.startsWith(api.state().descriptionPrompts.item), '单品识图发送新版全文');
+    const itemFormat = itemRequest.split('\n\n最终输出格式（此处要求优先）').at(-1);
+    const choices = JSON.parse(itemFormat.match(/只能从 (\[.*?\]) 中选择 id/)[1]);
+    assert.deepEqual(choices.map(({ id }) => id), ['tops', 'bottoms', 'dresses', 'coats', 'underwear', 'socks', 'shoes', 'accessories', 'other']);
+    assert.doesNotMatch(itemFormat, /outfits/);
+    controls['[name="description_mode"]'].value = 'outfit';
     console.log('通过分类与标签四种选项、关闭项无写入或确认、旧字段兼容及批量描述生成检查。');
 }
 
@@ -852,7 +863,7 @@ async function checkBulkDescriptions() {
     assert.equal(JSON.stringify(saved.wardrobe_items), original, '取消后不改存档');
 
     confirmation = true;
-    modelReply = JSON.stringify({ name: '识别名称', description: '识别描述', category: 'shoes', tags: ['日常'] });
+    modelReply = JSON.stringify({ name: '识别名称', description: '识别描述', category: 'outfits', tags: ['日常'] });
     controls['[name="description_mode"]'].value = 'item';
     await api.generateMissingGarmentDescriptions();
     assert.equal(requests.length - start, 2, '只识别空描述和纯空白描述，不受分类或多选影响');
@@ -860,13 +871,14 @@ async function checkBulkDescriptions() {
         if (item.id === 'empty' || item.id === 'spaces') {
             assert.equal(item.name, '识别名称');
             assert.equal(item.description, '识别描述', '批量描述自动持久化');
-            assert.equal(item.category, 'shoes', '批量识图自动更新未选中服装的分类');
+            assert.equal(item.category, 'outfits', '批量识图自动更新未选中服装的分类');
             assert.equal(item.groupIds[0], 'daily', '复用同名标签');
         }
     }
     assert.equal(saved.wardrobe_items[1].description, ' 已有描述 ', '已有描述完整保留');
     assert.equal(controls['[name="garment_description"]'].value, '还未保存的描述', '保留当前描述草稿');
     assert.ok(requests.at(-1).user_input.startsWith(api.state().descriptionPrompts.outfit), '一键识图使用服装提示词');
+    assert.match(requests.at(-1).user_input, /固定为 outfits，即使图中只有一件服饰/);
     const promptCount = confirmations.length;
     await api.generateMissingGarmentDescriptions();
     assert.equal(confirmations.length, promptCount, '没有待识别图片时直接提示，不再确认');
