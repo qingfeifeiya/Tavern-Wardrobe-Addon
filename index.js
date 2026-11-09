@@ -544,6 +544,7 @@ const PANEL_HTML = `
                     ${renderNavSection('待整理', ['missing-description', 'missing-image'])}
                 </nav>
                 <div class="tw-import-footer">
+                    <button type="button" data-action="create-garment" aria-haspopup="dialog" aria-controls="tw-ask">${icon('plus')}<span>新建服装</span></button>
                     <button type="button" class="tw-import" data-action="import">${icon('plus')}<span>导入服装</span></button>
                     <button type="button" class="tw-export-all" data-action="export-all" title="选择衣柜和导出内容" aria-haspopup="dialog" aria-controls="tw-export-picker">${icon('download')}<span>导出服装</span></button>
                 </div>
@@ -582,7 +583,7 @@ const PANEL_HTML = `
                     <div class="tw-empty" role="status" aria-live="polite" data-kind="none">
                         ${icon('box')}
                         <h2 id="tw-empty-title">这里还没有服装</h2>
-                        <p class="tw-empty-hint">导入图片即可创建服装，也可以直接把图片拖进来或粘贴。</p>
+                        <p class="tw-empty-hint">可拖放或粘贴图片。</p>
                         <button type="button" class="tw-empty-action" data-action="import">${icon('plus')}<span>导入服装</span></button>
                     </div>
                 </div>
@@ -690,9 +691,10 @@ const PANEL_HTML = `
             </aside>
         </div>
         <footer class="tw-mobile-actions" aria-label="衣柜操作">
+            <button type="button" data-action="create-garment" aria-haspopup="dialog" aria-controls="tw-ask">${icon('plus')}<span>新建</span></button>
             <button type="button" class="tw-mobile-import" data-action="import">${icon('plus')}<span>导入</span></button>
             <button type="button" data-action="export-all" aria-haspopup="dialog" aria-controls="tw-export-picker">${icon('download')}<span>导出</span></button>
-            <button type="button" data-action="toggle-details" aria-controls="tw-details" aria-expanded="false">${icon('info')}<span>服装详情</span></button>
+            <button type="button" data-action="toggle-details" aria-controls="tw-details" aria-expanded="false">${icon('info')}<span>详情</span></button>
         </footer>
         <input class="tw-image-import" type="file" accept="image/png,image/jpeg,image/webp,application/json,.json" multiple hidden>
         <input class="tw-folder-import" type="file" accept="image/png,image/jpeg,image/webp" webkitdirectory multiple hidden>
@@ -1559,13 +1561,13 @@ const PANEL_CSS = `
     filter: brightness(1.1);
 }
 
-#tw-panel .tw-import-footer .tw-export-all {
+#tw-panel .tw-import-footer button:not(.tw-import) {
     border-color: var(--tw-line-strong);
     background: transparent;
     color: var(--tw-ink-secondary);
 }
 
-#tw-panel .tw-import-footer .tw-export-all:not(:disabled):hover {
+#tw-panel .tw-import-footer button:not(.tw-import, :disabled):hover {
     background: var(--tw-bg-hover);
     color: #fff;
 }
@@ -4375,7 +4377,7 @@ const PANEL_CSS = `
 
     #tw-panel .tw-mobile-actions {
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 8px;
         padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px));
         border-top: 1px solid var(--tw-line);
@@ -5343,6 +5345,7 @@ function initializeWardrobe() {
     apiForm.querySelector('[data-api-action="models"]').addEventListener('click', requestApi);
     apiForm.querySelector('[data-api-action="test"]').addEventListener('click', requestApi);
     settingsPanel.addEventListener('close', stopApiRequest);
+    for (const button of panel.querySelectorAll('[data-action="create-garment"]')) button.addEventListener('click', createGarment);
     for (const button of panel.querySelectorAll('[data-action="import"]')) button.addEventListener('click', openImageImport);
     panel.querySelector('.tw-image-import').addEventListener('change', importGarments);
     panel.querySelector('.tw-folder-import').addEventListener('change', importGarments);
@@ -5985,6 +5988,38 @@ function parseWardrobeFile(data) {
         if (!categoriesProvided.has(id)) fields.delete('category');
     }
     return parsed;
+}
+
+/**
+ * 在当前衣柜创建无图服装，复用普通服装的存档与详情编辑流程。
+ * @returns {Promise<void>} 创建成功后打开描述页，取消或保存失败时保留原详情。
+ */
+async function createGarment() {
+    const name = (await askDialog({ title: '新建服装', input: '新服装', confirmText: '创建' }))?.trim();
+    if (!name || (hasDetailsDraft() && !await confirmDiscardDetails())) return;
+    const id = window.parent.crypto.randomUUID();
+    const next = new Map(garments);
+    next.set(id, { id, name, category: 'other', contentRating: 'unrated', description: '', image: '', backImage: '',
+        groupIds: [], favorite: false, lastUsedAt: 0 });
+    try {
+        commitGarments(next, id);
+    } catch (error) {
+        recordWardrobeLog('error', 'createGarment：捕获异常', error);
+        setLibraryStatus(String(error), true);
+        return;
+    }
+    // 只在新记录被筛掉时切回全部，保证手机从详情返回后也能在列表找到它。
+    if (!visibleGarmentIds.has(id)) {
+        window.parent.clearTimeout(garmentSearchTimer);
+        garmentSearch = '';
+        panel.querySelector('.tw-search input').value = '';
+        if (currentCategory === 'all') currentGroup = '*';
+        else selectedGroupByFilter.delete('all');
+        updateCategory('all');
+    }
+    if (multiSelectMode) toggleMultiSelect();
+    setLibraryStatus('已新建服装');
+    showGarmentDescription();
 }
 
 /**
@@ -10711,7 +10746,7 @@ function setMobileDetails(expanded) {
     panel.dataset.mobileScreen = expanded ? 'details' : 'library';
     const button = panel.querySelector('[data-action="toggle-details"]');
     button.setAttribute('aria-expanded', String(expanded));
-    button.querySelector('span').textContent = expanded ? '返回列表' : '服装详情';
+    button.querySelector('span').textContent = expanded ? '返回列表' : '详情';
     // 每次进入详情从预览开始；返回列表时保留分类及列表原有的浏览位置。
     if (expanded) {
         panel.querySelector('.tw-details').scrollTop = 0;

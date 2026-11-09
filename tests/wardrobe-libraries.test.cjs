@@ -90,7 +90,7 @@ function createHost(saved) {
         // 此宿主只验证分区业务，弹窗选择异步返回，真实弹窗交互由界面测试覆盖。
         askDialog = testAsk;
         globalThis.api = { loadWardrobeLibraries, loadGarments, selectWardrobeLibrary, activateWardrobeLibrary,
-            addWardrobeLibrary, deleteWardrobeLibrary, importGarmentFiles, applyGarments, readWearerSelections, selectSelectionScope,
+            addWardrobeLibrary, deleteWardrobeLibrary, createGarment, importGarmentFiles, applyGarments, readWearerSelections, selectSelectionScope,
             exportGarments, deleteGarments, injectWardrobeContent, deleteGarmentImages, toggleGarmentFavorite,
             handleGarmentAction, openWardrobeExport, updateWardrobeExport, confirmWardrobeExport, closeWardrobeExport, parseWardrobeData,
             moveGarmentsToLibrary, renderBulkMenu, handleBulkMenu,
@@ -158,6 +158,42 @@ test('大分类保留旧衣柜，隔离导入、标签、穿搭、发送、导�
     assert.equal(api.readWearerSelections().char.size, 0);
     assert.deepEqual(saved.wardrobe_items.map(item => item.id), ['mine']);
     assert.equal(controls.get('.tw-library-tabs').children.length, 2);
+});
+
+test('手动新建的无图服装只写入当前衣柜，取消和保存失败保留原详情', async () => {
+    const saved = { wardrobe_items: [], wardrobe_active_library: 'default-2' };
+    const { api, controls, deleted, state } = createHost(saved);
+    for (const name of [null, '   ']) {
+        state.name = name;
+        await api.createGarment();
+    }
+    assert.equal(state.writes, 0);
+
+    state.name = '  手写外套  ';
+    await api.createGarment();
+    const id = api.state().selectedGarmentId;
+    assert.deepEqual(saved.wardrobe_items, []);
+    assert.deepEqual(saved.wardrobe_library_data['default-2'].wardrobe_items, [{
+        id, name: '手写外套', category: 'other', contentRating: 'unrated', description: '', image: '', backImage: '',
+        groupIds: [], favorite: false, lastUsedAt: 0,
+    }]);
+    api.loadGarments();
+    assert.equal(api.state().garments.get(id).name, '手写外套', '无图记录可通过普通存档重载');
+
+    const saveButton = controls.get('[data-action="save-garment"]');
+    saveButton.dataset.dirty = 'true';
+    state.name = '另一件服装';
+    state.confirm = false;
+    await api.createGarment();
+    state.confirm = true;
+    state.fail = true;
+    await api.createGarment();
+    assert.equal(state.writes, 1);
+    assert.equal(api.state().garments.size, 1);
+    assert.equal(api.state().selectedGarmentId, id);
+    assert.equal(saveButton.dataset.dirty, 'true');
+    assert.match(controls.get('.tw-library-status').textContent, /存储失败/);
+    assert.deepEqual(deleted, [], '新建全程无需调用图片接口');
 });
 
 test('导出弹窗保留全量备份，按独立衣柜筛选已保存描述，并保留可恢复的搭配', async () => {
