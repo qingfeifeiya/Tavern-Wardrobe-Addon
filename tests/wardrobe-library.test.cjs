@@ -26,6 +26,11 @@ let confirmation = true;
 let promptValue = '';
 let promptDefault = '';
 let chatId = 'chat';
+let chat = [];
+let globalWorldbooks = [];
+let characterWorldbook = null;
+let chatWorldbook = null;
+const characterCards = ['角色甲.png', '角色乙.png'].map(avatar => ({ avatar, name: '同名角色' }));
 let characterAvatar = '角色甲.png';
 let groupId = null;
 let duplicateAction = 'keep';
@@ -140,6 +145,7 @@ class ImageReader {
  * @returns {Object} 可读写的控件替身。
  */
 function control(selector) {
+    if (selector === '.tw-named-wearer-tags' && !controls.has(selector)) controls.set(selector, createLibraryNode());
     if (!controls.has(selector)) controls.set(selector, { children: [], querySelector: child => selector === '[data-bulk-favorite]' ? control(`favorite-${child}`) : null, querySelectorAll: () => [], value: selector === '[name="garment_content_rating"]' ? 'unrated' : '', dataset: {}, disabled: false, textContent: '', setAttribute(name, value) { this[name] = value; } });
     return controls.get(selector);
 }
@@ -170,8 +176,11 @@ const sandbox = {
     },
     SillyTavern: {
         getCurrentChatId: () => chatId, getRequestHeaders: () => ({ 'X-CSRF-Token': 'test-token' }),
-        getContext: () => ({ characterId: 0, characters: [{ avatar: characterAvatar }], groupId }),
+        getContext: () => ({ chat, characterId: characterCards.findIndex(card => card.avatar === characterAvatar), characters: characterCards, groupId }),
     },
+    getGlobalWorldbookNames: () => globalWorldbooks,
+    getCharWorldbookNames: () => ({ primary: characterWorldbook, additional: [] }),
+    getChatWorldbookName: () => chatWorldbook,
     toastr: { error: message => notices.push(message), success: message => notices.push(message) },
     console,
     recordDetailRefresh: () => { detailRefreshes++; },
@@ -197,7 +206,8 @@ globalThis.api = { parseWardrobeData, parseWardrobeFile, loadGarments, exportGar
     deleteGarments, addGarmentGroup, deleteGarmentGroup, moveCheckedGarments, selectAllGarments,
     readWearerSelections, selectWearer, renderWearerState, handleBulkAction, toggleMultiSelect, checkGarment, renderBulkState: actualRenderBulkState,
     searchGarments, sortGarments,
-    handleGarmentTransfer, selectSelectionScope,
+    handleGarmentTransfer, selectSelectionScope, selectSelectionCharacter, renderSelectionCharacters, readEffectiveSelections,
+    markOutfitChatPrompt, applyIsolatedOutfits, addNamedWearerTag, removeNamedWearerTag, refreshWardrobeContext, restoreLegacyNamedWearers,
     loadSendImageDataUrl, openImageReplacement, replaceGarmentImage, updateCheckedGarments,
     openGarmentGroupManager, saveGarmentGroups, reorderDraftRow, dragDraftRow, getFilterGarmentGroups, updateCategory,
     updateGarmentGroupSelection, deleteManagedGarmentGroups,
@@ -212,6 +222,8 @@ globalThis.api = { parseWardrobeData, parseWardrobeFile, loadGarments, exportGar
     showIds: ids => { visibleGarmentIds = new Set(ids); },
     selectItem: id => { selectedGarmentId = id; },
     sendType: type => { sendSettings.content_type = type; },
+    /** 切换测试中的换装模式；参数为模式标识，无返回值。 */
+    markerMode: mode => { sendSettings.marker_mode = mode; },
     sendImageQuality: quality => { sendSettings.image_quality = quality; },
     selectCategory: id => { currentCategory = id; },
     renderLibrary: () => { renderGarmentGroups = () => {}; actualRenderGarmentLibrary(); },
@@ -593,6 +605,7 @@ async function main() {
     await checkLibraryBrowsing();
     await checkImportDuplicatesAndTransfers();
     await checkSelectionScopes();
+    await checkNamedWearer();
     await checkLibraryImprovements();
     await checkImportPicker();
     await checkStableImageFilenames();
@@ -757,7 +770,8 @@ async function checkFavorites() {
     const categories = ['all', 'coats', 'favorites', 'recent', 'assigned-user', 'assigned-char', 'unassigned', 'missing-description', 'missing-image'].map(category => ({
         dataset: { category }, querySelector: () => control(`count-${category}`), setAttribute() {},
     }));
-    sandbox.testPanel.querySelectorAll = selector => selector === '[data-category]' ? categories : [];
+    const previousQueryAll = sandbox.testPanel.querySelectorAll;
+    sandbox.testPanel.querySelectorAll = selector => selector === '[data-category]' ? categories : previousQueryAll(selector);
     const list = control('.tw-items');
     list.replaceChildren = fragment => { list.cards = fragment.children; };
     api.selectCategory('all');
@@ -1039,7 +1053,7 @@ async function checkImportDuplicatesAndTransfers() {
 }
 
 /**
- * 验证全局、角色卡、聊天隔离及真实请求注入，保存失败与缺少上下文时不回退到其他范围。
+ * 验证首页指定角色卡、归属保存、聊天实际注入及三种范围隔离，缺少上下文时不回退。
  * @returns {Promise<void>} 范围存档、发送及删除清理断言完成后结束。
  */
 async function checkSelectionScopes() {
@@ -1052,6 +1066,11 @@ async function checkSelectionScopes() {
     chatId = '同名聊天';
     api.loadGarments();
     const scopeControl = control('.tw-selection-scope select');
+    const target = control('.tw-selection-character select');
+    Object.defineProperty(target, 'selectedOptions', { get: () => target.options.filter(option => option.value === target.value) });
+    target.replaceChildren = fragment => { target.options = fragment.children; };
+    api.renderSelectionCharacters();
+    assert.deepEqual(Array.from(target.options.slice(1), option => option.textContent), ['同名角色（角色甲.png）', '同名角色（角色乙.png）']);
     control('[name="garment_description"]').value = '切换范围时保留的草稿';
     scopeControl.value = 'character';
     api.selectSelectionScope({ currentTarget: scopeControl });
@@ -1061,9 +1080,38 @@ async function checkSelectionScopes() {
     api.applyGarments(['red'], 'user');
     chatId = '角色甲的另一聊天';
     assert.equal(api.readWearerSelections().char.has('blue'), true, '同一卡跨聊天共用选择');
+    characterAvatar = undefined;
+    chatId = '';
+    api.selectSelectionCharacter();
+    assert.equal(wearerInputs[1].disabled, true, '首页未指定卡时禁用归属');
+    target.value = '角色乙.png';
+    api.selectSelectionCharacter();
+    assert.equal(wearerInputs[1].disabled, false, '首页选择具体卡后可以分配');
+    assert.equal(control('.tw-wearer-character').textContent, '同名角色（角色乙.png）');
+    api.selectItem('red');
+    wearerInputs[1].checked = true;
+    api.selectWearer({ target: { closest: () => wearerInputs[1] } });
+    assert.deepEqual(scriptVariables.wardrobe_scoped_selections['["character","角色乙.png"]'].char, ['red']);
+    assert.equal(api.readWearerSelections().char.size, 0, '首页编辑目标不参与聊天读取');
+    assert.equal(control('[name="garment_description"]').value, '切换范围时保留的草稿');
+
+    api.showIds(['blue']);
+    api.selectAllGarments({ currentTarget: { checked: true } });
+    await api.handleBulkAction({ type: 'change', currentTarget: { value: 'apply-char' } });
+    assert.equal(api.readEffectiveSelections().char.has('blue'), true, '批量应用与单件编辑使用同一个目标卡');
+    characterAvatar = '角色甲.png';
+    chatId = '角色甲的另一聊天';
+    chat = [{ mes: '<!-- outfit:char=["blue"] -->', is_user: false }];
+    assert.equal(api.readEffectiveSelections().current.char.size, 0, '编辑乙时不展示甲的剧情穿着');
+    await api.handleBulkAction({ type: 'change', currentTarget: { value: 'unapply-char' } });
+    assert.equal(scriptVariables.wardrobe_scoped_selections['["character","角色乙.png"]'].anchor.char, null, '取消乙的归属不保存甲的聊天锚点');
+    chat = [];
+    const otherCardRequest = { chat: [{ role: 'user', content: '继续' }] };
+    await api.injectWardrobeContent(otherCardRequest);
+    assert.match(JSON.stringify(otherCardRequest.chat[0].content), /Char 的可选服装：蓝色外套/, '聊天仍按实际角色甲发送');
     characterAvatar = '角色乙.png';
-    assert.equal(api.readWearerSelections().char.size, 0, '另一角色卡的选择独立');
-    api.applyGarments(['red'], 'char');
+    target.value = '';
+    api.selectSelectionCharacter();
     const request = { chat: [{ role: 'user', content: '继续' }] };
     await api.injectWardrobeContent(request);
     assert.match(request.chat[0].content, /红色外套/);
@@ -1116,7 +1164,198 @@ async function checkSelectionScopes() {
     for (const record of Object.values(scriptVariables.wardrobe_scoped_selections)) {
         assert.ok(!record.user.includes('blue') && !record.char.includes('blue'), '删除清理所有范围的引用');
     }
-    console.log('通过三种范围切换、跨卡／跨聊天／群组隔离、请求注入、失败回滚、首页空范围与全范围删除清理检查。');
+    console.log('通过首页指定角色卡、单件及批量归属、编辑目标与聊天隔离、三种范围切换及删除清理检查。');
+}
+
+/**
+ * 验证角色标签按世界书保存、回填和发送，以及旧标签的手动恢复。
+ * @returns {Promise<void>} 所有归属和请求断言完成后结束。
+ */
+async function checkNamedWearer() {
+    const originalChatId = chatId;
+    const originalAvatar = characterAvatar;
+    const outfit = { ...blue, name: '棕毛衣包臀裙', description: '棕色针织毛衣和包臀裙' };
+    const combo = { ...red, id: 'combo', name: '秋日搭配', componentIds: ['blue', 'red'] };
+    scriptVariables.wardrobe_items = [outfit, red, combo];
+    scriptVariables.wardrobe_selections = { user: ['blue'], char: ['combo'] };
+    scriptVariables.wardrobe_scoped_selections = { '["character","角色甲.png"]': { char: ['blue'] } };
+    api.sendType('text');
+    api.loadGarments();
+    api.selectItem('blue');
+    globalWorldbooks = ['世界甲'];
+    const worldA = '["世界甲"]';
+    const worldB = '["世界乙"]';
+    api.refreshWardrobeContext();
+    control('[name="garment_name"]').value = outfit.name;
+    control('[name="garment_category"]').value = outfit.category;
+    control('[name="garment_description"]').value = outfit.description;
+    const owner = control('[name="garment_named_wearer"]');
+    const tags = control('.tw-named-wearer-tags');
+    const enter = { key: 'Enter', currentTarget: owner, preventDefault() {} };
+    const before = JSON.stringify(scriptVariables);
+    owner.value = ' 张莹 ';
+    api.addNamedWearerTag({ ...enter, isComposing: true });
+    assert.equal(tags.children.length, 0, '中文输入法确认候选时不生成标签');
+    api.addNamedWearerTag(enter);
+    assert.equal(owner.value, '', '回车生成标签后可继续输入');
+    owner.value = '张莹';
+    api.addNamedWearerTag(enter);
+    assert.equal(tags.children.length, 1, '同一个角色只生成一个标签');
+    assert.equal(JSON.stringify(scriptVariables), before, '回车只修改详情草稿');
+    writesFail = true;
+    assert.equal(api.saveSelectedGarment(), undefined);
+    writesFail = false;
+    assert.equal(JSON.stringify(scriptVariables), before, '失败时同时保留服装和原有归属');
+    assert.deepEqual(Array.from(api.saveSelectedGarment().namedWearersByWorld[worldA]), ['张莹']);
+    assert.deepEqual(scriptVariables.wardrobe_selections.user, [], '普通 USER 归属在同次提交移除');
+    assert.deepEqual(scriptVariables.wardrobe_selections.char, [], '含专属单品的搭配退出普通候选');
+    assert.deepEqual(scriptVariables.wardrobe_scoped_selections['["character","角色甲.png"]'].char, [], '清理其他范围的旧归属');
+    assert.throws(() => api.applyGarments(['blue'], 'char'), /专属角色/);
+    assert.equal(api.matchesGarmentFilter(api.state().garments.get('blue'), 'unassigned', api.readWearerSelections()), false);
+
+    chat = [{ is_user: true, mes: '张莹离开了。' }, { is_user: true, mes: '李娜推开了门。' }];
+    sandbox.SillyTavern.name2 = '张莹';
+    const unrelated = { chat: [{ role: 'system', content: '张莹是背景设定中的人物。' }, { role: 'user', content: '李娜推开了门。' }] };
+    await api.injectWardrobeContent(unrelated);
+    delete sandbox.SillyTavern.name2;
+    assert.equal(unrelated.chat[1].content, '李娜推开了门。', '背景设定、角色卡名和旧楼层均不触发专属服装');
+
+    chat.push({ is_user: false, mes: '张莹突然走了进来。' });
+    const regenerated = { chat: [{ role: 'user', content: '李娜推开了门。' }] };
+    await api.injectWardrobeContent(regenerated);
+    assert.equal(regenerated.chat[0].content, '李娜推开了门。', '待替换回复中的人物不影响重新生成');
+
+    chat = [{ is_user: true, mes: '张莹和李娜来到客厅。' }];
+    const request = { chat: [{ role: 'user', content: chat[0].mes }] };
+    await api.injectWardrobeContent(request);
+    const content = JSON.stringify(request.chat);
+    assert.match(content, /【张莹的专属服装】棕毛衣包臀裙/);
+    assert.match(content, /只有剧情已明确角色在场且需要描写其衣着时/);
+    assert.match(content, /不得因服装资料安排人物登场/);
+    assert.doesNotMatch(content, /秋日搭配/, '专属单品的归属不会自动发送其他未指定的搭配');
+    assert.doesNotMatch(content, /【Char|【USER|李娜的专属服装/);
+
+    // 独立选装只有专属服装时直接注入主请求，也保留图片和归属标题的对应关系。
+    api.markerMode('isolated');
+    api.sendType('image');
+    api.sendImageQuality('original');
+    const isolated = { messages: [{ role: 'user', content: '张莹和李娜在客厅。' }], type: 'normal' };
+    api.markOutfitChatPrompt({ prompt: isolated.messages }, false, true);
+    await api.applyIsolatedOutfits(isolated);
+    assert.match(isolated.messages[0].content, /【张莹的专属服装】棕毛衣包臀裙/);
+    assert.ok(isolated.messages[1].content.some(part => part.type === 'image_url'));
+    assert.doesNotMatch(JSON.stringify(isolated.messages), /棕色针织毛衣和包臀裙/);
+    api.markerMode('strip');
+    api.sendType('text');
+    api.sendImageQuality('compressed');
+
+    owner.value = '王琳';
+    api.addNamedWearerTag(enter);
+    assert.deepEqual(Array.from(api.saveSelectedGarment().namedWearersByWorld[worldA]), ['张莹', '王琳']);
+    chat = [{ is_user: true, mes: '张莹和王琳见了面。' }];
+    const shared = { chat: [{ role: 'user', content: chat[0].mes }] };
+    await api.injectWardrobeContent(shared);
+    assert.match(shared.chat[0].content, /【张莹、王琳的专属服装】棕毛衣包臀裙/);
+    assert.equal(shared.chat[0].content.split('棕毛衣包臀裙').length, 2, '两个角色都出现时同一件服装只发送一次');
+
+    globalWorldbooks = ['世界乙'];
+    const otherWorld = { chat: [{ role: 'user', content: chat[0].mes }] };
+    await api.injectWardrobeContent(otherWorld);
+    assert.equal(otherWorld.chat[0].content, chat[0].mes, '发送时实时读取世界书，角色同名也不会借用另一组的归属');
+    api.refreshWardrobeContext();
+    assert.equal(tags.children.length, 0, '切换世界书清空界面中上一组的标签');
+    owner.value = '李娜';
+    api.addNamedWearerTag(enter);
+    assert.deepEqual(Array.from(api.saveSelectedGarment().namedWearersByWorld[worldB]), ['李娜']);
+    globalWorldbooks = [];
+    chatId = '世界书测试聊天';
+    chatWorldbook = '世界乙';
+    api.refreshWardrobeContext();
+    assert.deepEqual(tags.children.map(tag => tag.dataset.namedWearer), ['李娜'], '聊天绑定的世界书也能读取对应归属');
+    chatWorldbook = null;
+    characterWorldbook = '世界甲';
+    api.refreshWardrobeContext();
+    assert.deepEqual(tags.children.map(tag => tag.dataset.namedWearer), ['张莹', '王琳'], '角色卡绑定的世界书也能切换归属');
+    characterWorldbook = null;
+    globalWorldbooks = ['世界甲'];
+    api.refreshWardrobeContext();
+    assert.deepEqual(tags.children.map(tag => tag.dataset.namedWearer), ['张莹', '王琳'], '切回原世界书恢复原来的标签');
+    chat = [];
+
+    await api.exportGarments(['blue']);
+    const backup = JSON.parse(await blobs.get(downloads.at(-1).href).text());
+    const restoredWorlds = api.parseWardrobeFile(backup).items.get('blue').namedWearersByWorld;
+    assert.deepEqual(Array.from(restoredWorlds[worldA]), ['张莹', '王琳']);
+    assert.deepEqual(Array.from(restoredWorlds[worldB]), ['李娜']);
+    const legacy = api.parseWardrobeData({ items: [{ ...outfit, namedWearer: ' 张莹 ' }], groups: [] });
+    assert.deepEqual(Array.from(legacy.items.get('blue').namedWearers), ['张莹'], '旧版单个名字读取为一个标签');
+
+    controls.set('.tw-preview', createLibraryNode());
+    api.selectItem('combo');
+    api.renderGarmentDetails();
+    assert.equal(tags.children.length, 0, '切换服装时清除上一件的角色标签');
+    owner.value = '李娜';
+    assert.equal(api.saveSelectedGarment(), undefined, '整套不可指定给与成员不同的角色');
+    owner.value = '王琳';
+    assert.deepEqual(Array.from(api.saveSelectedGarment().namedWearersByWorld[worldA]), ['王琳']);
+
+    api.selectItem('blue');
+    api.renderGarmentDetails();
+    assert.deepEqual(tags.children.map(tag => tag.dataset.namedWearer), ['张莹', '王琳'], '重新打开时回填保存的标签');
+    owner.focus = () => {};
+    for (const tag of tags.children.slice()) {
+        tag.remove = () => { tags.children = tags.children.filter(child => child !== tag); };
+        api.removeNamedWearerTag({ target: { closest: () => tag } });
+    }
+    const cleared = api.saveSelectedGarment().namedWearersByWorld;
+    assert.deepEqual(Array.from(cleared[worldA]), []);
+    assert.deepEqual(Array.from(cleared[worldB]), ['李娜'], '清空一组标签保留其他世界书归属');
+    assert.equal(api.readWearerSelections().user.size, 0, '清空专属角色不恢复旧归属');
+
+    scriptVariables.wardrobe_items = [{ ...outfit, namedWearer: ' 莹 ' }];
+    api.loadGarments();
+    api.renderGarmentDetails();
+    const restore = control('[data-action="restore-named-wearers"]');
+    assert.equal(tags.children.length, 0, '旧标签在确认归属前不显示在当前世界书');
+    assert.equal(restore.hidden, false);
+    api.restoreLegacyNamedWearers({ currentTarget: restore });
+    const migrated = api.saveSelectedGarment();
+    assert.deepEqual(Array.from(migrated.namedWearersByWorld[worldA]), ['莹']);
+    assert.equal(migrated.namedWearers.length, 0);
+
+    // 两张卡使用完全相同的世界书和角色名，发送时只认实际游玩的角色卡。
+    const scope = control('.tw-selection-scope select');
+    const target = control('.tw-selection-character select');
+    characterAvatar = '角色乙.png';
+    target.value = '角色甲.png';
+    scope.value = 'character';
+    api.selectSelectionScope({ currentTarget: scope });
+    assert.equal(tags.children.length, 0, '世界书旧标签不能自动套用到目标角色卡');
+    assert.equal(restore.hidden, false);
+    api.restoreLegacyNamedWearers({ currentTarget: restore });
+    const cardKey = JSON.stringify([JSON.stringify(['character', '角色甲.png']), ['世界甲']]);
+    assert.deepEqual(Array.from(api.saveSelectedGarment().namedWearersByWorld[cardKey]), ['莹']);
+    chat = [{ is_user: true, mes: '莹推开了门。' }];
+    const sameNameOtherCard = { chat: [{ role: 'user', content: chat[0].mes }] };
+    await api.injectWardrobeContent(sameNameOtherCard);
+    assert.equal(sameNameOtherCard.chat[0].content, chat[0].mes, '正在游玩乙卡时，甲卡的同名专属服装不发送');
+
+    characterAvatar = '角色甲.png';
+    target.value = '角色乙.png';
+    api.selectSelectionCharacter();
+    assert.equal(tags.children.length, 0, '详情按选择的乙卡显示归属');
+    const boundCard = { chat: [{ role: 'user', content: chat[0].mes }] };
+    await api.injectWardrobeContent(boundCard);
+    assert.match(boundCard.chat[0].content, /【莹的专属服装】棕毛衣包臀裙/, '发送按游玩的甲卡匹配，与编辑目标无关');
+
+    chat = [];
+    characterAvatar = originalAvatar;
+    chatId = originalChatId;
+    globalWorldbooks = [];
+    target.value = '';
+    scope.value = 'global';
+    api.selectSelectionScope({ currentTarget: scope });
+    console.log('通过角色标签的世界书隔离、请求匹配、旧标签恢复、搭配限制和备份检查。');
 }
 
 /**
