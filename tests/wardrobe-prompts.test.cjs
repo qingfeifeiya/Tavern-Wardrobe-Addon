@@ -136,7 +136,9 @@ renderGarmentLibrary = () => {};
 LEGACY_DESCRIPTION_PROMPT_FINGERPRINTS.outfit.add(0x79ad38f784fa8524n);
 LEGACY_DESCRIPTION_PROMPT_FINGERPRINTS.item.add(0x59f7761139e5737fn);
 globalThis.api = { loadWardrobeTemplates, saveWardrobeTemplate, loadDescriptionPrompts, saveDescriptionPrompts,
-    loadGarments, generateGarmentDescription, generateMissingGarmentDescriptions, stopDescriptionRequest, saveSelectedGarment, buildWearerContent,
+    /** 模拟加载并重填详情；无参数，无返回值。 */
+    loadGarments() { loadGarments(); setDetailsDirty(false); },
+    setDetailsDirty, generateGarmentDescription, generateMissingGarmentDescriptions, stopDescriptionRequest, saveSelectedGarment, buildWearerContent,
     handleWardrobeData, parseWardrobeSettingsData, loadSendSettings,
     filterMissing: ids => { currentCategory = 'missing-description'; visibleGarmentIds = new Set(ids); },
     state: () => ({ wardrobeTemplates, descriptionPrompts, sendSettings, garments, garmentGroups }),
@@ -938,6 +940,46 @@ async function checkBulkDescriptions() {
     assert.equal(saved.wardrobe_items[0].description, '识别描述');
     assert.equal(saved.wardrobe_items[1].description, '', '不识别其他标签或搜索隐藏的记录');
     assert.equal(saved.wardrobe_items[2].description, '', '无图记录留待补图');
+
+    saved.wardrobe_items = [{ id: 'editing', name: '原名称', category: 'tops', description: '', image }];
+    api.loadGarments();
+    api.filterMissing(['editing']);
+    controls['[name="garment_description"]'].value = '';
+    controls['[name="garment_name"]'].value = '未保存的新名称';
+    api.setDetailsDirty(true);
+    const beforeDraft = requests.length;
+    await api.generateMissingGarmentDescriptions();
+    assert.equal(requests.length, beforeDraft, '只有名称被编辑时也跳过当前条目');
+    assert.equal(controls['[name="garment_name"]'].value, '未保存的新名称');
+    assert.match(controls['.tw-library-status'].textContent, /已跳过 1 件有未保存修改/);
+
+    const beforeTagConfirmation = JSON.stringify(saved);
+    modelReply = JSON.stringify({ name: 'AI 名称', description: 'AI 描述', category: 'outfits', tags: ['未保存的新标签'] });
+    api.setDetailsDirty(false);
+    confirmationEffect = message => {
+        if (message.includes('建议新增以下标签')) {
+            controls['[name="garment_name"]'].value = '确认期间修改的名称';
+            api.setDetailsDirty(true);
+        }
+        return true;
+    };
+    await api.generateMissingGarmentDescriptions();
+    assert.equal(JSON.stringify(saved), beforeTagConfirmation, '标签确认后发现草稿时不写入任何识图字段');
+    assert.equal(controls['[name="garment_name"]'].value, '确认期间修改的名称');
+    assert.match(controls['.tw-library-status'].textContent, /已跳过 1 件有未保存修改/);
+
+    api.setDetailsDirty(false);
+    confirmationEffect = message => {
+        if (message.includes('建议新增以下标签')) api.stopDescriptionRequest();
+        return true;
+    };
+    try {
+        await api.generateMissingGarmentDescriptions();
+        assert.equal(JSON.stringify(saved), beforeTagConfirmation, '确认新标签期间取消后不提交结果');
+        assert.match(controls['.tw-library-status'].textContent, /识图已取消，已保存 0 张/);
+    } finally {
+        confirmationEffect = undefined;
+    }
     console.log('通过一键识图的数量确认、跳过已有描述及草稿、自动保存、重复点击、失败保留和取消检查。');
 }
 

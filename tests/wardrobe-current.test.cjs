@@ -11,6 +11,7 @@ let chat = [];
 let chatId = 'chat-a';
 let writesFail = false;
 let messageVariableReads = 0;
+let messageVariableWrites = 0;
 const controls = new Map();
 const wearerInputs = ['user', 'char'].map(wearer => ({ dataset: { wearer }, disabled: false, checked: false }));
 const sendStatus = { textContent: '', dataset: {} };
@@ -35,6 +36,7 @@ const sandbox = {
     /** 模拟存档提交及失败；参数为更新对象，无返回值。 */
     insertOrAssignVariables(data, option) {
         if (writesFail) throw new Error('存储失败');
+        if (option.type === 'message') messageVariableWrites++;
         const floor = chat[option.message_id];
         const target = option.type === 'message' ? ((floor.variables ??= [])[floor.swipe_id ?? 0] ??= {}) : saved;
         Object.assign(target, structuredClone(data));
@@ -69,10 +71,14 @@ globalThis.api = {
     loadGarments, readWearerSelections, saveWearerSelections, pruneDeletedSelections, applyGarments,
     resolveCurrentOutfits, readEffectiveSelections, clampCurrentAnchors, renderWearerState,
     matchGarmentByName, matchesGarmentFilter, buildWearerContent, stripOutfitMarkers, injectWardrobeContent,
-    markOutfitChatPrompt, applyIsolatedOutfits, publishOutfitSnapshot, parseOutfitSnapshot,
+    markOutfitChatPrompt, applyIsolatedOutfits, publishOutfitSnapshot, parseOutfitSnapshot, stopOutfitRequest,
     loadSendSettings, saveSendSettings,
     /** 替换已保存的模拟连接；参数为连接配置，无返回值。 */
     setApiConnection(config) { savedApiSettings = config; },
+    /** 控制主请求读图等待；参数为图片读取函数，无返回值。 */
+    setImageLoader(loader) { loadSendImageDataUrl = loader; },
+    /** 模拟切换衣柜；参数为新分区标识，无返回值。 */
+    setLibrary(id) { activeLibraryId = id; },
     select: id => { selectedGarmentId = id; },
     state: () => ({ garments, selectedGarmentId, sendSettings, wardrobeTemplates }),
 };
@@ -564,3 +570,149 @@ async function checkIsolatedOutfits() {
 }
 
 test('独立 API 选装隔离主请求并按设置读取历史楼层', checkIsolatedOutfits);
+
+/**
+ * 控制主请求读图的时机，覆盖同轮并发、重生成取消、换库、删除和存档失败。
+ * @returns {Promise<void>} 发送内容和楼层快照验证结束后完成。
+ */
+async function checkIsolatedOutfitCommit() {
+    reset();
+    sendForm.elements.marker_mode.value = 'isolated';
+    sendForm.elements.content_type.value = 'text_image';
+    api.saveSendSettings({ preventDefault() {} });
+    api.setApiConnection({ mode: 'host' });
+    let selectionRequests = 0;
+    let holdReference;
+    sandbox.SillyTavern.getRequestHeaders = () => ({});
+    sandbox.window.parent.fetch = async () => {
+        selectionRequests++;
+        return new Response(JSON.stringify({ choices: [{ message: { content: '{"user":["red"]}' } }] }));
+    };
+    api.setImageLoader(async url => {
+        if (holdReference && selectionRequests === holdReference.requestNumber) {
+            const gate = holdReference;
+            holdReference = undefined;
+            gate.start();
+            await gate.released;
+        }
+        return url;
+    });
+    /** 暂停下一个选装任务的主请求参考图；无参数，返回读图开始和放行的控制对象。 */
+    const holdNextReference = () => {
+        const gate = { requestNumber: selectionRequests + 1 };
+        gate.started = new Promise(resolve => { gate.start = resolve; });
+        gate.released = new Promise((resolve, reject) => { gate.release = resolve; gate.reject = reject; });
+        holdReference = gate;
+        return gate;
+    };
+    /** 从酒馆事件启动请求；参数为用户输入和生成类型，返回请求与完成信号。 */
+    const startRequest = (input, type = 'normal') => {
+        const request = { type, messages: [{ role: 'user', content: input }] };
+        api.markOutfitChatPrompt({ prompt: request.messages }, false);
+        return { request, done: api.applyIsolatedOutfits(request) };
+    };
+    const key = 'wardrobe_outfit:wardrobe-test:default-1';
+    const turn = { is_user: true, mes: '本轮换红衣' };
+    chat = [turn];
+    let gate = holdNextReference();
+    const writesBefore = messageVariableWrites;
+    const first = startRequest(turn.mes);
+    await gate.started;
+    const second = startRequest(turn.mes);
+    assert.equal(turn.variables, undefined, '主请求参考图尚未就绪时不写楼层');
+    assert.equal(second.request.messages.length, 1);
+    gate.release();
+    await Promise.all([first.done, second.done]);
+    assert.equal(selectionRequests, 1, '同轮两个请求只选装一次');
+    assert.equal(messageVariableWrites, writesBefore + 1, '同轮只提交一次楼层快照');
+    assert.deepEqual(turn.variables[0][key].user, ['red']);
+    assert.match(first.request.messages[0].content, /红衣独有描述/);
+    assert.deepEqual(second.request.messages, first.request.messages, '两份请求注入同一份穿搭内容');
+    assert.notEqual(second.request.messages[1].content, first.request.messages[1].content, '各请求独立持有图片内容块');
+
+    turn.variables[0][key].user = ['blue'];
+    chat.push({ mes: '正在替换的 AI 回复' });
+    gate = holdNextReference();
+    const canceled = startRequest(turn.mes, 'regenerate');
+    await gate.started;
+    api.stopOutfitRequest();
+    assert.deepEqual(turn.variables[0][key].user, ['blue'], '等待主请求参考图时取消，保留上次快照');
+
+    // 旧读图仍未完成时开始新任务，旧任务的清理不能释放新任务的槽位。
+    const retryGate = holdNextReference();
+    const retry = startRequest(turn.mes, 'regenerate');
+    await retryGate.started;
+    gate.release();
+    await canceled.done;
+    assert.equal(canceled.request.messages.length, 1);
+    const joined = startRequest(turn.mes, 'regenerate');
+    retryGate.release();
+    await Promise.all([retry.done, joined.done]);
+    assert.equal(selectionRequests, 3);
+    assert.deepEqual(turn.variables[0][key].user, ['red']);
+    assert.deepEqual(retry.request.messages, joined.request.messages);
+
+    turn.variables[0][key].user = ['blue'];
+    writesFail = true;
+    const failed = startRequest(turn.mes, 'regenerate');
+    try {
+        await failed.done;
+        assert.match(failed.request.messages[0].content, /蓝衣独有描述/, '存档失败沿用同一楼层上次成功的穿搭');
+        assert.doesNotMatch(failed.request.messages[0].content, /红衣独有描述/);
+        assert.deepEqual(turn.variables[0][key].user, ['blue']);
+    } finally {
+        writesFail = false;
+    }
+
+    gate = holdNextReference();
+    const badReference = startRequest(turn.mes, 'regenerate');
+    await gate.started;
+    gate.reject(new Error('新穿搭参考图读取失败'));
+    await badReference.done;
+    assert.match(badReference.request.messages[0].content, /蓝衣独有描述/, '新穿搭读图失败沿用已有穿搭');
+    assert.deepEqual(turn.variables[0][key].user, ['blue']);
+
+    gate = holdNextReference();
+    const deleting = startRequest(turn.mes, 'regenerate');
+    await gate.started;
+    saved.wardrobe_items = saved.wardrobe_items.filter(item => item.id !== 'red');
+    api.loadGarments();
+    gate.release();
+    await deleting.done;
+    assert.match(deleting.request.messages[0].content, /蓝衣独有描述/);
+    assert.match(deleting.request.messages[0].content, /长裤独有描述/, '删除一件服装后仍注入其他角色的有效穿搭');
+    assert.deepEqual(turn.variables[0][key].user, ['blue']);
+
+    // 换库后即使旧模型回复迟到也不能写入当前衣柜或原衣柜的楼层变量。
+    saved.wardrobe_items = structuredClone([blue, red, pants, combination]);
+    api.loadGarments();
+    gate = holdNextReference();
+    const switching = startRequest(turn.mes, 'regenerate');
+    await gate.started;
+    api.stopOutfitRequest();
+    api.setLibrary('default-2');
+    gate.release();
+    await switching.done;
+    assert.equal(switching.request.messages.length, 1);
+    assert.deepEqual(Object.keys(turn.variables[0]), [key]);
+    assert.deepEqual(turn.variables[0][key].user, ['blue']);
+    api.setLibrary('default-1');
+
+    // 不同楼层排队，等上一楼层提交后读取其穿搭，再写回自己的用户楼层。
+    chat = [turn];
+    gate = holdNextReference();
+    const earlier = startRequest(turn.mes);
+    await gate.started;
+    const nextTurn = { is_user: true, mes: '下一轮仍穿红衣' };
+    chat.push(nextTurn);
+    const requestsBeforeNextTurn = selectionRequests;
+    const later = startRequest(nextTurn.mes);
+    assert.equal(selectionRequests, requestsBeforeNextTurn, '其他楼层不会并行调用选装接口');
+    gate.release();
+    await Promise.all([earlier.done, later.done]);
+    assert.equal(selectionRequests, requestsBeforeNextTurn + 1);
+    assert.deepEqual(nextTurn.variables[0][key].user, ['red']);
+    assert.match(later.request.messages[0].content, /红衣独有描述/);
+}
+
+test('独立选装在主请求就绪后提交，同轮共用快照并隔离迟到结果', checkIsolatedOutfitCommit);
