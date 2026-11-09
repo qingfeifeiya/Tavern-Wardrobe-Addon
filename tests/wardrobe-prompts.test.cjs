@@ -27,16 +27,28 @@ function createForm(fields, owner = '') {
 const forms = new Map(['user', 'char', 'image'].map(owner => [`[data-template-owner="${owner}"]`, createForm(['single', 'wardrobe'], owner)]));
 const descriptionForm = createForm(['outfit', 'item']);
 forms.set('.tw-description-form', descriptionForm);
-const sendForm = createForm(['content_type', 'position', 'marker_mode', 'send_content_rating', 'outfit_history_count', 'image_quality']);
+const sendForm = createForm(['content_type', 'position', 'marker_mode', 'outfit_history_count', 'image_quality']);
 sendForm.elements.content_type.value = 'text';
 sendForm.elements.position.value = 'user_end';
 sendForm.elements.marker_mode.value = 'strip';
-sendForm.elements.send_content_rating.checked = true;
+const outfitForm = createForm(['prompt']);
+const ratingForm = createForm(['prompt']);
+ratingForm.elements.send_content_rating = { checked: true };
 const dataInput = { files: [], value: '', click() { this.opened = true; } };
 const dataStatus = { textContent: '', dataset: {} };
 const dataButtons = ['import-data', 'export-data'].map(action => ({ dataset: { action }, disabled: false }));
 forms.set('.tw-data-import', dataInput);
 forms.set('.tw-data-status', dataStatus);
+const presetSelect = {
+    value: '', disabled: true, options: [],
+    /** 接收渲染后的预设选项；参数为选项元素，无返回值。 */
+    replaceChildren(...options) { this.options = options; },
+};
+const presetStatus = { textContent: '', dataset: {} };
+const presetButtons = new Map(['save-preset', 'apply-preset', 'delete-preset'].map(action => [action, { dataset: { action }, disabled: false }]));
+forms.set('.tw-preset-select', presetSelect);
+forms.set('.tw-preset-status', presetStatus);
+for (const [action, button] of presetButtons) forms.set(`[data-action="${action}"]`, button);
 const downloads = [];
 const downloadBlobs = new Map();
 const controls = {
@@ -112,6 +124,9 @@ const sandbox = {
     } },
     testSettingsPanel: { querySelector: selector => forms.get(selector), querySelectorAll: () => dataButtons },
     testSendForm: sendForm,
+    testOutfitForm: outfitForm,
+    testRatingForm: ratingForm,
+    testPresetName: null,
     testPanel: { querySelector: selector => controls[selector], querySelectorAll: () => [] },
     getVariables: () => saved,
     insertOrAssignVariables: data => { if (writesFail) throw new Error('存储失败'); Object.assign(saved, structuredClone(data)); },
@@ -124,10 +139,12 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
 const previousOutfitPrompt = '旧整套测试文本';
 const previousItemPrompt = '旧单品测试文本';
 const hooks = `
-/** 用现有确认替身驱动识图标签流程；参数为弹窗说明，返回模拟选择。 */
-askDialog = async ({ message }) => window.parent.confirm(message);
+/** 模拟确认和预设命名；参数为弹窗配置，返回模拟选择。 */
+askDialog = async ({ message, input }) => input === undefined ? window.parent.confirm(message) : testPresetName;
 settingsPanel = testSettingsPanel;
 sendForm = testSendForm;
+outfitForm = testOutfitForm;
+ratingForm = testRatingForm;
 panel = testPanel;
 root = { isConnected: true };
 refreshWardrobe = () => {};
@@ -139,7 +156,10 @@ globalThis.api = { loadWardrobeTemplates, saveWardrobeTemplate, loadDescriptionP
     /** 模拟加载并重填详情；无参数，无返回值。 */
     loadGarments() { loadGarments(); setDetailsDirty(false); },
     setDetailsDirty, generateGarmentDescription, generateMissingGarmentDescriptions, stopDescriptionRequest, saveSelectedGarment, buildWearerContent,
-    handleWardrobeData, parseWardrobeSettingsData, loadSendSettings,
+    handleWardrobeData, parseWardrobeSettingsData, loadSendSettings, loadOutfitSettings, saveOutfitSettings,
+    handleWardrobePreset, readWardrobePresets, renderWardrobePresets,
+    restorePromptDefaults, saveRatingSettings, saveSendSettings, promptDefaults: PROMPT_FORM_DEFAULTS,
+    settingsMarkup: PANEL_HTML,
     filterMissing: ids => { currentCategory = 'missing-description'; visibleGarmentIds = new Set(ids); },
     state: () => ({ wardrobeTemplates, descriptionPrompts, sendSettings, garments, garmentGroups }),
 };
@@ -155,6 +175,17 @@ const api = sandbox.api;
 async function main() {
     api.loadWardrobeTemplates();
     api.loadDescriptionPrompts();
+    const outfitPage = api.settingsMarkup.match(/<section id="tw-settings-outfit"[\s\S]*?<\/section>/)?.[0];
+    const ratingPage = api.settingsMarkup.match(/<section id="tw-settings-rating"[\s\S]*?<\/section>/)?.[0];
+    const sendPage = api.settingsMarkup.match(/<section id="tw-settings-send"[\s\S]*?<\/section>/)?.[0];
+    assert.match(api.settingsMarkup, /data-settings-page="outfit"[^>]*aria-controls="tw-settings-outfit"[^>]*>[\s\S]*?<span>选装生成<\/span>/);
+    assert.match(api.settingsMarkup, /data-settings-page="rating"[^>]*aria-controls="tw-settings-rating"[^>]*>[\s\S]*?<span>服装分级<\/span>/);
+    assert.match(ratingPage, /name="send_content_rating"[\s\S]*<textarea name="prompt"[^>]*required/, '服装分级页包含分级开关和提示词');
+    assert.doesNotMatch(outfitPage, /send_content_rating/, '选装生成页只编辑选装提示词');
+    const restoreButtons = [...api.settingsMarkup.matchAll(/<button type="button" data-prompt-defaults="([a-z]+)">恢复默认<\/button>/g)];
+    assert.deepEqual(restoreButtons.map(match => match[1]), ['user', 'char', 'image', 'description', 'outfit', 'rating'], '六个提示词页均可恢复默认，按钮不自动提交');
+    assert.doesNotMatch(sendPage, /send_content_rating/, '发送内容页不重复展示分级开关');
+    assert.match(api.settingsMarkup, /data-settings-page="presets"[^>]*aria-controls="tw-settings-presets"/);
     assert.equal(descriptionForm.elements.namedItem('item').value, api.state().descriptionPrompts.item, '单品提示词填入实际控件');
     assert.equal(api.state().wardrobeTemplates.user.single, '旧的 USER 单套', '新增设置保留旧角色模板');
     for (const [owner, fields] of [['user', ['wardrobe']], ['char', ['single', 'wardrobe']], ['image', ['single', 'wardrobe']]]) {
@@ -354,7 +385,14 @@ async function main() {
     assert.ok(api.state().descriptionPrompts.item.includes('单品'), '非法类型在存档入口回退默认值');
 
     // 设置备份必须按字段挑选，不能因其他对象附加 API 属性而泄露连接信息。
+    saved.wardrobe_send = { content_rating_prompt: '内容分级用于说明服装性质：SFW 表示日常／非色情服装，NSFW 表示色情／成人服装，未标注表示尚未判断。NSFW 标记不代表当前剧情允许色情内容或要求进入色情情节，也不直接禁止外穿；是否选用由角色设定、世界观与剧情场景决定。' };
     api.loadSendSettings();
+    assert.equal(ratingForm.elements.prompt.value, api.promptDefaults.rating.prompt, '原样保存的旧分级默认词升级到新版');
+    api.loadOutfitSettings();
+    assert.match(outfitForm.elements.prompt.value, /套装优先，单品按缺项补充/, '旧存档显示默认选装规则');
+    outfitForm.elements.prompt.value = '已保存的选装提示词';
+    api.saveOutfitSettings({ preventDefault() {}, currentTarget: outfitForm });
+    outfitForm.elements.prompt.value = '尚未保存的选装提示词';
     const secret = 'test-secret-must-never-be-exported';
     saved.wardrobe_api = { mode: 'custom', apiurl: `https://${secret}.test`, key: secret, model: secret, temperature: 0.7, max_tokens: 4000 };
     saved.other_private_data = secret;
@@ -367,8 +405,10 @@ async function main() {
     assert.equal(downloads.at(-1).name, '衣柜设置.json');
     assert.deepEqual(Object.keys(backup).sort(), ['format', 'settings', 'version']);
     assert.equal(backup.format, 'tw-wardrobe-settings');
-    assert.deepEqual(Object.keys(backup.settings).sort(), ['description_prompts', 'send', 'templates']);
-    assert.deepEqual(Object.keys(backup.settings.send).sort(), ['content_type', 'image_quality', 'marker_mode', 'outfit_history_count', 'position', 'send_content_rating']);
+    assert.deepEqual(Object.keys(backup.settings).sort(), ['description_prompts', 'outfit_prompt', 'send', 'templates']);
+    assert.equal(backup.settings.outfit_prompt, '已保存的选装提示词', '备份只导出已保存的提示词');
+    assert.deepEqual(Object.keys(backup.settings.send).sort(), ['content_rating_prompt', 'content_type', 'image_quality', 'marker_mode', 'outfit_history_count', 'position', 'send_content_rating']);
+    assert.match(backup.settings.send.content_rating_prompt, /A 档：公共或日常场景[\s\S]*B 档：半私密或有氛围的场景[\s\S]*C 档：私密或亲密场景/, '新版分档提示词随设置导出');
     assert.equal(backup.settings.send.image_quality, 'compressed', '旧设置默认发送压缩参考图');
     assert.equal(backup.settings.send.send_content_rating, true, '设置备份包含分级开关');
     assert.equal(backup.settings.send.marker_mode, 'strip', '导出包含默认换装记录模式');
@@ -388,9 +428,11 @@ async function main() {
     backup.settings.send.outfit_history_count = 6;
     backup.settings.send.image_quality = 'original';
     backup.settings.send.send_content_rating = false;
+    backup.settings.send.content_rating_prompt = '恢复的分级提示词';
     backup.settings.templates.user.single = '恢复的 USER 模板 {{name}}';
     backup.settings.description_prompts.outfit = '恢复的服装提示词';
-    // 即使外部文件夹带 API 字段，导入也只能写入三个允许的脚本变量。
+    backup.settings.outfit_prompt = '恢复的选装提示词';
+    // 即使外部文件夹带 API 字段，导入也只能写入明确允许的脚本变量。
     backup.wardrobe_api = { key: 'malicious-key' };
     backup.settings.api = { key: 'malicious-key' };
     backup.settings.send.model = 'malicious-model';
@@ -410,7 +452,10 @@ async function main() {
     assert.equal(saved.wardrobe_send.image_quality, 'original', '设置备份保留参考图画质');
     assert.equal(sendForm.elements.image_quality.value, 'original', '导入后回填画质设置');
     assert.equal(saved.wardrobe_send.send_content_rating, false, '设置导入保留关闭分级');
-    assert.equal(sendForm.elements.send_content_rating.checked, false, '设置导入回填分级开关');
+    assert.equal(ratingForm.elements.send_content_rating.checked, false, '设置导入回填分级开关');
+    assert.equal(ratingForm.elements.prompt.value, '恢复的分级提示词', '设置导入回填分级提示词');
+    assert.equal(saved.wardrobe_outfit_prompt, '恢复的选装提示词');
+    assert.equal(outfitForm.elements.prompt.value, '恢复的选装提示词', '设置导入回填选装提示词');
     const legacyBackup = structuredClone(backup);
     delete legacyBackup.settings.send.marker_mode;
     delete legacyBackup.settings.send.outfit_history_count;
@@ -424,6 +469,9 @@ async function main() {
     const invalidRating = structuredClone(backup);
     invalidRating.settings.send.send_content_rating = 'false';
     assert.throws(() => api.parseWardrobeSettingsData(invalidRating), /发送内容设置无效/, '分级开关仅接受布尔值');
+    invalidRating.settings.send.send_content_rating = false;
+    invalidRating.settings.send.content_rating_prompt = '  ';
+    assert.throws(() => api.parseWardrobeSettingsData(invalidRating), /分级提示词不能为空/);
     assert.equal(api.parseWardrobeSettingsData(legacyBackup).send.marker_mode, 'strip', '旧备份缺失模式时使用默认值');
     assert.equal(api.parseWardrobeSettingsData(legacyBackup).send.outfit_history_count, 2, '旧备份默认读前两楼');
     const invalidMarker = structuredClone(backup);
@@ -434,6 +482,14 @@ async function main() {
     assert.equal(saved.wardrobe_templates.user.key, undefined, '丢弃模板中夹带的 API 字段');
     assert.equal(dataInput.value, '', '导入后允许再次选择同一文件');
     assert.equal(dataStatus.dataset.error, 'false');
+    const backupWithoutOutfitPrompt = structuredClone(backup);
+    delete backupWithoutOutfitPrompt.settings.outfit_prompt;
+    delete backupWithoutOutfitPrompt.settings.send.content_rating_prompt;
+    dataInput.files = [{ text: async () => JSON.stringify(backupWithoutOutfitPrompt) }];
+    await api.handleWardrobeData({ type: 'change', currentTarget: dataInput });
+    assert.equal(dataStatus.dataset.error, 'false', '旧版备份可正常导入');
+    assert.equal(outfitForm.elements.prompt.value, '恢复的选装提示词', '旧版备份保留本机已保存的选装提示词');
+    assert.equal(ratingForm.elements.prompt.value, '恢复的分级提示词', '旧版备份保留本机已保存的分级提示词');
 
     const beforeInvalidImport = JSON.stringify(saved);
     const incomplete = structuredClone(backup);
@@ -442,7 +498,9 @@ async function main() {
     invalidSend.settings.send.content_type = 'invalid';
     const invalidPrompts = structuredClone(backup);
     invalidPrompts.settings.description_prompts.item = '';
-    for (const invalid of ['{bad', JSON.stringify({ format: 'tw-wardrobe', version: 1, items: [], groups: [] }), JSON.stringify(incomplete), JSON.stringify(invalidSend), JSON.stringify(invalidPrompts)]) {
+    const invalidOutfitPrompt = structuredClone(backup);
+    invalidOutfitPrompt.settings.outfit_prompt = '  ';
+    for (const invalid of ['{bad', JSON.stringify({ format: 'tw-wardrobe', version: 1, items: [], groups: [] }), JSON.stringify(incomplete), JSON.stringify(invalidSend), JSON.stringify(invalidPrompts), JSON.stringify(invalidOutfitPrompt)]) {
         dataInput.files = [{ text: async () => invalid }];
         await api.handleWardrobeData({ type: 'change', currentTarget: dataInput });
         assert.equal(JSON.stringify(saved), beforeInvalidImport, '文件校验失败时不提交部分设置');
@@ -465,6 +523,7 @@ async function main() {
     await api.handleWardrobeData({ type: 'change', currentTarget: dataInput });
     assert.equal(JSON.stringify(saved), beforeContentFailure, '导入新发送类型时仍验证已应用服装是否具备图片');
     assert.match(dataStatus.textContent, /图片/);
+    await checkWardrobePresets();
     console.log('通过图片模板保存、旧模板兼容、描述提示词持久化、生成类型切换、实际请求及失败保留检查。');
     console.log('通过 JSON 名称与描述解析、AI 标签创建及复用、保存失败回滚、纯文本兼容及 USER/Char 模板继承检查。');
     console.log('通过设置导出字段白名单、API 零导出与零覆盖、设置恢复、错误文件及保存失败检查。');
@@ -474,6 +533,99 @@ async function main() {
     await checkBulkDescriptionConcurrency();
     await checkBulkDescriptions();
     await checkPastedDescriptionJson();
+    checkPromptDefaults();
+}
+
+/**
+ * 验证六页提示词的恢复默认草稿、保存状态及分级开关的独立性。
+ * @returns {void} 所有表单恢复和回读断言结束后返回。
+ */
+function checkPromptDefaults() {
+    const cases = [
+        ...['user', 'char', 'image'].map(owner => [owner, forms.get(`[data-template-owner="${owner}"]`), api.saveWardrobeTemplate, () => saved.wardrobe_templates[owner]]),
+        ['description', descriptionForm, api.saveDescriptionPrompts, () => saved.wardrobe_description_prompts],
+        ['outfit', outfitForm, api.saveOutfitSettings, () => ({ prompt: saved.wardrobe_outfit_prompt })],
+        ['rating', ratingForm, api.saveRatingSettings, () => ({ prompt: saved.wardrobe_send.content_rating_prompt })],
+    ];
+    ratingForm.elements.send_content_rating.checked = false;
+    for (const [page, form, save, read] of cases) {
+        const defaults = Object.entries(api.promptDefaults[page]);
+        for (const [field] of defaults) form.elements.namedItem(field).value = '自定义草稿';
+        const before = JSON.stringify(saved);
+        api.restorePromptDefaults({ currentTarget: { form, dataset: { promptDefaults: page } } });
+        assert.equal(JSON.stringify(saved), before, `${page} 恢复默认只更新草稿`);
+        for (const [field, value] of defaults) assert.equal(form.elements.namedItem(field).value, value);
+        save({ preventDefault() {}, currentTarget: form });
+        for (const [field] of defaults) assert.equal(read()[field], null, `${page} 保存为跟随脚本默认值`);
+    }
+    api.loadSendSettings();
+    assert.equal(ratingForm.elements.send_content_rating.checked, false, '恢复分级提示词保留发送分级开关');
+    assert.equal(ratingForm.elements.prompt.value, api.promptDefaults.rating.prompt);
+    api.saveSendSettings({ preventDefault() {} });
+    assert.equal(saved.wardrobe_send.content_rating_prompt, null, '从发送内容页保存后，分级提示词仍跟随脚本默认值');
+}
+
+/**
+ * 验证多个本地预设的保存、重读、应用和删除，并检查设置及 API 的隔离。
+ * @returns {Promise<void>} 预设操作和失败保留的断言完成后结束。
+ */
+async function checkWardrobePresets() {
+    /** 模拟点击预设页按钮；参数为操作名，返回操作完成的 Promise。 */
+    const click = action => api.handleWardrobePreset({ currentTarget: presetButtons.get(action) });
+    api.renderWardrobePresets(api.readWardrobePresets());
+    assert.equal(presetButtons.get('apply-preset').disabled, true);
+    outfitForm.elements.prompt.value = '没有保存的编辑草稿';
+    sandbox.testPresetName = '  剧情版  ';
+    await click('save-preset');
+    const [story] = saved.wardrobe_settings_presets;
+    assert.equal(story.name, '剧情版');
+    assert.equal(presetSelect.value, story.name);
+    assert.equal(story.data.settings.outfit_prompt, '恢复的选装提示词');
+    assert.doesNotMatch(JSON.stringify(story), /test-secret-must-never-be-exported|wardrobe_api/);
+    await click('save-preset');
+    assert.match(presetStatus.textContent, /已存在/);
+    assert.equal(saved.wardrobe_settings_presets.length, 1);
+
+    const next = structuredClone(story.data);
+    next.settings.send.position = 'system_end';
+    next.settings.send.send_content_rating = true;
+    next.settings.templates.user.single = '另一份 USER 模板';
+    next.settings.description_prompts.outfit = '另一份描述提示词';
+    next.settings.outfit_prompt = '另一份选装提示词';
+    dataInput.files = [{ text: async () => JSON.stringify(next) }];
+    await api.handleWardrobeData({ type: 'change', currentTarget: dataInput });
+    sandbox.testPresetName = '另一版';
+    await click('save-preset');
+    api.renderWardrobePresets(api.readWardrobePresets());
+    assert.deepEqual(presetSelect.options.map(option => option.value), ['剧情版', '另一版']);
+
+    const connection = JSON.stringify(saved.wardrobe_api);
+    const clothes = JSON.stringify(saved.wardrobe_items);
+    presetSelect.value = story.name;
+    await click('apply-preset');
+    assert.match(presetStatus.textContent, /已应用/);
+    assert.equal(sendForm.elements.position.value, story.data.settings.send.position);
+    assert.equal(ratingForm.elements.send_content_rating.checked, story.data.settings.send.send_content_rating);
+    assert.equal(forms.get('[data-template-owner="user"]').elements.single.value, story.data.settings.templates.user.single);
+    assert.equal(descriptionForm.elements.namedItem('outfit').value, story.data.settings.description_prompts.outfit);
+    assert.equal(outfitForm.elements.prompt.value, story.data.settings.outfit_prompt);
+    assert.equal(JSON.stringify(saved.wardrobe_api), connection);
+    assert.equal(JSON.stringify(saved.wardrobe_items), clothes);
+
+    confirmation = false;
+    await click('delete-preset');
+    confirmation = true;
+    assert.equal(saved.wardrobe_settings_presets.length, 2, '取消删除时保留预设');
+    writesFail = true;
+    await click('delete-preset');
+    writesFail = false;
+    assert.equal(presetSelect.value, story.name, '删除写入失败时保留列表和选中项');
+    await click('delete-preset');
+    assert.equal(presetSelect.value, '另一版');
+    assert.equal(outfitForm.elements.prompt.value, story.data.settings.outfit_prompt, '删除预设不改变当前设置');
+    await click('delete-preset');
+    assert.deepEqual(saved.wardrobe_settings_presets, []);
+    assert.equal(presetButtons.get('delete-preset').disabled, true);
 }
 
 /**

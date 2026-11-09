@@ -91,14 +91,72 @@ const DEFAULT_OUTFIT_HISTORY_COUNT = 2;
 const OUTFIT_MARKER = /<!--\s*outfit:(user|char)\s*=\s*([\s\S]*?)\s*-->/g;
 // 识别脚本发布的 JSON 快照，仍允许旧名称标记以花括号开头。
 const PUBLISHED_OUTFIT_SNAPSHOT = /^\{\s*"ids"\s*:/;
-// 结构规则独立于用户模板，防止旧模板继续把单品视作互斥套装，或在普通转场时强制换衣。
-const STYLING_RULES = [
-    '固定穿搭规则（优先于模板中只选一条候选或转场即换装的旧要求）：实际穿着以“当前实际穿着”段落为准，模板中的服装资料均为候选。',
-    '从可选衣柜选择一身完整穿搭，不是只选一条记录，也不是把全部候选同时穿上。可自由组合相容的上装、下装和鞋子；连衣裙可替代上装与下装，套装按实际资料判断已包含的衣物。',
-    '外套、袜子、内衣与配饰按剧情需要选择，明确叠穿时允许同类多件。保存的搭配必须保留全部成员，可补充相容的独立单品；同一件衣物只穿一次。',
-    '仅随搭配提供的成员不可拆出独立选用，另外明确列为独立候选的成员可以单独选择。结合剧情、场景、季节、风格及实际标签和资料选装；无标签不补造标签，缺少衣物或资料不虚构衣柜外的服装。',
-    '尚未确定穿着时首次选择；已有当前穿着时保持整身，仅在明确换衣、回家准备或时间跳转等合理换装机会调整，普通转场不换衣。其他候选的资料只用于选装，不得混入当前穿着描写。',
-].join('');
+// 衣柜快照只记录有 ID 的衣物。把剧情连续性放在固定规则中，旧模板或自定义提示词也不能把空快照当成换装指令。
+const OUTFIT_CONTINUITY_RULE = '固定穿搭规则（优先于服装模板、选装提示词与分级提示词）：开场白、剧情设定或前文已明确穿着的衣物、鞋袜和配饰继续沿用，包括衣柜外的衣物。没有衣柜记录只表示没有可引用的 ID，不能因此从候选中选装、补齐或用相似款替代。只有剧情确实需要交代初始衣着且尚无既定穿着时，才首次选装；已有穿着时，仅在用户明确要求或剧情已明确发生换装时选用候选。普通回复、普通转场或时间变化本身不触发换装；回家或仅为换衣做准备也不触发。局部换衣也保留未换下的衣物，包括衣柜外的部分。分级和场景分档只在允许选装时用于选择候选。';
+// 占位与自检约束候选选用和记录修正，避免为满足部位规则而改写剧情中已经穿着的衣物。
+const DEFAULT_OUTFIT_PROMPT = `“当前实际穿着”只列出衣柜已记录的部分，剧情中已明确穿着的衣柜外衣物仍然有效。服装模板、候选清单与参考图仅供选装，未选用的资料不得混入当前穿着描写。
+
+一、按部位占位
+部位分为上装、下装、腿袜（连裤袜、丝袜、长袜、短袜等所有袜类）、鞋、外套、内衣、配饰。连衣裙同时占上装和下装。选装时，上装、下装、腿袜和鞋每个部位至多一件或一双，不叠穿。
+
+二、套装优先，单品按缺项补充
+选中套装或保存的搭配时，先通读完整描述，尤其是末尾“下配”“搭配”“配”等语句，并结合参考图与搭配成员，确认实际包含的每件衣物及其部位。
+- 套装已占用的部位锁定，不再选该部位的独立单品，即使款式、颜色、材质、有无绑带或 ID 不同。
+- 套装已包含连裤袜和高跟鞋时，腿袜和鞋均由套装 ID 代表，不再列任何独立袜类和鞋类 ID；套装缺鞋时可以补鞋。
+- 独立候选只可补套装未包含、且本轮确实需要的部位。保存的搭配保留全部成员，同一件衣物只穿一次；仅随搭配提供的成员不可拆出独立选用。
+
+三、其他部位
+外套、内衣和配饰按剧情需要选择。允许明确分层且相容的外套叠穿，也可组合用途不同的配饰，如项链、耳环和手链。此例外不适用于腿袜、鞋或套装已锁定的部位。
+首次选装时可以组合相容的上装、下装和鞋，形成一身完整穿搭。结合剧情、场景、季节、风格及实际标签和资料选装；无标签不补造标签，缺项时不虚构新衣物。
+
+四、换装时机
+先按固定穿搭规则判断是否确实需要选装，再使用部位规则。候选合适或部位空缺都不触发选装。普通回复继续沿用既有穿着。
+当前记录重复列出套装已含的独立单品时，只删重复 ID，保留原套装和其他未换下的衣物，不新增 ID，剧情中不发生换装。
+
+五、输出前自检（必须执行）
+1. 每个 ID 实际占用哪些部位？套装按包含的全部部位计算。
+2. 上装、下装、腿袜和鞋是否各自至多一个来源？
+3. 是否有独立单品与套装同部位？如有，删除该独立单品 ID。通过后再输出。`;
+// 复用提示词指纹识别原样保存的旧默认值，避免升级覆盖用户自行编辑的内容。
+const LEGACY_OUTFIT_PROMPT_FINGERPRINT = 0x06d5f917cc08aa03n;
+// 旧版可能把默认分级提示词原样写入存档，只升级精确匹配的文本，保留用户改过的内容。
+const PREVIOUS_CONTENT_RATING_PROMPT = '内容分级用于说明服装性质：SFW 表示日常／非色情服装，NSFW 表示色情／成人服装，未标注表示尚未判断。NSFW 标记不代表当前剧情允许色情内容或要求进入色情情节，也不直接禁止外穿；是否选用由角色设定、世界观与剧情场景决定。';
+// 原文作为可编辑的分级提示词，是否允许换衣由先发送的固定穿搭规则决定。
+const DEFAULT_CONTENT_RATING_PROMPT = `服装内容分级（说明服装性质，并按场景倾向选装）：
+SFW 表示日常／非色情服装，NSFW 表示色情／成人服装，未标注表示尚未判断。
+NSFW 标记不代表当前剧情允许色情内容，也不要求进入色情情节，只用于帮助判断这件衣服适合什么场景。
+
+一、选装原则：让服装匹配场景
+先判断当前场景属于哪一档，再按该档倾向选装。
+
+A 档：公共或日常场景
+包括上学、上班、会议、公共场所、家人或第三方在场、外出购物、运动、旅行、正式社交等。
+选 SFW 服装。NSFW 服装在这里与场景冲突，不选。
+
+B 档：半私密或有氛围的场景
+包括约会、夜晚独处、酒吧、派对、晚宴、居家休闲、角色与亲近之人相处、角色设定偏性感风格等。
+SFW 和 NSFW 都可选，按角色设定、剧情氛围、风格与季节挑最合适的，不预设偏向某一边。角色设定偏性感、风情时，这一档可以明显倾向 NSFW。
+
+C 档：私密或亲密场景
+包括卧室、情侣或伴侣独处的私人空间、剧情已自然进入亲密情节、用户明确要求或暗示等。
+优先选 NSFW 服装；衣柜里有合适的 NSFW 套装或搭配时应当使用，不要因为保守而回避。
+
+二、几点说明
+1. 判断场景以剧情实际发生的情境为准，不要因为衣柜里有某件衣服就去制造或暗示对应场景。
+2. 衣柜里 NSFW 服装的数量多少，不影响选择，只看场景匹配度。B、C 档中遇到合适的 NSFW 服装应正常选用。
+3. 性感但不露骨的服装（深 V、开衩、蕾丝、修身等）即使被标为 NSFW，也适合 B 档的晚间或社交场合，不算外穿违规。真正只适合 C 档的，是开档、大面积透视、胸部或私处外露、情趣用途一类。
+4. 角色设定中的“性感”“妩媚”等描述，只作为 B 档选装的参考，不能让 A 档场景改穿 NSFW。
+
+三、未标注的服装
+未标注不等于 SFW 或 NSFW。先按描述自行判断：开档、大面积透视、胸部或私处外露、情趣用途按 NSFW 处理；其余按 SFW 处理。判断只用于选装，不补造标签，不在输出中写出判断结果。
+
+四、保持整身
+已有当前穿着时保持整身，只在明确换衣、回家准备、时间跳转等合理机会换装。场景从 A 档转入 B、C 档时，可以借换装机会调整；普通转场不换。
+
+五、选装前自检
+1. 当前场景属于 A、B、C 哪一档？
+2. 选中的服装性质与这一档匹配吗？A 档不应出现 NSFW，C 档不应在有合适 NSFW 的情况下仍选保守款。
+3. B 档是否同时考虑了 SFW 和 NSFW 的选项，而不是默认只选其中一类？`;
 const TEMPLATE_OWNERS = [...WEARERS, 'image'];
 const TEMPLATE_FIELDS = ['single', 'wardrobe'];
 const TEMPLATE_VARIABLES = /\{\{(user|char|wearer|name|description|outfits|count)\}\}/g;
@@ -431,6 +489,13 @@ const DEFAULT_TEMPLATES = {
         wardrobe: '{{wearer}} 的可选衣柜，共 {{count}} 条候选：{{name}}。图片与成员对应关系见候选清单，按一身穿搭选用；仅在合理换装机会调整。仅参考服装与配饰，忽略图中人物的身份、面容、发型、身材、姿势和背景，不改变角色原有外貌。' + DESCRIPTION_STYLE_NOTE,
     },
 };
+// 以表单为单位恢复默认，只列出文本字段，服装分级开关等其他控件不参与恢复。
+const PROMPT_FORM_DEFAULTS = {
+    ...DEFAULT_TEMPLATES,
+    description: DEFAULT_DESCRIPTION_PROMPTS,
+    outfit: { prompt: DEFAULT_OUTFIT_PROMPT },
+    rating: { prompt: DEFAULT_CONTENT_RATING_PROMPT },
+};
 
 /**
  * 衣柜服装数据，导入和读取存档时统一校验，内部按稳定 ID 查找。
@@ -494,7 +559,7 @@ function renderTemplateSettings(wearer, label) {
             <label><span>${wearer === 'image' ? '单条＋图片' : '单条模板'}</span><small>分配 1 条候选时生效</small><textarea name="single" aria-label="${label}单条模板" required spellcheck="false"></textarea></label>
             <label><span>${wearer === 'image' ? '衣柜＋图片' : '衣柜模式'}</span><small>分配多条候选时生效</small><textarea name="wardrobe" aria-label="${label}衣柜模式模板" required spellcheck="false"></textarea></label>
             <p class="tw-template-hint">变量：{{user}} 用户名 · {{char}} 角色名 · {{wearer}} 当前所属角色 · {{name}} 服装名称 · {{description}} 描述 · {{outfits}} 候选列表 · {{count}} 候选数</p>
-            <div class="tw-send-actions"><button type="submit">保存</button></div>
+            <div class="tw-send-actions"><button type="button" data-prompt-defaults="${wearer}">恢复默认</button><button type="submit">保存</button></div>
             <p class="tw-template-status" role="status" aria-live="polite"></p>
         </form>
     </section>`;
@@ -792,6 +857,9 @@ const PANEL_HTML = `
                 <button type="button" data-settings-page="char-template" aria-pressed="false" aria-controls="tw-settings-char-template">${icon('file')}<span>Char模板</span></button>
                 <button type="button" data-settings-page="image-template" aria-pressed="false" aria-controls="tw-settings-image-template">${icon('file')}<span>图片模板</span></button>
                 <button type="button" data-settings-page="description" aria-pressed="false" aria-controls="tw-settings-description">${icon('pencil')}<span>描述生成</span></button>
+                <button type="button" data-settings-page="outfit" aria-pressed="false" aria-controls="tw-settings-outfit">${icon('shirt')}<span>选装生成</span></button>
+                <button type="button" data-settings-page="rating" aria-pressed="false" aria-controls="tw-settings-rating">${icon('tag')}<span>服装分级</span></button>
+                <button type="button" data-settings-page="presets" aria-pressed="false" aria-controls="tw-settings-presets">${icon('file')}<span>预设</span></button>
                 <button type="button" data-settings-page="data" aria-pressed="false" aria-controls="tw-settings-data">${icon('download')}<span>导入／导出数据</span></button>
             </nav>
             <div class="tw-settings-content">
@@ -871,10 +939,6 @@ const PANEL_HTML = `
                             </div>
                             <label class="tw-outfit-history">独立选装读取前 <input type="number" name="outfit_history_count" min="0" step="1" value="${DEFAULT_OUTFIT_HISTORY_COUNT}" required aria-label="独立选装读取的历史楼层数"> 楼及本次输入</label>
                         </fieldset>
-                        <fieldset class="tw-send-group">
-                            <legend>服装分级</legend>
-                            <label class="tw-send-choice"><input type="checkbox" name="send_content_rating" checked><span>发送 SFW / NSFW 分级</span></label>
-                        </fieldset>
                         <div class="tw-send-actions"><button type="submit">保存</button></div>
                         <p class="tw-send-status" role="status" aria-live="polite"></p>
                     </form>
@@ -888,14 +952,43 @@ const PANEL_HTML = `
                         <label><span>整套描述</span><textarea name="outfit" aria-label="整套描述生成提示词" required spellcheck="false"></textarea></label>
                         <label><span>单品描述</span><textarea name="item" aria-label="单品描述生成提示词" required spellcheck="false"></textarea></label>
                         <p class="tw-template-hint">变量：{{name}} 当前服装名称 · {{category}} 当前分类。生成时在服装详情的“描述”页选择类型。</p>
-                        <div class="tw-send-actions"><button type="submit">保存</button></div>
+                        <div class="tw-send-actions"><button type="button" data-prompt-defaults="description">恢复默认</button><button type="submit">保存</button></div>
                         <p class="tw-template-status" role="status" aria-live="polite"></p>
                     </form>
+                </section>
+                <section id="tw-settings-outfit" data-settings-content="outfit" aria-labelledby="tw-settings-outfit-title" hidden>
+                    <h3 id="tw-settings-outfit-title">选装生成</h3>
+                    <form class="tw-template-form tw-outfit-form">
+                        <label><span>选装提示词</span><textarea name="prompt" required spellcheck="false"></textarea></label>
+                        <div class="tw-send-actions"><button type="button" data-prompt-defaults="outfit">恢复默认</button><button type="submit">保存</button></div>
+                        <p class="tw-template-status" role="status" aria-live="polite"></p>
+                    </form>
+                </section>
+                <section id="tw-settings-rating" data-settings-content="rating" aria-labelledby="tw-settings-rating-title" hidden>
+                    <h3 id="tw-settings-rating-title">服装分级</h3>
+                    <form class="tw-template-form tw-rating-form">
+                        <label class="tw-send-choice"><input type="checkbox" name="send_content_rating" checked><span>发送 SFW / NSFW 分级</span></label>
+                        <label><span>分级提示词</span><textarea name="prompt" required spellcheck="false"></textarea></label>
+                        <div class="tw-send-actions"><button type="button" data-prompt-defaults="rating">恢复默认</button><button type="submit">保存</button></div>
+                        <p class="tw-template-status" role="status" aria-live="polite"></p>
+                    </form>
+                </section>
+                <section id="tw-settings-presets" data-settings-content="presets" aria-labelledby="tw-settings-presets-title" hidden>
+                    <h3 id="tw-settings-presets-title">预设</h3>
+                    <div class="tw-template-form">
+                        <span class="tw-select-control"><select class="tw-preset-select" aria-label="衣柜设置预设" disabled><option value="">暂无预设</option></select>${icon('chevron')}</span>
+                        <div class="tw-send-actions">
+                            <button type="button" data-action="save-preset">保存预设</button>
+                            <button type="button" data-action="apply-preset" disabled>应用预设</button>
+                            <button type="button" data-action="delete-preset" disabled>删除预设</button>
+                        </div>
+                        <p class="tw-template-status tw-preset-status" role="status" aria-live="polite"></p>
+                    </div>
                 </section>
                 <section id="tw-settings-data" data-settings-content="data" aria-labelledby="tw-settings-data-title" hidden>
                     <h3 id="tw-settings-data-title">导入／导出数据</h3>
                     <div class="tw-template-form">
-                        <p class="tw-template-hint">发送内容、USER／Char／图片模板、描述生成提示词。仅导出已保存的设置；导入会替换这五项设置，不包含或覆盖任何 API 连接信息。</p>
+                        <p class="tw-template-hint">备份已保存的发送内容、USER／Char／图片模板、描述生成、选装生成和服装分级设置。API 连接单独保存。</p>
                         <div class="tw-send-actions">
                             <button type="button" data-action="import-data">${icon('plus')}导入数据</button>
                             <button type="button" data-action="export-data">${icon('download')}导出数据</button>
@@ -4007,7 +4100,7 @@ const PANEL_CSS = `
 
 /* 模板编辑表单 */
 #tw-panel .tw-template-form,
-#tw-panel .tw-template-form label {
+#tw-panel .tw-template-form label:not(.tw-send-choice) {
     display: grid;
     gap: 8px;
     min-width: 0;
@@ -4509,6 +4602,8 @@ const LOG_TEXT_LIMIT = 12000;
 const LOG_SECRET_FIELD = /^(?:key|api[_-]?key|authorization|cookie|password|token|access[_-]?token|secret)$/i;
 let apiForm;
 let sendForm;
+let outfitForm;
+let ratingForm;
 let apiRequest;
 let apiModels = [];
 let modelListMessage = '请先获取模型，或手动输入';
@@ -4543,7 +4638,8 @@ let garmentSearchTimer;
 let garmentTagSearchTimer;
 let wardrobeTemplates = { user: { ...DEFAULT_TEMPLATES.user }, char: { ...DEFAULT_TEMPLATES.char }, image: { ...DEFAULT_TEMPLATES.image } };
 let descriptionPrompts = { ...DEFAULT_DESCRIPTION_PROMPTS };
-let sendSettings = { content_type: 'text', position: 'user_end', marker_mode: DEFAULT_MARKER_MODE, send_content_rating: true, outfit_history_count: DEFAULT_OUTFIT_HISTORY_COUNT, image_quality: 'compressed' };
+let outfitPrompt = DEFAULT_OUTFIT_PROMPT;
+let sendSettings = { content_type: 'text', position: 'user_end', marker_mode: DEFAULT_MARKER_MODE, send_content_rating: true, content_rating_prompt: DEFAULT_CONTENT_RATING_PROMPT, outfit_history_count: DEFAULT_OUTFIT_HISTORY_COUNT, image_quality: 'compressed' };
 let descriptionRequest;
 let outfitRequest;
 // 用消息对象跨事件关联同一请求，区分原生聊天与只需读取穿搭的辅助生成。
@@ -5302,6 +5398,8 @@ function initializeWardrobe() {
     logsPanel.querySelector('.tw-log-search').addEventListener('input', scheduleLogSearch);
     apiForm = settingsPanel.querySelector('.tw-api-form');
     sendForm = settingsPanel.querySelector('.tw-send-form');
+    outfitForm = settingsPanel.querySelector('.tw-outfit-form');
+    ratingForm = settingsPanel.querySelector('.tw-rating-form');
 
     menuEntry = hostDocument.createElement('button');
     menuEntry.id = 'tw-menu-entry';
@@ -5319,12 +5417,22 @@ function initializeWardrobe() {
     panel.querySelector('[data-action="open-settings"]').addEventListener('click', openSettings);
     settingsPanel.querySelector('[data-action="close-settings"]').addEventListener('click', closeSettings);
     settingsPanel.querySelector('.tw-settings-nav').addEventListener('click', selectSettingsPage);
+    for (const button of settingsPanel.querySelectorAll('#tw-settings-presets [data-action]')) {
+        button.addEventListener('click', handleWardrobePreset);
+    }
     settingsPanel.querySelector('[data-action="export-data"]').addEventListener('click', handleWardrobeData);
     settingsPanel.querySelector('[data-action="import-data"]').addEventListener('click', handleWardrobeData);
     settingsPanel.querySelector('.tw-data-import').addEventListener('change', handleWardrobeData);
     apiForm.addEventListener('submit', saveApiSettings);
     sendForm.addEventListener('submit', saveSendSettings);
     sendForm.addEventListener('change', clearSendStatus);
+    outfitForm.addEventListener('submit', saveOutfitSettings);
+    outfitForm.addEventListener('input', clearTemplateStatus);
+    for (const button of settingsPanel.querySelectorAll('button[data-prompt-defaults]')) {
+        button.addEventListener('click', restorePromptDefaults);
+    }
+    ratingForm.addEventListener('submit', saveRatingSettings);
+    ratingForm.addEventListener('input', clearTemplateStatus);
     for (const form of settingsPanel.querySelectorAll('.tw-template-form[data-template-owner]')) {
         form.addEventListener('submit', saveWardrobeTemplate);
         form.addEventListener('input', clearTemplateStatus);
@@ -5441,8 +5549,10 @@ function initializeWardrobe() {
     subscriptions.push(eventMakeFirst(tavern_events.MESSAGE_RECEIVED, publishOutfitSnapshot));
     loadApiSettings();
     loadSendSettings();
+    loadOutfitSettings();
     loadWardrobeTemplates();
     loadDescriptionPrompts();
+    renderWardrobePresets(readWardrobePresets());
     loadWardrobeLibraries();
     loadGarments();
     refreshWardrobe();
@@ -8284,7 +8394,7 @@ function stripOutfitMarkers(messages) {
 }
 
 /**
- * 为有候选的角色生成首次选装与后续换装说明，始终记录完整一身，避免局部换衣丢掉其余部位。
+ * 为有候选的角色生成换装标记说明，只记录当前穿着中可以用候选 ID 表示的部分。
  * @param {{user: Set<string>, char: Set<string>}} selections 角色服装选择。
  * @param {{user: string, char: string}} names 当前聊天的角色名称。
  * @returns {string} 完整快照说明，没有候选时为空字符串。
@@ -8293,7 +8403,7 @@ function buildMarkerNote(selections, names) {
     const switchable = WEARERS.filter(wearer => selections[wearer].size > 0);
     if (!switchable.length) return '';
     const who = switchable.map(wearer => `${wearer} 指 ${names[wearer]}`).join('，');
-    return `（换装记录：首次确定穿着或在合理机会发生实际换装时，在回复最末尾为每个受影响角色单独另起一行写 HTML 注释。格式：${switchable.map(wearer => `<!-- outfit:${wearer}=["候选ID1","候选ID2"] -->`).join('；')}；${who}。数组必须列出换装后完整一身的全部候选 ID，局部换衣也保留未换下的衣物；ID 必须来自该角色候选清单，不使用名称或编号。保存的搭配记录搭配自身 ID，并列出独立补充的单品 ID，不重复列成员。没有换装就不要写，不在正文里提及记录。）`;
+    return `（换装记录：首次选用衣柜服装、实际换装使衣柜内的穿着发生变化或仅修正重复项时，在回复最末尾为每个受影响角色单独另起一行写 HTML 注释。格式：${switchable.map(wearer => `<!-- outfit:${wearer}=["候选ID1","候选ID2"] -->`).join('；')}；${who}。数组列出当前仍穿着的全部候选 ID，包含局部换装时未换下的候选；衣柜外的衣物只保留在剧情中。原有衣柜服装已全部换下时写空数组。输出前按选装提示词核对 ID，保存的搭配以自身 ID 代表全部成员，另列实际补充的独立单品。沿用剧情既有穿着且衣柜记录没有变化时省略注释。）`;
 }
 
 /**
@@ -9483,16 +9593,25 @@ function buildWearerContent(items, wearer, settings, templates, names, imageTemp
     };
     // 归属说明独立于可编辑模板，文字和图片模式均明确边界；共享只由两边清单同时列出表达。
     const texts = [`【${wearer === 'user' ? 'USER' : 'Char'}（${names[wearer]}）的服装】以下服装文字及紧随其后的图片仅供该角色使用。另一角色只能使用其自身服装清单中明确列出的服装，不得将本清单中未分配给对方的服装转给对方，也不得根据性别自动共享。`];
-    texts.push(current.length ? `当前实际穿着（完整一身，保持至合理换装机会）：\n${current.join('\n')}` : '当前实际穿着：尚未确定，请结合剧情从下列候选中首次选择一身。');
+    // 剧情已写明的衣物可能没有候选 ID，空集合只说明衣柜没有记录。
+    texts.push(current.length ? `当前实际穿着（衣柜已记录的部分）：\n${current.join('\n')}` : '当前实际穿着：没有衣柜穿着记录，请沿用剧情中已明确的衣着。');
     texts.push(`可选衣柜（每个编号是一条候选，不代表完整一身；保存的搭配保留全部成员）：\n${candidates.join('\n')}`);
-    if (sendContentRating) texts.push('内容分级用于说明服装性质：SFW 表示日常／非色情服装，NSFW 表示色情／成人服装，未标注表示尚未判断。NSFW 标记不代表当前剧情允许色情内容或要求进入色情情节，也不直接禁止外穿；是否选用由角色设定、世界观与剧情场景决定。');
     if (taggedOutfits.length) texts.push(`服装标签（用于匹配场景）：\n${taggedOutfits.join('\n')}`);
     // 一次替换受支持的变量，不再次解释服装描述里原有的双花括号，也不执行模板代码。
     if (settings.content_type !== 'image') texts.push(textTemplate.replace(TEMPLATE_VARIABLES, (_match, name) => values[name]));
     // 图片模式无需预先填写描述，但必须带上图片提示词，避免把图中人物当作角色设定。
     if (settings.content_type !== 'text') texts.push(imageTemplates[field].replace(TEMPLATE_VARIABLES, (_match, name) => values[name]));
-    texts.push(STYLING_RULES);
     return [{ type: 'text', text: texts.join('\n\n') }, ...images];
+}
+
+/**
+ * 组装整次请求共用的选装提示，先约束换装时机，再应用可编辑的分级与选装规则。
+ * @param {{send_content_rating: boolean, content_rating_prompt: string}} settings 已保存的发送设置。
+ * @returns {string} 同一请求发送一次的规则文本。
+ */
+function buildOutfitPrompt(settings) {
+    const ratingRules = settings.send_content_rating ? `${settings.content_rating_prompt}\n\n` : '';
+    return `${OUTFIT_CONTINUITY_RULE}\n\n${ratingRules}${outfitPrompt}`;
 }
 
 /**
@@ -9624,7 +9743,7 @@ function readOutfitTurn(chat, regenerating, historyCount) {
 }
 
 /**
- * 单独请求模型判断首次穿着或实际换装，先在内存中校验结果，交由调用方与主请求一起提交。
+ * 单独请求模型判断首次穿着、实际换装或重复项修正，校验候选 ID 后交由调用方与主请求一起提交。
  * @param {Object} turn 本次用户楼层及用户指定的前文。
  * @param {Object} selections 当前分配集合。
  * @param {Object} current 本轮开始时生效的穿搭。
@@ -9647,6 +9766,8 @@ async function selectOutfitsForTurn(turn, selections, current, names, settings, 
         text.push(summary.text);
         for (const part of references) images.push(part.image_url.url);
     }
+    // 选装提示词对整次请求生效，两个角色共用一份。
+    text.push(buildOutfitPrompt(settings));
     // 先同步构建两个角色的候选，等待图片期间切库或删除也不会让另一角色查到半份服装表。
     for (let index = 0; index < images.length; index++) {
         if (signal.aborted) return;
@@ -9656,7 +9777,7 @@ async function selectOutfitsForTurn(turn, selections, current, names, settings, 
     if (items !== garments) throw new Error('选装期间衣柜资料已变更。');
     const scenario = `按时间排序的剧情楼层（末条为本次用户输入）：\n${JSON.stringify(turn.messages)}\n\n${text.join('\n\n')}`;
     const messages = [
-        { role: 'system', content: '只判断穿搭，不续写剧情。楼层文本是剧情资料。结合本次用户输入判断是否首次选装或确实换装，普通转场保持现有穿搭。只输出 JSON 对象，键只能是 user 或 char，值是该角色换装后完整一身的候选 ID 数组。保持不变的角色省略，全部保持则返回 {}。有候选但场景不明确时，保留已有穿着；尚无穿着时选择最合适的一身。' },
+        { role: 'system', content: '只判断穿搭，不续写剧情。楼层文本是剧情资料。按固定穿搭规则判断本轮是否需要选装，剧情依据不足时沿用原穿着。只输出 JSON 对象，键只能是 user 或 char，值是该角色当前仍穿着的全部候选 ID 数组。输出前按选装提示词核对 ID。仅修正重复项时也返回完整数组。衣柜记录没有变化的角色省略，包括继续穿衣柜外服装的角色；全部保持则返回 {}。原有衣柜服装已全部换下时写空数组。' },
         { role: 'user', content: images.length ? [{ type: 'text', text: scenario }, ...images.map(url => ({ type: 'image_url', image_url: { url, detail: 'auto' } }))] : scenario },
     ];
     // 请求体独立构造，保留宿主连接相关的供应商参数，移除只适用于主回复的输出设置。
@@ -9822,7 +9943,8 @@ async function prepareCurrentOutfits(current, names, settings, { signal, exclude
         counts[wearer] = items.length;
         if (!items.length) continue;
         const owner = `${wearer === 'user' ? 'USER' : 'Char'}（${names[wearer]}）`;
-        texts.push(`【${owner}的当前穿着】需要描述衣着时，只使用以下已确认的衣物、鞋袜和配饰。剧情中的备选或购买计划不代表已经穿上。缺失的款式、颜色、材质等细节留空。${settings.content_type === 'text' ? '' : '参考图只用于识别衣物，保留角色原有外貌。'}`);
+        // 快照只覆盖衣柜内的部分，主模型还要沿用剧情中没有换下的衣柜外衣物。
+        texts.push(`【${owner}的当前穿着】以下是本轮确认的衣柜服装。前文已明确且本轮未换下的衣柜外衣物、鞋袜和配饰继续保留。剧情中的备选或购买计划不代表已经穿上。缺失的款式、颜色、材质等细节留空。${settings.content_type === 'text' ? '' : '参考图只用于识别衣物，保留角色原有外貌。'}`);
         for (const item of items) {
             const outfit = buildWardrobeContent(item, settings);
             if (settings.content_type === 'image') texts.push(item.name);
@@ -9932,12 +10054,12 @@ async function injectWardrobeContent(event) {
             const items = Array.from(selections[wearer], id => garments.get(id));
             for (const part of buildWearerContent(items, wearer, settings, wardrobeTemplates, names, wardrobeTemplates.image, current[wearer])) parts.push(part);
         }
-        // 说明追加至最后一段文字，不改变角色内容块与图片的对应顺序。
-        const note = settings.marker_mode === 'off' ? '' : buildMarkerNote(selections, names);
-        if (note) {
-            for (let index = parts.length - 1; index >= 0; index--) {
-                if (parts[index].type === 'text') { parts[index].text += `\n\n${note}`; break; }
-            }
+        // 提示词和记录说明只附一次，保留每个角色文字与参考图的对应顺序。
+        const lastSummary = parts.findLast(part => part.type === 'text');
+        if (lastSummary) {
+            lastSummary.text += `\n\n${buildOutfitPrompt(settings)}`;
+            const note = settings.marker_mode === 'off' ? '' : buildMarkerNote(selections, names);
+            if (note) lastSummary.text += `\n\n${note}`;
         }
         parts.push(...buildNamedWardrobeContent(settings, regenerating));
         if (parts.length) {
@@ -9982,7 +10104,12 @@ function saveWardrobeTemplate(event) {
     const status = form.querySelector('.tw-template-status');
     try {
         const next = { ...wardrobeTemplates, [wearer]: { single: form.elements.single.value, wardrobe: form.elements.wardrobe.value } };
-        insertOrAssignVariables({ wardrobe_templates: next }, { type: 'script' });
+        const overrides = {};
+        for (const owner of TEMPLATE_OWNERS) {
+            overrides[owner] = {};
+            for (const field of TEMPLATE_FIELDS) overrides[owner][field] = getPromptOverride(next[owner][field], DEFAULT_TEMPLATES[owner][field]);
+        }
+        insertOrAssignVariables({ wardrobe_templates: overrides }, { type: 'script' });
         wardrobeTemplates = next;
         status.textContent = '已保存';
         status.dataset.error = 'false';
@@ -10003,11 +10130,38 @@ function clearTemplateStatus(event) {
 }
 
 /**
+ * 只回填本页的提示词草稿，检查后通过原有保存流程应用。
+ * @param {MouseEvent} event 恢复默认按钮的点击事件。
+ * @returns {void} 仅更新提示词输入框与状态文字。
+ */
+function restorePromptDefaults(event) {
+    const button = event.currentTarget;
+    const form = button.form;
+    for (const [name, value] of Object.entries(PROMPT_FORM_DEFAULTS[button.dataset.promptDefaults])) {
+        // 使用表单字段名查找，避免单品描述的 item 与控件集合方法重名。
+        form.elements.namedItem(name).value = value;
+    }
+    const status = form.querySelector('.tw-template-status');
+    status.textContent = '已填入默认提示词，保存后生效';
+    status.dataset.error = 'false';
+}
+
+/**
+ * 区分自定义提示词和脚本默认词，避免原样保存时把当前版本的默认词固化在存档中。
+ * @param {string} value 将要保存的提示词。
+ * @param {string} defaultValue 当前版本的默认词。
+ * @returns {string|null} 自定义文本，或表示跟随脚本默认值的空值。
+ */
+function getPromptOverride(value, defaultValue) {
+    return value === defaultValue ? null : value;
+}
+
+/**
  * 同步计算完整提示词的 64 位 FNV-1a 指纹，按 UTF-16 码元保留空白和转义差异。
  * @param {string} prompt 存档中的原始提示词。
  * @returns {bigint} 与旧默认值指纹比较用的无符号整数。
  */
-function getDescriptionPromptFingerprint(prompt) {
+function getPromptFingerprint(prompt) {
     let hash = 0xcbf29ce484222325n;
     for (let index = 0; index < prompt.length; index++) {
         hash = BigInt.asUintN(64, (hash ^ BigInt(prompt.charCodeAt(index))) * 0x100000001b3n);
@@ -10025,7 +10179,7 @@ function loadDescriptionPrompts() {
     for (const field of Object.keys(DEFAULT_DESCRIPTION_PROMPTS)) {
         const value = saved?.[field];
         const isCustomPrompt = typeof value === 'string' && value.trim() &&
-            !LEGACY_DESCRIPTION_PROMPT_FINGERPRINTS[field].has(getDescriptionPromptFingerprint(value));
+            !LEGACY_DESCRIPTION_PROMPT_FINGERPRINTS[field].has(getPromptFingerprint(value));
         descriptionPrompts[field] = isCustomPrompt ? value : DEFAULT_DESCRIPTION_PROMPTS[field];
         // item 与原生控件集合的方法同名，统一通过 namedItem 读取实际表单控件。
         form.elements.namedItem(field).value = descriptionPrompts[field];
@@ -10048,7 +10202,9 @@ function saveDescriptionPrompts(event) {
     const status = form.querySelector('.tw-template-status');
     try {
         const next = { outfit: form.elements.namedItem('outfit').value, item: form.elements.namedItem('item').value };
-        insertOrAssignVariables({ wardrobe_description_prompts: next }, { type: 'script' });
+        const overrides = {};
+        for (const field of Object.keys(next)) overrides[field] = getPromptOverride(next[field], DEFAULT_DESCRIPTION_PROMPTS[field]);
+        insertOrAssignVariables({ wardrobe_description_prompts: overrides }, { type: 'script' });
         descriptionPrompts = next;
         status.textContent = '已保存';
         status.dataset.error = 'false';
@@ -10060,7 +10216,192 @@ function saveDescriptionPrompts(event) {
 }
 
 /**
- * 处理设置备份的选择文件、导出与导入；只传递明确允许的五类设置，始终排除全部 API 参数。
+ * 回填选装生成页，未设自定义值或原样保存的旧默认值跟随脚本，自定义提示词保留原文。
+ * @returns {void} 无返回值。
+ */
+function loadOutfitSettings() {
+    const saved = getVariables({ type: 'script' }).wardrobe_outfit_prompt;
+    const isCustomPrompt = typeof saved === 'string' && saved.trim() && getPromptFingerprint(saved) !== LEGACY_OUTFIT_PROMPT_FINGERPRINT;
+    outfitPrompt = isCustomPrompt ? saved : DEFAULT_OUTFIT_PROMPT;
+    outfitForm.elements.prompt.value = outfitPrompt;
+}
+
+/**
+ * 保存自定义选装提示词或恢复跟随脚本默认值，存储失败时保留当前生效规则。
+ * @param {SubmitEvent} event 选装生成设置表单的提交事件。
+ * @returns {void} 无返回值。
+ */
+function saveOutfitSettings(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const prompt = form.elements.prompt;
+    prompt.value = prompt.value.trim();
+    if (!form.reportValidity()) return;
+    const status = form.querySelector('.tw-template-status');
+    try {
+        const value = prompt.value;
+        insertOrAssignVariables({ wardrobe_outfit_prompt: getPromptOverride(value, DEFAULT_OUTFIT_PROMPT) }, { type: 'script' });
+        outfitPrompt = value;
+        status.textContent = '已保存';
+        status.dataset.error = 'false';
+    } catch (error) {
+        recordWardrobeLog('error', 'saveOutfitSettings：捕获异常', error);
+        status.textContent = `保存失败：${String(error)}`;
+        status.dataset.error = 'true';
+    }
+}
+
+/**
+ * 一次保存分级开关和提示词，沿用已保存的发送选项以免带入其他页面的草稿。
+ * @param {SubmitEvent} event 服装分级表单的提交事件。
+ * @returns {void} 无返回值。
+ */
+function saveRatingSettings(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const prompt = form.elements.prompt;
+    prompt.value = prompt.value.trim();
+    if (!form.reportValidity()) return;
+    const status = form.querySelector('.tw-template-status');
+    try {
+        const next = { ...sendSettings, send_content_rating: form.elements.send_content_rating.checked, content_rating_prompt: prompt.value };
+        saveWardrobeSendState(next);
+        status.textContent = '已保存';
+        status.dataset.error = 'false';
+    } catch (error) {
+        recordWardrobeLog('error', 'saveRatingSettings：捕获异常', error);
+        status.textContent = `保存失败：${String(error)}`;
+        status.dataset.error = 'true';
+    }
+}
+
+/**
+ * 从脚本存档读取预设名称和快照，快照内容在应用时沿用设置备份的校验入口。
+ * @returns {Map<string, Object>} 按保存顺序排列的预设。
+ */
+function readWardrobePresets() {
+    const saved = getVariables({ type: 'script' }).wardrobe_settings_presets;
+    const presets = new Map();
+    if (Array.isArray(saved)) for (const preset of saved) {
+        if (typeof preset?.name === 'string' && preset.name.trim()) presets.set(preset.name, preset.data);
+    }
+    return presets;
+}
+
+/**
+ * 同步预设列表和可用操作，保存后选中新预设，删除后选中仍存在的第一项。
+ * @param {Map<string, Object>} presets 当前已保存的预设。
+ * @param {string} [selectedName] 优先保留的选中项。
+ * @returns {void} 仅更新预设页控件。
+ */
+function renderWardrobePresets(presets, selectedName) {
+    const select = settingsPanel.querySelector('.tw-preset-select');
+    const options = [];
+    for (const name of presets.keys()) {
+        const option = hostDocument.createElement('option');
+        option.value = name;
+        option.textContent = name;
+        options.push(option);
+    }
+    if (!options.length) {
+        const option = hostDocument.createElement('option');
+        option.value = '';
+        option.textContent = '暂无预设';
+        options.push(option);
+    }
+    select.replaceChildren(...options);
+    select.value = presets.has(selectedName) ? selectedName : options[0].value;
+    select.disabled = !presets.size;
+    settingsPanel.querySelector('[data-action="apply-preset"]').disabled = select.disabled;
+    settingsPanel.querySelector('[data-action="delete-preset"]').disabled = select.disabled;
+}
+
+/**
+ * 保存、应用或删除所选预设；保存和删除只更新预设列表，应用才替换当前设置。
+ * @param {MouseEvent} event 预设操作按钮的点击事件。
+ * @returns {Promise<void>} 弹窗和设置操作结束后完成。
+ */
+async function handleWardrobePreset(event) {
+    const action = event.currentTarget.dataset.action;
+    const status = settingsPanel.querySelector('.tw-preset-status');
+    const presets = readWardrobePresets();
+    let name = settingsPanel.querySelector('.tw-preset-select').value;
+    try {
+        if (action === 'save-preset') {
+            const input = await askDialog({ title: '预设名称', input: '', confirmText: '保存预设' });
+            if (input === null || !root.isConnected) return;
+            name = input.trim();
+            if (!name) throw new Error('请输入预设名称。');
+            if (presets.has(name)) throw new Error('该预设名称已存在。');
+            presets.set(name, buildWardrobeSettingsData());
+        } else {
+            if (!presets.has(name)) return;
+            if (action === 'apply-preset') {
+                applyWardrobeSettings(parseWardrobeSettingsData(presets.get(name)));
+                status.textContent = `已应用“${name}”`;
+                status.dataset.error = 'false';
+                return;
+            }
+            if (!await askConfirm('删除预设', `删除“${name}”？`, { confirmText: '删除预设', danger: true }) || !root.isConnected) return;
+            presets.delete(name);
+        }
+        // 存储成功后再刷新列表，失败时保持选中项和当前设置。
+        insertOrAssignVariables({ wardrobe_settings_presets: Array.from(presets, ([name, data]) => ({ name, data })) }, { type: 'script' });
+        renderWardrobePresets(presets, name);
+        status.textContent = `${action === 'save-preset' ? '已保存' : '已删除'}“${name}”`;
+        status.dataset.error = 'false';
+    } catch (error) {
+        recordWardrobeLog('error', '预设操作失败', error);
+        status.textContent = `预设操作失败：${String(error)}`;
+        status.dataset.error = 'true';
+    }
+}
+
+/**
+ * 为预设和文件备份构建同一份设置快照，只挑选已生效字段，隔离 API 和服装数据。
+ * @returns {Object} 版本化的衣柜设置快照。
+ */
+function buildWardrobeSettingsData() {
+    const templates = {};
+    for (const owner of TEMPLATE_OWNERS) {
+        templates[owner] = { single: wardrobeTemplates[owner].single, wardrobe: wardrobeTemplates[owner].wardrobe };
+    }
+    return {
+        format: 'tw-wardrobe-settings', version: 1,
+        settings: {
+            send: {
+                content_type: sendSettings.content_type, position: sendSettings.position, marker_mode: sendSettings.marker_mode,
+                send_content_rating: sendSettings.send_content_rating, content_rating_prompt: sendSettings.content_rating_prompt,
+                outfit_history_count: sendSettings.outfit_history_count, image_quality: sendSettings.image_quality,
+            },
+            templates,
+            description_prompts: { outfit: descriptionPrompts.outfit, item: descriptionPrompts.item },
+            outfit_prompt: outfitPrompt,
+        },
+    };
+}
+
+/**
+ * 校验已应用服装支持新的发送方式，再一次提交设置并刷新相关表单。
+ * @param {Object} settings 已按备份格式校验和筛选的设置。
+ * @returns {void} 保存成功后更新当前设置，失败保留原设置。
+ */
+function applyWardrobeSettings(settings) {
+    validateWardrobeSendSettings(settings.send);
+    insertOrAssignVariables({
+        wardrobe_send: { ...settings.send, content_rating_prompt: settings.send.content_rating_prompt ?? getPromptOverride(sendSettings.content_rating_prompt, DEFAULT_CONTENT_RATING_PROMPT) },
+        wardrobe_templates: settings.templates,
+        wardrobe_description_prompts: settings.description_prompts,
+        ...(settings.outfit_prompt === undefined ? {} : { wardrobe_outfit_prompt: settings.outfit_prompt }),
+    }, { type: 'script' });
+    loadSendSettings();
+    loadOutfitSettings();
+    loadWardrobeTemplates();
+    loadDescriptionPrompts();
+}
+
+/**
+ * 处理设置备份的选择文件、导出与导入；只传递明确允许的设置，始终排除全部 API 参数。
  * @param {MouseEvent|Event} event 导入／导出按钮点击或设置文件选择事件。
  * @returns {Promise<void>} 下载触发或设置保存并刷新表单后完成，失败在当前页提示。
  */
@@ -10081,35 +10422,9 @@ async function handleWardrobeData(event) {
         if (importing) {
             const settings = parseWardrobeSettingsData(JSON.parse(await input.files[0].text()));
             if (!root.isConnected) return;
-            // 与手动切换发送类型保持一致，导入配置不能让当前已应用服装变成不可发送的状态。
-            validateWardrobeSendSettings(settings.send);
-            // 所有设置校验成功后一次提交；不从文件展开对象，也不读取或写入 wardrobe_api。
-            insertOrAssignVariables({
-                wardrobe_send: settings.send,
-                wardrobe_templates: settings.templates,
-                wardrobe_description_prompts: settings.description_prompts,
-            }, { type: 'script' });
-            loadSendSettings();
-            loadWardrobeTemplates();
-            loadDescriptionPrompts();
+            applyWardrobeSettings(settings);
         } else {
-            const templates = {};
-            for (const owner of TEMPLATE_OWNERS) {
-                templates[owner] = { single: wardrobeTemplates[owner].single, wardrobe: wardrobeTemplates[owner].wardrobe };
-            }
-            // 按字段构造备份，不导出脚本变量或设置对象整体，防止带出地址、模型、密钥及新增 API 字段。
-            downloadWardrobeJson({
-                format: 'tw-wardrobe-settings', version: 1,
-                settings: {
-                    send: {
-                        content_type: sendSettings.content_type, position: sendSettings.position, marker_mode: sendSettings.marker_mode,
-                        send_content_rating: sendSettings.send_content_rating, outfit_history_count: sendSettings.outfit_history_count,
-                        image_quality: sendSettings.image_quality,
-                    },
-                    templates,
-                    description_prompts: { outfit: descriptionPrompts.outfit, item: descriptionPrompts.item },
-                },
-            }, '衣柜设置.json');
+            downloadWardrobeJson(buildWardrobeSettingsData(), '衣柜设置.json');
         }
         status.textContent = importing ? '已导入设置' : '已导出设置';
     } catch (error) {
@@ -10123,9 +10438,9 @@ async function handleWardrobeData(event) {
 }
 
 /**
- * 在设置文件入口校验完整格式，并只提取允许恢复的字段；未知字段（包括 API）全部丢弃。
- * @param {unknown} data 从用户选择的 JSON 文件解析的数据。
- * @returns {{send: Object, templates: Object, description_prompts: Object}} 可直接保存的设置，不含 API 或服装数据。
+ * 在设置备份和预设入口校验完整格式，只提取允许恢复的字段，隔离 API 等其他数据。
+ * @param {unknown} data 来自设置文件或预设存档的数据。
+ * @returns {{send: Object, templates: Object, description_prompts: Object, outfit_prompt?: string}} 可恢复的设置，不含 API 或服装数据。
  */
 function parseWardrobeSettingsData(data) {
     if (data?.format !== 'tw-wardrobe-settings' || data.version !== 1 || !data.settings) {
@@ -10142,6 +10457,10 @@ function parseWardrobeSettingsData(data) {
     const imageQuality = settings.send.image_quality === undefined ? 'compressed' : settings.send.image_quality;
     if (imageQuality !== 'compressed' && imageQuality !== 'original') throw new Error('参考图画质设置无效。');
     if (settings.send.send_content_rating !== undefined && typeof settings.send.send_content_rating !== 'boolean') throw new Error('发送内容设置无效。');
+    const ratingPrompt = settings.send.content_rating_prompt;
+    if (ratingPrompt !== undefined && (typeof ratingPrompt !== 'string' || !ratingPrompt.trim())) {
+        throw new Error('分级提示词不能为空。');
+    }
     const historyCount = settings.send.outfit_history_count === undefined ? DEFAULT_OUTFIT_HISTORY_COUNT : settings.send.outfit_history_count;
     if (!isOutfitHistoryCount(historyCount)) throw new Error('历史楼层数须为非负整数。');
     const templates = {};
@@ -10159,13 +10478,19 @@ function parseWardrobeSettingsData(data) {
         if (typeof value !== 'string' || !value.trim()) throw new Error('描述生成设置需要包含服装和单品提示词。');
         prompts[field] = value.trim();
     }
+    // 旧备份没有选装提示词，保留本机已保存的内容；显式提供时必须是有效的提示词。
+    const savedOutfitPrompt = settings.outfit_prompt;
+    if (savedOutfitPrompt !== undefined && (typeof savedOutfitPrompt !== 'string' || !savedOutfitPrompt.trim())) {
+        throw new Error('选装提示词不能为空。');
+    }
     return {
         send: {
             content_type: settings.send.content_type, position: settings.send.position, marker_mode: markerMode,
-            send_content_rating: settings.send.send_content_rating ?? true, outfit_history_count: historyCount,
+            send_content_rating: settings.send.send_content_rating ?? true, content_rating_prompt: ratingPrompt?.trim(),
+            outfit_history_count: historyCount,
             image_quality: imageQuality,
         },
-        templates, description_prompts: prompts,
+        templates, description_prompts: prompts, outfit_prompt: savedOutfitPrompt?.trim(),
     };
 }
 
@@ -10179,13 +10504,14 @@ function isOutfitHistoryCount(count) {
 }
 
 /**
- * 加载发送设置；旧存档默认读取前两楼、发送分级并使用压缩参考图。
+ * 加载发送与分级设置，保留分级开关，自定义提示词优先，缺失或原样保存的旧默认值跟随新版。
  * @returns {void} 无返回值。
  */
 function loadSendSettings() {
     const saved = getVariables({ type: 'script' }).wardrobe_send;
+    const ratingPrompt = saved?.content_rating_prompt;
+    const isCustomRatingPrompt = typeof ratingPrompt === 'string' && ratingPrompt.trim() && ratingPrompt !== PREVIOUS_CONTENT_RATING_PROMPT;
     sendForm.elements.image_quality.value = saved?.image_quality === 'original' ? 'original' : 'compressed';
-    sendForm.elements.send_content_rating.checked = typeof saved?.send_content_rating === 'boolean' ? saved.send_content_rating : true;
     const historyCount = isOutfitHistoryCount(saved?.outfit_history_count) ? saved.outfit_history_count : DEFAULT_OUTFIT_HISTORY_COUNT;
     sendForm.elements.outfit_history_count.value = String(historyCount);
     if (saved && typeof saved === 'object') {
@@ -10201,10 +10527,13 @@ function loadSendSettings() {
         content_type: sendForm.elements.content_type.value,
         position: sendForm.elements.position.value,
         marker_mode: sendForm.elements.marker_mode.value,
-        send_content_rating: sendForm.elements.send_content_rating.checked,
+        send_content_rating: typeof saved?.send_content_rating === 'boolean' ? saved.send_content_rating : true,
+        content_rating_prompt: isCustomRatingPrompt ? ratingPrompt : DEFAULT_CONTENT_RATING_PROMPT,
         outfit_history_count: historyCount,
         image_quality: sendForm.elements.image_quality.value,
     };
+    ratingForm.elements.send_content_rating.checked = sendSettings.send_content_rating;
+    ratingForm.elements.prompt.value = sendSettings.content_rating_prompt;
 }
 
 /**
@@ -10216,7 +10545,18 @@ function clearSendStatus() {
 }
 
 /**
- * 保存发送内容、参考图画质与选装设置；校验通过后再替换已保存设置。
+ * 保存发送与分级设置，分级默认提示词在两页保存时均保留为跟随脚本的状态。
+ * @param {Object} settings 已校验、可直接用于发送的配置。
+ * @returns {void} 存储成功后更新发送缓存。
+ */
+function saveWardrobeSendState(settings) {
+    const ratingOverride = getPromptOverride(settings.content_rating_prompt, DEFAULT_CONTENT_RATING_PROMPT);
+    insertOrAssignVariables({ wardrobe_send: { ...settings, content_rating_prompt: ratingOverride } }, { type: 'script' });
+    sendSettings = settings;
+}
+
+/**
+ * 保存发送内容、参考图画质与换装记录选项，沿用服装分级页已保存的设置。
  * @param {SubmitEvent} event 发送内容表单的提交事件。
  * @returns {void} 无返回值。
  */
@@ -10231,13 +10571,13 @@ function saveSendSettings(event) {
             content_type: fields.content_type.value,
             position: fields.position.value,
             marker_mode: fields.marker_mode.value,
-            send_content_rating: fields.send_content_rating.checked,
+            send_content_rating: sendSettings.send_content_rating,
+            content_rating_prompt: sendSettings.content_rating_prompt,
             outfit_history_count: historyCount,
             image_quality: fields.image_quality.value,
         };
         validateWardrobeSendSettings(nextSettings);
-        insertOrAssignVariables({ wardrobe_send: nextSettings }, { type: 'script' });
-        sendSettings = nextSettings;
+        saveWardrobeSendState(nextSettings);
         status.textContent = '已保存';
         status.dataset.error = 'false';
     } catch (error) {
@@ -10671,7 +11011,7 @@ function stopApiRequest() {
 }
 
 /**
- * 切换 API、发送内容、模板、描述生成及数据设置页，保留服装详情的未保存内容。
+ * 切换设置页，保留表单草稿和服装详情的未保存内容。
  * @param {MouseEvent} event 设置导航中的点击事件。
  * @returns {void} 无返回值。
  */

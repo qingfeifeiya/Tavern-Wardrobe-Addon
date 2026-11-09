@@ -84,7 +84,6 @@ for (const wearer of ['user', 'char']) {
                 assert.ok(text.includes('不得根据性别自动共享'), '不能将性别当成自动共享衣服的依据');
                 assert.ok(text.includes(names[wearer]), '模板应使用对应角色名称');
                 assert.ok(text.includes(`ID：${JSON.stringify(item.id)}`) && text.includes('分类：外套'), '自定义模板下仍有结构化候选信息');
-                assert.ok(text.includes('固定穿搭规则') && text.includes('一身完整穿搭'), '三种发送类型都保留自由搭配规则');
                 if (content_type === 'image') {
                     assert.ok(!text.includes(item.description), '默认图片提示词不强制附带已保存的文字描述');
                     assert.ok(!text.includes('USER单套|') && !text.includes('Char单套|'), '图片模式不套用角色文字模板');
@@ -122,7 +121,6 @@ for (const wearer of ['user', 'char']) {
         assert.ok(parts[0].text.includes(`${item.name}（单品；分类：外套；内容分级：SFW（日常／非色情服装）`));
         assert.ok(parts[0].text.includes(`${second.name}（单品；分类：外套；内容分级：NSFW（色情／成人服装）`));
         assert.match(parts[0].text, /当前实际穿着[^\n]*\n红色长裙[^\n]*内容分级：NSFW/);
-        assert.ok(parts[0].text.includes('NSFW 标记不代表当前剧情允许色情内容'), '分级说明性质，不自动触发色情剧情');
         const unrated = buildWearerContent([item], wearer, { content_type }, custom, names);
         assert.ok(unrated[0].text.includes('内容分级：未标注'), '旧服装不冒充已确认的 SFW');
         const disabled = buildWearerContent(ratedItems, wearer, { content_type, send_content_rating: false }, custom, names, { single: '图片参考', wardrobe: '图片参考' }, new Set([second.id]));
@@ -206,6 +204,8 @@ const request = { chat: [{ role: 'user', content: '继续剧情' }] };
 await injectWardrobeContent(request);
 const roleBlocks = request.chat[0].content.filter(part => part.type === 'text' && part.text.startsWith('【'));
 assert.equal(roleBlocks.length, 2, '两个角色分别生成服装清单');
+assert.equal(roleBlocks.map(part => part.text).join('\n').split('一、按部位占位').length - 1, 1, '直接请求只附一份默认选装提示词');
+assert.equal(roleBlocks.map(part => part.text).join('\n').split('NSFW 标记不代表当前剧情允许色情内容').length - 1, 1, '直接请求只附一份默认分级说明');
 assert.ok(roleBlocks[0].text.includes('USER（男主）') && roleBlocks[0].text.includes(item.name) && !roleBlocks[0].text.includes(second.name), 'USER 清单不能混入只分配给 Char 的服装');
 assert.ok(roleBlocks[1].text.includes('Char（女主）') && roleBlocks[1].text.includes(second.name) && !roleBlocks[1].text.includes(item.name), 'Char 清单不能混入只分配给 USER 的服装');
 scriptVariables.wardrobe_selections.user = [];
