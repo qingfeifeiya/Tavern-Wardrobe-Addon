@@ -218,7 +218,7 @@ globalThis.api = { parseWardrobeData, parseWardrobeFile, loadGarments, exportGar
     openCombinationEditor, closeCombinationEditor, saveCombination, saveSelectedGarment,
     buildWardrobeContent, buildWearerContent, getGarmentDescription, matchesGarmentFilter, renderGarmentDetails,
     openImageImport, closeImageImport, addPendingImports, addImportLink, selectPendingImports, confirmImageImport,
-    setDetailsDirty, toggleMobileDetails,
+    markDetailsDirty, setDetailsDirty, toggleMobileDetails,
     pendingImports: () => pendingGarmentImports,
     state: () => ({ garments, garmentGroups, garmentGroupFilters, currentCategory, currentGroup, selectedGarmentId, checkedGarmentIds, multiSelectMode }),
     selectGroup: id => { currentGroup = id; },
@@ -1231,7 +1231,7 @@ async function checkSelectionScopes() {
 }
 
 /**
- * 验证角色标签按世界书保存、回填和发送，以及旧标签的手动恢复。
+ * 验证回车单独保存专属角色、角色标签按世界书回填和发送，以及旧标签的手动恢复。
  * @returns {Promise<void>} 所有归属和请求断言完成后结束。
  */
 async function checkNamedWearer() {
@@ -1254,22 +1254,42 @@ async function checkNamedWearer() {
     control('[name="garment_description"]').value = outfit.description;
     const owner = control('[name="garment_named_wearer"]');
     const tags = control('.tw-named-wearer-tags');
+    const scope = control('.tw-selection-scope select');
     const enter = { key: 'Enter', currentTarget: owner, preventDefault() {} };
     const before = JSON.stringify(scriptVariables);
+    const description = control('[name="garment_description"]');
+    description.value = '尚未提交的描述草稿';
+    api.setDetailsDirty(true);
     owner.value = ' 张莹 ';
     api.addNamedWearerTag({ ...enter, isComposing: true });
     assert.equal(tags.children.length, 0, '中文输入法确认候选时不生成标签');
+    assert.equal(JSON.stringify(scriptVariables), before);
+    writesFail = true;
     api.addNamedWearerTag(enter);
-    assert.equal(owner.value, '', '回车生成标签后可继续输入');
+    writesFail = false;
+    assert.equal(JSON.stringify(scriptVariables), before, '回车写入失败时保留服装和原有归属');
+    assert.equal(owner.value, ' 张莹 ', '保存失败可直接再次回车重试');
+    assert.equal(tags.children.length, 0, '保存失败不显示未写入的标签');
+    assert.equal(control('.tw-garment-status').dataset.error, 'true');
+    api.addNamedWearerTag(enter);
+    assert.equal(owner.value, '', '回车保存标签后可继续输入');
+    const savedOutfit = scriptVariables.wardrobe_items.find(item => item.id === 'blue');
+    assert.deepEqual(Array.from(savedOutfit.namedWearersByWorld[worldA]), ['张莹']);
+    assert.equal(savedOutfit.description, outfit.description, '保存专属角色不提交描述草稿');
+    assert.equal(description.value, '尚未提交的描述草稿');
+    assert.equal(control('[data-action="save-garment"]').dataset.dirty, 'true', '其他详情仍有草稿');
+    const after = JSON.stringify(scriptVariables);
     owner.value = '张莹';
     api.addNamedWearerTag(enter);
     assert.equal(tags.children.length, 1, '同一个角色只生成一个标签');
-    assert.equal(JSON.stringify(scriptVariables), before, '回车只修改详情草稿');
-    writesFail = true;
-    assert.equal(api.saveSelectedGarment(), undefined);
-    writesFail = false;
-    assert.equal(JSON.stringify(scriptVariables), before, '失败时同时保留服装和原有归属');
-    assert.deepEqual(Array.from(api.saveSelectedGarment().namedWearersByWorld[worldA]), ['张莹']);
+    assert.equal(JSON.stringify(scriptVariables), after, '重复回车不改变存档');
+    scope.value = 'character';
+    api.selectSelectionScope({ currentTarget: scope });
+    assert.equal(tags.children.length, 0, '新范围不继承已保存的角色标签');
+    scope.value = 'global';
+    api.selectSelectionScope({ currentTarget: scope });
+    assert.deepEqual(tags.children.map(tag => tag.dataset.namedWearer), ['张莹'], '切回原范围回填回车保存的标签');
+    assert.equal(description.value, '尚未提交的描述草稿');
     assert.deepEqual(scriptVariables.wardrobe_selections.user, [], '普通 USER 归属在同次提交移除');
     assert.deepEqual(scriptVariables.wardrobe_selections.char, [], '含专属单品的搭配退出普通候选');
     assert.deepEqual(scriptVariables.wardrobe_scoped_selections['["character","角色甲.png"]'].char, [], '清理其他范围的旧归属');
@@ -1312,9 +1332,14 @@ async function checkNamedWearer() {
     api.sendType('text');
     api.sendImageQuality('compressed');
 
+    description.value = outfit.description;
+    api.setDetailsDirty(false);
     owner.value = '王琳';
+    api.markDetailsDirty({ target: { name: 'garment_named_wearer' } });
+    assert.equal(control('[data-action="save-garment"]').dataset.dirty, 'true');
     api.addNamedWearerTag(enter);
-    assert.deepEqual(Array.from(api.saveSelectedGarment().namedWearersByWorld[worldA]), ['张莹', '王琳']);
+    assert.deepEqual(Array.from(api.state().garments.get('blue').namedWearersByWorld[worldA]), ['张莹', '王琳']);
+    assert.equal(control('[data-action="save-garment"]').dataset.dirty, 'false', '回车后仅有的专属角色草稿已经保存');
     chat = [{ is_user: true, mes: '张莹和王琳见了面。' }];
     const shared = { chat: [{ role: 'user', content: chat[0].mes }] };
     await api.injectWardrobeContent(shared);
@@ -1329,7 +1354,7 @@ async function checkNamedWearer() {
     assert.equal(tags.children.length, 0, '切换世界书清空界面中上一组的标签');
     owner.value = '李娜';
     api.addNamedWearerTag(enter);
-    assert.deepEqual(Array.from(api.saveSelectedGarment().namedWearersByWorld[worldB]), ['李娜']);
+    assert.deepEqual(Array.from(api.state().garments.get('blue').namedWearersByWorld[worldB]), ['李娜']);
     globalWorldbooks = [];
     chatId = '世界书测试聊天';
     chatWorldbook = '世界乙';
@@ -1358,7 +1383,9 @@ async function checkNamedWearer() {
     api.renderGarmentDetails();
     assert.equal(tags.children.length, 0, '切换服装时清除上一件的角色标签');
     owner.value = '李娜';
-    assert.equal(api.saveSelectedGarment(), undefined, '整套不可指定给与成员不同的角色');
+    api.addNamedWearerTag(enter);
+    assert.match(control('.tw-garment-status').textContent, /搭配成员冲突/, '回车沿用搭配成员归属校验');
+    assert.equal(owner.value, '李娜');
     owner.value = '王琳';
     assert.deepEqual(Array.from(api.saveSelectedGarment().namedWearersByWorld[worldA]), ['王琳']);
 
@@ -1387,7 +1414,6 @@ async function checkNamedWearer() {
     assert.equal(migrated.namedWearers.length, 0);
 
     // 两张卡使用完全相同的世界书和角色名，发送时只认实际游玩的角色卡。
-    const scope = control('.tw-selection-scope select');
     const target = control('.tw-selection-character select');
     characterAvatar = '角色乙.png';
     target.value = '角色甲.png';

@@ -41,6 +41,11 @@ const sandbox = {
     SillyTavern: {
         name1: '玩家', name2: '角色', getCurrentChatId: () => chatId,
         getContext: () => ({ chat, characterId: 0, characters: [{ avatar: 'card.png' }] }),
+        /** 模拟酒馆从文本块和聊天补全回复提取正文；参数为响应体与 API 类型，返回正文。 */
+        extractMessageFromData(data, apiType) {
+            assert.equal(apiType, 'openai');
+            return data?.content?.find(part => part.type === 'text')?.text ?? data?.choices?.[0]?.message?.content;
+        },
     },
     getScriptId: () => 'wardrobe-test',
     /** 记录整楼变量读取次数；参数为变量作用域，返回当前存档。 */
@@ -94,6 +99,7 @@ globalThis.api = {
     matchGarmentByName, matchesGarmentFilter, buildWearerContent, stripOutfitMarkers, injectWardrobeContent,
     markOutfitChatPrompt, applyIsolatedOutfits, publishOutfitSnapshot, parseOutfitSnapshot, stopOutfitRequest,
     loadSendSettings, saveSendSettings, loadOutfitSettings, saveOutfitSettings, restorePromptDefaults, saveRatingSettings,
+    wardrobeLogs,
     /** 替换已保存的模拟连接；参数为连接配置，无返回值。 */
     setApiConnection(config) { savedApiSettings = config; },
     /** 控制主请求读图等待；参数为图片读取函数，无返回值。 */
@@ -464,8 +470,13 @@ test('多件当前穿着、三十件候选与剧情换装快照', checkMultiItem
  */
 async function checkStoryOutfitContinuity() {
     reset();
-    saved.wardrobe_selections = { user: [], char: ['red'], current: { user: [], char: [] } };
-    const opening = '她下班直接过来，穿着黑色中裙、LV 花色丝巾、薄黑丝袜和尖头细高跟。';
+    saved.wardrobe_items.push(
+        { id: 'socks', name: '丝滑长袜', category: 'socks', description: '有光泽的丝滑长袜', image: '' },
+        { id: 'heels', name: '尖头高跟鞋', category: 'shoes', description: '尖头细跟鞋', image: '' },
+    );
+    saved.wardrobe_selections = { user: [], char: ['socks', 'heels'], current: { user: [], char: [] } };
+    api.loadGarments();
+    const opening = '她下班直接过来，穿着黑色中裙、LV 花色丝巾、短袜和平底鞋。';
     const followUp = '我请她坐下，问她今天工作怎么样。';
     const ratingAfterContinuity = /分级和场景分档只在允许选装时用于选择候选。\n\n服装内容分级/;
     chat = [{ mes: opening }, { is_user: true, mes: followUp }];
@@ -474,6 +485,7 @@ async function checkStoryOutfitContinuity() {
     assert.equal(direct.chat[0].content, opening);
     assert.match(currentText(direct.chat[1].content), /没有衣柜穿着记录，请沿用剧情中已明确的衣着/);
     assert.match(direct.chat[1].content, /开场白、剧情设定或前文已明确穿着[\s\S]*不能因此从候选中选装、补齐或用相似款替代/);
+    assert.match(direct.chat[1].content, /口语点选衣物，也算要求局部换装/);
     assert.match(direct.chat[1].content, /时间变化本身不触发换装；回家或仅为换衣做准备也不触发/);
     assert.match(direct.chat[1].content, ratingAfterContinuity, '直接发送先判断换装时机，再应用分级提示词');
     assert.match(direct.chat[1].content, /沿用剧情既有穿着且衣柜记录没有变化时省略注释/);
@@ -487,7 +499,7 @@ async function checkStoryOutfitContinuity() {
     /** 捕获模型收到的选装指令；参数为请求路径与选项，返回模拟模型响应。 */
     sandbox.window.parent.fetch = async (_url, options) => {
         received.push(JSON.parse(options.body));
-        const content = received.length === 1 ? '{}' : '{"char":["red"]}';
+        const content = received.length === 1 ? '{}' : '{"char":["socks","heels"]}';
         return new Response(JSON.stringify({ choices: [{ message: { content } }] }));
     };
     const request = { messages: [{ role: 'assistant', content: opening }, { role: 'user', content: followUp }] };
@@ -500,16 +512,27 @@ async function checkStoryOutfitContinuity() {
     assert.match(scenario.content, /开场白、剧情设定或前文已明确穿着[\s\S]*不能因此从候选中选装、补齐或用相似款替代/);
     assert.match(scenario.content, /时间变化本身不触发换装；回家或仅为换衣做准备也不触发/);
     assert.match(scenario.content, ratingAfterContinuity, '独立选装先判断换装时机，再应用分级提示词');
-    assert.deepEqual(request.messages, [{ role: 'assistant', content: opening }, { role: 'user', content: followUp }]);
+    assert.deepEqual(structuredClone(request.messages), [{ role: 'assistant', content: opening }, { role: 'user', content: followUp }]);
     assert.equal(api.readEffectiveSelections().current.char.size, 0, '沿用开场穿着时没有候选被记为当前穿着');
 
-    const change = '请她换上红外套，其他衣服保持原样。';
+    const change = '要那个就是你以前穿的那个袜子滑滑的，还有高高的鞋子。';
     chat.push({ mes: '她坐下聊起工作。' }, { is_user: true, mes: change });
-    const changed = { messages: [{ role: 'user', content: change }] };
-    api.markOutfitChatPrompt({ prompt: changed.messages }, false);
+    const changed = { type: 'normal', messages: [{ role: 'user', content: change }] };
+    const prepared = { prompt: changed.messages };
+    api.markOutfitChatPrompt(prepared, false);
+    changed.messages = structuredClone(prepared.prompt);
     await api.applyIsolatedOutfits(changed);
-    assert.deepEqual(Array.from(api.readEffectiveSelections().current.char), ['red']);
-    assert.match(changed.messages[0].content, /本轮未换下的衣柜外衣物、鞋袜和配饰继续保留[\s\S]*红衣独有描述/);
+    assert.equal(received.length, 2, '宿主复制消息对象后仍发出独立选装请求');
+    assert.match(received[1].messages[1].content, /口语点选衣物，也算要求局部换装/);
+    assert.equal(JSON.parse(received[1].messages[1].content.split('\n')[1]).at(-1).content, change);
+    assert.deepEqual(Array.from(api.readEffectiveSelections().current.char), ['socks', 'heels']);
+    assert.match(changed.messages[0].content, /本轮未换下的衣柜外衣物、鞋袜和配饰继续保留[\s\S]*丝滑长袜[\s\S]*尖头细跟鞋/);
+    assert.deepEqual(structuredClone(changed.messages[1]), { role: 'user', content: change }, '临时标记不会进入主请求');
+    const reply = { mes: '她换上了长袜和高跟鞋。', swipe_id: 0, swipes: ['她换上了长袜和高跟鞋。'] };
+    chat.push(reply);
+    await api.publishOutfitSnapshot(chat.length - 1, 'normal');
+    assert.match(reply.mes, /<!-- outfit:char=\{"ids":\["socks","heels"\]/);
+    assert.equal(reply.swipes[0], reply.mes, '注释写入当前回复页');
 }
 
 test('开场白已有穿着时普通回复不要求首次选装，明确局部换装保留原有衣物', checkStoryOutfitContinuity);
@@ -553,13 +576,21 @@ async function checkIsolatedOutfits() {
     assert.equal(received.length, 0, '预览和无标记请求不调用选装接口');
     assert.equal(preview.prompt.length, 1, '预览不附加穿搭');
     assert.equal(unmarked.length, 1, '无标记请求保持原样');
+    const canceled = { prompt: [{ role: 'user', content: '已取消的请求' }] };
+    api.markOutfitChatPrompt(canceled, false);
+    api.stopOutfitRequest();
+    const canceledRequest = { messages: structuredClone(canceled.prompt) };
+    await api.applyIsolatedOutfits(canceledRequest);
+    assert.equal(received.length, 0, '取消后迟到的请求不能触发选装');
+    assert.deepEqual(structuredClone(canceledRequest.messages), [{ role: 'user', content: '已取消的请求' }], '即使已取消，也不发送临时标记');
     const request = {
         messages: [{ role: 'system', content: '主模型设定' }, userMessage],
         chat_completion_source: 'makersuite', model: 'host-model', reverse_proxy: 'https://proxy.example.test',
         stream: true, tools: [{ type: 'function' }], json_schema: { name: 'main_only' }, stop: ['主请求专用'],
     };
     await api.injectWardrobeContent({ chat: request.messages, dryRun: false });
-    api.markOutfitChatPrompt({ prompt: request.messages.slice() }, false);
+    api.markOutfitChatPrompt({ prompt: request.messages }, false);
+    request.messages = request.messages.slice();
     await api.applyIsolatedOutfits(request);
     const plot = JSON.parse(received[0].messages[1].content.split('\n')[1]);
     assert.deepEqual(plot.map(floor => floor.content.trim()), ['最近用户楼层', '最近角色楼层', '本次输入']);
@@ -578,7 +609,7 @@ async function checkIsolatedOutfits() {
     assert.equal(request.json_schema.name, 'main_only');
     assert.match(request.messages[0].content, /主模型设定[\s\S]*红衣独有描述/);
     assert.doesNotMatch(request.messages[0].content, /可选衣柜|蓝衣独有描述|outfit:/);
-    assert.equal(request.messages[1], userMessage, '保持主请求中的用户消息原对象');
+    assert.deepEqual(structuredClone(request.messages[1]), userMessage, '主请求保留用户消息内容并清除临时标记');
     assert.equal(chat.at(-1).mes, '本次输入', '选装只写楼层变量，保留已保存正文');
     assert.deepEqual(Array.from(api.readEffectiveSelections().current.user), ['red']);
     await api.applyIsolatedOutfits(request);
@@ -597,7 +628,7 @@ async function checkIsolatedOutfits() {
         assert.match(imageRequest.messages[0].content, /USER（玩家）的当前穿着[\s\S]*红衣独有描述/);
         assert.match(imageRequest.messages[0].content, /Char（角色）的当前穿着[\s\S]*长裤独有描述/);
         assert.doesNotMatch(imageRequest.messages[0].content, /可选衣柜|蓝衣独有描述/);
-        assert.equal(imageRequest.messages[1], imagePrompt, '辅助生成保留原始生图指令');
+        assert.deepEqual(structuredClone(imageRequest.messages[1]), imagePrompt, '辅助生成保留原始生图指令');
     }
     assert.equal(received.length, 1, '辅助生成不重新请求选装接口');
     assert.equal(JSON.stringify(chat.at(-1).variables), outfitSnapshot, '辅助生成不写楼层变量');
@@ -677,7 +708,7 @@ async function checkIsolatedOutfits() {
     assert.equal(regenerated.proxy_password, 'host-key', '独立连接不覆盖主连接的鉴权');
     assert.equal(regenerated.messages[1].content.filter(part => part.type === 'image_url').length, 2, '主请求仅附两个角色选中的参考图');
     assert.ok(regenerated.messages[1].content.filter(part => part.type === 'image_url').every(part => part.image_url.url === image), '独立选装的主请求也使用原图');
-    assert.equal(regenerated.messages[2], input);
+    assert.deepEqual(structuredClone(regenerated.messages[2]), input);
 
     const imageRequest = { messages: [{ role: 'user', content: '编写生图提示词' }] };
     await api.injectWardrobeContent({ chat: imageRequest.messages, dryRun: false });
@@ -914,3 +945,42 @@ async function checkIsolatedOutfitCommit() {
 }
 
 test('独立选装在主请求就绪后提交，同轮共用快照并隔离迟到结果', checkIsolatedOutfitCommit);
+
+/**
+ * 验证兼容格式能提交穿搭，接口错误和无正文分别记录原因并沿用旧穿搭。
+ * @returns {Promise<void>} 所有响应场景检查完成后结束。
+ */
+async function checkIsolatedOutfitResponses() {
+    reset();
+    sendForm.elements.marker_mode.value = 'isolated';
+    api.saveSendSettings({ preventDefault() {} });
+    api.setApiConnection({ mode: 'host' });
+    let warnings = 0;
+    sandbox.toastr.warning = () => { warnings++; };
+    const cases = [
+        [{ content: [{ type: 'text', text: '{"user":["red"]}' }] }, null],
+        [{ error: { message: 'Unauthorized: test-proxy-password' } }, /选装接口报错：Unauthorized/],
+        [{ error: true, quota_error: true }, /额度不足/],
+        [{ choices: [{ message: { content: null }, finish_reason: 'length' }] }, /未返回文字（结束原因：length）/],
+    ];
+    for (const [body, error] of cases) {
+        const floor = { is_user: true, mes: '这轮的剧情' };
+        chat.push(floor);
+        sandbox.window.parent.fetch = async () => new Response(JSON.stringify(body));
+        const request = { messages: [{ role: 'user', content: floor.mes }], proxy_password: 'test-proxy-password' };
+        api.markOutfitChatPrompt({ prompt: request.messages }, false);
+        await api.applyIsolatedOutfits(request);
+        assert.match(request.messages[0].content, /红衣独有描述/);
+        if (error) {
+            const log = api.wardrobeLogs.findLast(entry => entry.message === '独立选装失败，沿用原穿搭');
+            assert.match(log.details, error);
+            assert.doesNotMatch(log.details, /test-proxy-password/);
+            assert.equal(floor.variables, undefined, '接口失败不覆盖楼层快照');
+        } else {
+            assert.deepEqual(floor.variables[0]['wardrobe_outfit:wardrobe-test:default-1'].user, ['red']);
+        }
+    }
+    assert.equal(warnings, 3);
+}
+
+test('独立选装兼容酒馆回复格式并区分接口错误和空回复', checkIsolatedOutfitResponses);
