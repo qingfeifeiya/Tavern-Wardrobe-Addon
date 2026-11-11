@@ -465,8 +465,8 @@ async function checkMultiItemOutfits() {
 test('多件当前穿着、三十件候选与剧情换装快照', checkMultiItemOutfits);
 
 /**
- * 验证开场白已有衣着时，两种发送方式都区分剧情穿着与空衣柜记录。
- * @returns {Promise<void>} 两种请求及后续显式换装的断言完成后结束。
+ * 验证剧情衣着的延续、两种发送方式的规则，以及独立选装只在穿搭资料变化时写注释。
+ * @returns {Promise<void>} 发送请求及楼层注释断言完成后结束。
  */
 async function checkStoryOutfitContinuity() {
     reset();
@@ -499,7 +499,7 @@ async function checkStoryOutfitContinuity() {
     /** 捕获模型收到的选装指令；参数为请求路径与选项，返回模拟模型响应。 */
     sandbox.window.parent.fetch = async (_url, options) => {
         received.push(JSON.parse(options.body));
-        const content = received.length === 1 ? '{}' : '{"char":["socks","heels"]}';
+        const content = received.length === 2 ? '{"char":["socks","heels"]}' : '{}';
         return new Response(JSON.stringify({ choices: [{ message: { content } }] }));
     };
     const request = { messages: [{ role: 'assistant', content: opening }, { role: 'user', content: followUp }] };
@@ -533,6 +533,40 @@ async function checkStoryOutfitContinuity() {
     await api.publishOutfitSnapshot(chat.length - 1, 'normal');
     assert.match(reply.mes, /<!-- outfit:char=\{"ids":\["socks","heels"\]/);
     assert.equal(reply.swipes[0], reply.mes, '注释写入当前回复页');
+
+    const praise = '真的很滑，还很舒服。';
+    chat.push({ is_user: true, mes: praise });
+    const continued = { type: 'normal', messages: [{ role: 'assistant', content: reply.mes }, { role: 'user', content: praise }] };
+    api.markOutfitChatPrompt({ prompt: continued.messages }, false);
+    await api.applyIsolatedOutfits(continued);
+    assert.equal(received.length, 3, '新楼层仍由独立接口判断是否换装');
+    assert.match(continued.messages[0].content, /当前穿着[\s\S]*丝滑长袜[\s\S]*尖头细跟鞋/);
+    assert.doesNotMatch(JSON.stringify(continued.messages), /<!-- outfit:/, '前一楼的注释不会随主请求发送');
+    assert.doesNotMatch(JSON.stringify(received[2].messages), /<!-- outfit:/, '前一楼的注释也不会随独立请求发送');
+    const ordinaryText = '她继续和你聊天。';
+    const ordinary = { mes: ordinaryText, swipe_id: 0, swipes: [ordinaryText] };
+    chat.push(ordinary);
+    await api.publishOutfitSnapshot(chat.length - 1, 'normal');
+    assert.equal(ordinary.mes, ordinaryText, '沿用同一身时，后续 AI 回复不重复写入注释');
+    assert.match(reply.mes, /<!-- outfit:char=/, '已有注释留在首次记录对应穿搭的楼层');
+
+    const unchangedNote = reply.mes.slice(reply.mes.indexOf('<!-- outfit:'));
+    const stages = [
+        { ids: ['heels', 'socks'], copied: unchangedNote, expected: undefined },
+        { ids: ['socks'], expected: ['socks'] },
+        { ids: [], expected: [] },
+        { ids: [], expected: undefined },
+    ];
+    for (const { ids, copied, expected } of stages) {
+        const userFloor = { is_user: true, mes: '下一轮', variables: [{ 'wardrobe_outfit:wardrobe-test:default-1': { char: ids } }] };
+        const mes = copied ? `${ordinaryText}\n\n${copied}` : ordinaryText;
+        const aiFloor = { mes, swipe_id: 0, swipes: [mes] };
+        chat.push(userFloor, aiFloor);
+        await api.publishOutfitSnapshot(chat.length - 1, 'normal');
+        const note = aiFloor.mes.match(/<!-- outfit:char=(.*?) -->/)?.[1];
+        assert.deepEqual(note && JSON.parse(note).ids, expected, '只重排时清除照抄的注释，真正换装或清空时各记录一次');
+        assert.equal(aiFloor.swipes[0], aiFloor.mes, '写回当前回复页的正文和注释保持一致');
+    }
 }
 
 test('开场白已有穿着时普通回复不要求首次选装，明确局部换装保留原有衣物', checkStoryOutfitContinuity);

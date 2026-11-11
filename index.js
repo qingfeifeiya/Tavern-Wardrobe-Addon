@@ -10180,21 +10180,25 @@ function appendCurrentOutfits(messages, content) {
 }
 
 /**
- * 在剧情回复末尾发布已确认的穿搭，供读取原始楼层的插件直接获取衣柜资料。
+ * 在首次记录或穿搭资料变化时发布隐藏注释，供读取原始楼层的插件获取衣柜资料。
  * @param {number} messageId 刚收到的 AI 回复楼层号。
  * @param {string} type 酒馆本次生成类型。
  * @returns {Promise<void>} 保存隐藏注释及当前回复页，避免重复触发渲染事件。
  */
 async function publishOutfitSnapshot(messageId, type) {
     if (sendSettings.marker_mode !== 'isolated' || !OUTFIT_REPLY_TYPES.has(type)) return;
-    const reply = readChat()[messageId];
+    const chat = readChat();
+    const reply = chat[messageId];
     if (!reply || reply.is_user || reply.is_system || !reply.mes?.trim()) return;
     try {
         // 排除正在发布的回复，避免模型在正文中写的旧式标记覆盖已确认的快照。
         const current = resolveCurrentOutfits(readWearerSelections(), { beforeIndex: messageId });
+        const previousOutfits = readPublishedOutfits(chat, messageId);
         const markers = [];
         for (const wearer of WEARERS) {
-            if (!current[wearer].size) continue;
+            const previous = previousOutfits.get(wearer);
+            // 首次记录为空时省略；已有注释后整套换下时发布一次空记录，避免读取方继续沿用旧衣服。
+            if (!current[wearer].size && !previous?.ids.size) continue;
             const ids = Array.from(current[wearer]);
             const items = Object.fromEntries(ids.map(id => {
                 const item = garments.get(id);
@@ -10203,21 +10207,66 @@ async function publishOutfitSnapshot(messageId, type) {
                     description: sendSettings.content_type === 'image' ? '' : getGarmentDescription(item),
                 }];
             }));
+            if (matchesPublishedOutfit(previous, ids, items)) continue;
             // 其他插件可直接按 ID 查描述；转义连续连字符，避免衣柜原文意外结束 HTML 注释。
             const snapshot = JSON.stringify({ ids, items }).replaceAll('--', '\\u002d\\u002d');
             markers.push(`<!-- outfit:${wearer}=${snapshot} -->`);
         }
-        if (!markers.length) {
-            recordWardrobeLog('debug', '未写穿搭注释：当前回复没有可记录的衣柜穿着', { floor: messageId, library: activeLibraryId });
+        const body = reply.mes.replace(OUTFIT_MARKER, '');
+        // 续写或模型照抄旧注释时也清理当前楼层；正文原本没有注释时保留其空白和换行。
+        if (!markers.length && body === reply.mes) {
+            if (!current.user.size && !current.char.size) recordWardrobeLog('debug', '未写穿搭注释：当前回复没有可记录的衣柜穿着', { floor: messageId, library: activeLibraryId });
             return;
         }
-        const message = [reply.mes.replace(OUTFIT_MARKER, '').trimEnd(), ...markers].join('\n\n');
+        const message = [body.trimEnd(), ...markers].join('\n\n');
         if (message === reply.mes) return;
         await setChatMessages([{ message_id: messageId, message }], { refresh: 'none' });
-        recordWardrobeLog('info', '已写入楼层穿搭注释', { floor: messageId, user: Array.from(current.user), char: Array.from(current.char) });
+        recordWardrobeLog('info', markers.length ? '已写入楼层穿搭注释' : '已移除楼层中的重复穿搭注释', {
+            floor: messageId, user: Array.from(current.user), char: Array.from(current.char),
+        });
     } catch (error) {
         recordWardrobeLog('error', '楼层穿搭注释未写入', error);
     }
+}
+
+/**
+ * 一次倒查找出各角色最近已发布的快照，只读当前可见回复页。
+ * @param {Object[]} chat 当前聊天楼层。
+ * @param {number} beforeIndex 当前楼层下标，排除本楼已有注释以兼容续写和重生成。
+ * @returns {Map<string, {ids: Set<string>, items: Object}>} 按角色保存的最近有效注释，含显式空记录。
+ */
+function readPublishedOutfits(chat, beforeIndex) {
+    const previous = new Map();
+    for (let index = beforeIndex - 1; index >= 0 && previous.size < WEARERS.length; index--) {
+        const floor = chat[index];
+        if (!floor || floor.is_user || floor.is_system || typeof floor.mes !== 'string' || !floor.mes.includes('outfit:')) continue;
+        for (const [, wearer, value] of floor.mes.matchAll(OUTFIT_MARKER)) {
+            if (previous.has(wearer) || !PUBLISHED_OUTFIT_SNAPSHOT.test(value)) continue;
+            try {
+                const { ids, items } = JSON.parse(value);
+                if (Array.isArray(ids) && items && typeof items === 'object') previous.set(wearer, { ids: new Set(ids), items });
+            } catch {
+                // 楼层原文可编辑，损坏的注释不能挡住更早的有效记录。
+            }
+        }
+    }
+    return previous;
+}
+
+/**
+ * 比较可见资料是否变化，模型重排同一组 ID 不算换装，修改名称或描述则需要发布更新。
+ * @param {{ids: Set<string>, items: Object}|undefined} previous 最近一条已发布的记录。
+ * @param {string[]} ids 当前整身穿搭的 ID。
+ * @param {Object} items 本轮发布的名称及描述，按 ID 查找。
+ * @returns {boolean} 两次的服装 ID 与发布资料均一致时为真。
+ */
+function matchesPublishedOutfit(previous, ids, items) {
+    if (previous?.ids.size !== ids.length) return false;
+    for (const id of ids) {
+        const oldItem = previous.items[id];
+        if (!previous.ids.has(id) || oldItem?.name !== items[id].name || oldItem.description !== items[id].description) return false;
+    }
+    return true;
 }
 
 /**
