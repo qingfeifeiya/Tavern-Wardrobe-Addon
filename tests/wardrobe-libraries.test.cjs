@@ -85,6 +85,7 @@ function createHost(saved) {
         panel = testPanel;
         root = { isConnected: true };
         renderGarmentLibrary = () => {};
+        const actualRenderGarmentDetails = renderGarmentDetails;
         renderGarmentDetails = () => {};
         showGarmentDescription = () => {};
         // 此宿主只验证分区业务，弹窗选择异步返回，真实弹窗交互由界面测试覆盖。
@@ -93,7 +94,9 @@ function createHost(saved) {
             addWardrobeLibrary, deleteWardrobeLibrary, createGarment, importGarmentFiles, applyGarments, readWearerSelections, selectSelectionScope,
             exportGarments, deleteGarments, injectWardrobeContent, deleteGarmentImages, toggleGarmentFavorite,
             handleGarmentAction, openWardrobeExport, updateWardrobeExport, confirmWardrobeExport, closeWardrobeExport, parseWardrobeData,
-            moveGarmentsToLibrary, renderBulkMenu, handleBulkMenu,
+            moveGarmentsToLibrary, renderBulkMenu, handleBulkMenu, saveSelectedGarment, setDetailsDirty,
+            /** 启用真实详情渲染，返回控件查询入口以读取保存后的表单。 */
+            showDetails() { renderGarmentDetails = actualRenderGarmentDetails; renderGarmentDetails(); return panel.querySelector; },
             state: () => ({ activeLibraryId, wardrobeLibraries, garments, garmentGroups, checkedGarmentIds, selectedGarmentId, currentCategory, currentGroup, garmentSearch, multiSelectMode }),
             /** 指定批量勾选；参数为服装标识数组，无返回值。 */
             check: ids => { checkedGarmentIds.clear(); for (const id of ids) checkedGarmentIds.add(id); multiSelectMode = true; },
@@ -524,4 +527,86 @@ test('被其他搭配引用、目标无效、存储失败和导入进行中均�
     api.moveGarmentsToLibrary('default-2');
     assert.equal(saved.wardrobe_items.length, 0);
     assert.equal(saved.wardrobe_library_data['default-2'].wardrobe_items.length, 2);
+});
+
+test('描述 JSON 一次保存分级和资料，打开目标衣柜，并可双向归档', () => {
+    const item = { id: 'same', name: '待归档服装', category: 'coats', description: '原描述', groupIds: ['home'],
+        image: 'user/images/tavern_wardrobe/rated.png', favorite: true, lastUsedAt: 123 };
+    const targetItem = { id: 'same', name: '目标原有服装', description: '', image: '' };
+    const saved = { wardrobe_items: [item], wardrobe_groups: [{ id: 'home', name: '居家' }],
+        wardrobe_selections: { user: [], char: ['same'], current: { user: [], char: ['same'] } },
+        wardrobe_library_data: { 'default-2': {
+            wardrobe_items: [targetItem], wardrobe_groups: [{ id: 'target-home', name: '居家' }],
+        } } };
+    const { api, state, deleted } = createHost(saved);
+    const control = api.showDetails();
+    const description = control('[name="garment_description"]');
+    const data = { name: '归档套装', description: '保存后的正文', category: 'outfits', contentRating: 'nsfw', tags: ['新标签'] };
+    const json = JSON.stringify(data);
+    const before = JSON.stringify(saved);
+    api.setDetailsDirty(true);
+    for (const invalid of ['NSFW', 'unrated', null]) {
+        description.value = JSON.stringify({ ...data, contentRating: invalid });
+        assert.equal(api.saveSelectedGarment(), undefined);
+        assert.match(control('.tw-garment-status').textContent, /contentRating.*sfw.*nsfw/);
+    }
+    description.value = json;
+    state.fail = true;
+    assert.equal(api.saveSelectedGarment(), undefined);
+    assert.equal(description.value, json);
+    assert.equal(control('[data-action="save-garment"]').dataset.dirty, 'true');
+    assert.equal(api.state().activeLibraryId, 'default-1');
+    assert.equal(JSON.stringify(saved), before);
+    assert.equal(state.writes, 0);
+
+    state.fail = false;
+    const moved = api.saveSelectedGarment();
+    assert.equal(state.writes, 1, '编辑、移动与切换入口在同一笔写入中保存');
+    assert.equal(api.state().activeLibraryId, 'default-2');
+    assert.equal(api.state().selectedGarmentId, moved.id);
+    assert.notEqual(moved.id, item.id);
+    assert.equal(api.state().garments.get(item.id).name, targetItem.name);
+    assert.equal(moved.name, data.name);
+    assert.equal(moved.category, 'outfits');
+    assert.equal(moved.contentRating, 'nsfw');
+    assert.equal(moved.image, item.image);
+    assert.equal(moved.favorite, true);
+    assert.equal(moved.lastUsedAt, 123);
+    assert.deepEqual(Array.from(moved.groupIds, id => api.state().garmentGroups.get(id)), ['居家', '新标签']);
+    assert.equal(moved.groupIds[0], 'target-home');
+    assert.equal(saved.wardrobe_items.length, 0);
+    assert.deepEqual(saved.wardrobe_selections.char, []);
+    assert.deepEqual(saved.wardrobe_selections.current.char, []);
+    assert.equal(saved.wardrobe_groups.length, 1, '新标签直接随服装归档到目标衣柜');
+    assert.equal(description.value, data.description);
+    assert.equal(control('[name="garment_content_rating"]').value, 'nsfw');
+    assert.match(control('.tw-garment-status').textContent, /已保存并移到“NSFW”/);
+    assert.equal(createHost(saved).api.state().activeLibraryId, 'default-2');
+
+    description.value = json;
+    assert.equal(api.saveSelectedGarment().id, moved.id, '分级与当前衣柜一致时原地保存');
+    assert.equal(saved.wardrobe_library_data['default-2'].wardrobe_items.length, 2);
+    description.value = '```json\n' + JSON.stringify({ ...data, contentRating: 'sfw' }) + '\n```';
+    assert.equal(api.saveSelectedGarment().id, moved.id);
+    assert.equal(state.writes, 3);
+    assert.equal(api.state().activeLibraryId, 'default-1');
+    assert.equal(control('[name="garment_content_rating"]').value, 'sfw');
+    assert.equal(saved.wardrobe_items[0].contentRating, 'sfw');
+    assert.deepEqual(saved.wardrobe_library_data['default-2'].wardrobe_items.map(record => record.id), [targetItem.id]);
+    assert.deepEqual(deleted, [], '归档复用原图文件');
+});
+
+test('描述 JSON 归档沿用搭配成员保护，保存时不会改动其他搭配', () => {
+    const member = { id: 'member', name: '成员', description: '成员正文', image: '' };
+    const look = { ...member, id: 'look', name: '搭配', componentIds: [member.id] };
+    const saved = { wardrobe_items: [member, look], wardrobe_groups: [], wardrobe_selections: { user: [], char: [] } };
+    const { api, state } = createHost(saved);
+    const control = api.showDetails();
+    const description = control('[name="garment_description"]');
+    description.value = JSON.stringify({ name: '成员改名', description: '更新正文', contentRating: 'nsfw' });
+    assert.equal(api.saveSelectedGarment(), undefined);
+    assert.match(control('.tw-garment-status').textContent, /仍被搭配“搭配”使用/);
+    assert.equal(state.writes, 0);
+    assert.equal(api.state().garments.get(member.id).name, member.name);
+    assert.match(description.value, /成员改名/);
 });

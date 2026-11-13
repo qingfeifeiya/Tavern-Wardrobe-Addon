@@ -61,6 +61,8 @@ const CATEGORY_FILTERS = [...CATEGORIES, ...QUICK_FILTERS];
 const CATEGORY_LABELS = new Map(CATEGORY_FILTERS.map(([id, label]) => [id, label]));
 const CATEGORY_FILTER_MAP = new Map(CATEGORY_FILTERS.map(filter => [filter[0], filter]));
 const GARMENT_CATEGORIES = new Set(CATEGORIES.slice(1).map(([id]) => id));
+// 手写分级指向内置衣柜的固定标识，避免同名自建衣柜影响归档。
+const RATED_WARDROBE_LIBRARIES = new Map([['sfw', 'default-1'], ['nsfw', 'default-2']]);
 // 排序时复用中文比较器，避免为每一次名称比较重复创建格式化对象。
 const GARMENT_NAME_COLLATOR = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
@@ -171,18 +173,18 @@ const DESCRIPTION_VARIABLES = /\{\{(name|category)\}\}/g;
 const LEGACY_DESCRIPTION_PROMPT_FINGERPRINTS = {
     outfit: new Set([
         0xe4c3c149f2a2e940n, 0x1e85d1f97cfc441cn, 0x6ca572c7f6c3585dn,
-        0x618e7a6cf6a5362cn, 0x970e815df84dc919n, 0xb3c1ae4887547d35n,
+        0x618e7a6cf6a5362cn, 0x970e815df84dc919n, 0xb3c1ae4887547d35n, 0xf705daf16b95da5fn,
     ]),
     item: new Set([
         0x98ebc8017bc03eedn, 0x11a6e1ae2e38a5b0n, 0x6794bec87634c16en,
-        0xe2d7242c3d43ad61n, 0xa39330cf24d7b7d2n, 0x970e815df84dc919n,
+        0xe2d7242c3d43ad61n, 0xa39330cf24d7b7d2n, 0x970e815df84dc919n, 0xfcc61fe1d0e5d7c1n,
     ]),
 };
 const DEFAULT_DESCRIPTION_PROMPTS = {
-    // 单张整套识图和一键识图共用此提示词，配饰只在体现服饰连接时随相关服饰描述。
+    // 单张整套识图和一键识图共用此原文，标签词表与分级规则由提示词统一维护。
     outfit: `你是一位同时精通常规服装版型与异形特殊服饰结构的穿搭还原师。你能对照参考图，逆向推导整套穿搭里每一件服饰的【原始标准静态结构】，写出客观、精准、可1:1复刻的结构化描述。描述要同时适合小说剧情自然调用和直接转图片生成提示词。
 
-本提示词专用于【整套穿搭】：画面中有两件及以上服饰（上装、下装、连体、外套、袜、鞋等）。你的任务是把整套穿搭合并写成一条描述，而不是拆成单品。
+本提示词专用于【整套穿搭】：画面中有两件及以上服饰（上装、下装、连体、外套、袜、鞋、配饰等）。你的任务是把整套穿搭合并写成一条描述，而不是拆成单品。
 
 ━━━━━━━━━━━━━━━━
 【第零步：套装硬性规则】
@@ -192,13 +194,19 @@ const DEFAULT_DESCRIPTION_PROMPTS = {
 3. 所有服饰写进同一个 description，件与件之间用"【品类】"标签分隔。
 4. 即使画面里只有一件主体服饰，也按套装格式输出，只写那一件。
 5. 逐件判断是"常规款"还是"特殊剪裁款"，并分别套用对应写法。禁止给常规件添加任何暴露、遮挡范围、性感相关的描述。
+6. tags 字段只能从后文【标签规则】的固定词表中选，不得自造。
+7. contentRating 字段只能是 "nsfw" 或 "sfw"，判定方法见后文【内容分级规则】。
 
 ━━━━━━━━━━━━━━━━
 【铁律A：去体型还原（每一件都适用）】
 ━━━━━━━━━━━━━━━━
 你描述的是"衣服本身"，不是"衣服穿在某个人身上的效果"。描述必须换人也成立。
 
-1. 位置只用通用解剖基准点或衣服自身结构点定位：锁骨、胸骨、胸线、肋缘、肚脐、自然腰线、髋线、耻骨、股沟、大腿中部、膝盖、脚踝、袖笼、侧缝。禁止写厘米数，禁止写"刚好""勉强""被撑开""刚遮住"。
+1. 位置只用通用解剖基准点或衣服自身结构点定位：锁骨、胸骨上端、胸骨下端、乳头高度、胸下缘、肋缘、肚脐、自然腰线、髋线、耻骨、股沟、大腿中部、膝盖、脚踝、袖笼、侧缝。
+   - "乳头高度"指乳头所在的水平线；"胸下缘"指胸部下缘与躯干交界处。
+   - 不单独使用"胸线"一词，必须改写为"乳头高度"或"胸下缘"。
+   - 这些基准点只用于定位，不用于描述形态、大小或质感。
+   - 禁止写厘米数，禁止写"刚好""勉强""被撑开""刚遮住"。
 2. 松紧只用版型词表达：超宽松 / 宽松 / 常规 / 修身 / 紧身贴合。判断依据是剪裁余量，不是衣服在这个人身上的紧绷程度。
 3. 弹力面料因身材产生的拉伸纹、绷紧感、撑开感，一律忽略，按"自然放松状态"描述。
 4. 衣长、领口深度、开衩高度，一律换算成基准点位置，不要按这个人的身高或胸围写。
@@ -230,16 +238,20 @@ const DEFAULT_DESCRIPTION_PROMPTS = {
 4. 画面中手持、垂落、来源不明的细绳或带子，不得默认视为某件服饰的结构，除非能看到它与该件相连。
 5. 背面颜色、面料、花纹默认与正面延续，不新增正面没有的绳子、五金和装饰。
 6. 套装中每件的背面只写一句：怎么固定，后背遮到哪里。
+7. 配饰类（符纸、眼罩、发饰、耳坠等）不适用背面推导，只写能确认的固定方式与位置。
 
 ━━━━━━━━━━━━━━━━
 【套装写法：顺序与结构】
 ━━━━━━━━━━━━━━━━
 1. 开头一句总述：共几件、整体风格类型（只写服装风格，不写人物气质）。
-2. 逐件描述，顺序固定为由上到下、由内到外：上装 → 外套 → 下装或连体 → 袜 → 鞋 。
-3. 每件以"【品类】"开头，如【上装】【外套】【下装】【袜】【鞋】。
+2. 逐件描述，顺序固定为由上到下、由内到外：上装 → 外套 → 下装或连体 → 配饰 → 袜 → 鞋。
+   - 配饰包括：领圈、符纸、眼罩、发饰、耳坠、腰封挂饰等不属于上装、下装、袜、鞋的附加件。
+   - 多个配饰合并写进一个【配饰】，按由上到下的位置依次写。
+   - 若某件配饰（如领圈、腰封）与服装主体连成一体，不作配饰，按对应品类写。
+3. 每件以"【品类】"开头，如【上装】【外套】【下装】【配饰】【袜】【鞋】。
 4. 件内写法：
    - 常规件，固定顺序：品类与廓形 → 领口与肩线 → 袖型 → 衣长与腰线位置 → 下摆/裤脚形状 → 门襟与固定方式 → 面料与颜色 → 明显的设计细节。不适用的项直接跳过，不得补编。
-   - 特殊剪裁件（有刻意挖空、剪裁缺口、敞开设计，或由极简布料、细绳、金属链构成），按下方【特殊剪裁件写法】。
+   - 特殊剪裁件（有刻意挖空、剪裁缺口、敞开设计，或由极简布料、细绳、金属链、纸符、窄条构成），按下方【特殊剪裁件写法】。
 5. 【层叠与连接关系】是套装独有的必写信息，写在相关件的描述里或最后统一一句，包括：
    - 谁压在谁外面（如：皮带压在衬衫外；外套敞开露出内层）
    - 下摆与腰头的关系（如：衬衫下摆扎入裙腰；上衣下摆盖住腰头）
@@ -252,15 +264,57 @@ const DEFAULT_DESCRIPTION_PROMPTS = {
 ━━━━━━━━━━━━━━━━
 最高要求：100%直白还原真实的布料遮挡范围、剪裁缺口与外露区域。不得保守化，不得用晦涩词汇绕圈，不得把挖空、细绳款脑补成完整胸罩或内裤，不得自行增加布料面积或改变露出度。
 
-1. 去制式化几何拆解：不使用"上衣""内衣""裤子"等传统品类名，把该件视为"几何图块"加"连接线"，逐块写明形状（三角形、水滴形、半月形、不规则多边形）、面积或宽度（微型、两指宽长条、极细线）、解剖基准点坐标（如"从胸骨正中垂直向下延伸至肚脐"）。
+1. 去制式化几何拆解：不使用"上衣""内衣""裤子"等传统品类名，把该件视为"几何图块"加"连接线"，逐块写明形状（三角形、水滴形、半月形、长方形、不规则多边形）、面积或宽度（微型、两指宽长条、极细线）、解剖基准点坐标（如"从胸骨正中垂直向下延伸至肚脐"）。
 2. 明确遮挡与留白：写"布料遮住了哪里，留白了哪里"，必须指出未遮盖区域。
-3. 物理连接：写明孤立图块之间如何连接（如"两块倒三角织物通过一枚金属O型环在胸骨处相连"），路径完整，不遗漏环、扣、线。
-4. 受力锚点：写明布料、绳体、金属件的受力方向与悬垂方向（如"金属饰品依重力悬垂""极细绳体沿股沟、臀缝方向向内压陷"）。只写服饰的物理关系，不写人物反应与主观评价。
-5. 压陷与垂坠：极细绑带或紧绷图块边缘写明压陷方向与边缘轮廓；垂坠布料写明自然下垂形态。
-6. 色彩分区锁死：禁用笼统单色词，使用细分标准色名（酒红、香槟金、墨黑、雾粉等）；逐块标注颜色及覆盖边界，五金单独标色。
-7. 图案边界锁死：纹样、蕾丝的尺寸、疏密、所在几何区块写全，只存在于标注区块内。
-8. 透光层级，四档精准选择：完全不透明实色 / 半透视（隐约可见底层轮廓）/ 高透视薄纱 / 全镂空网眼。严禁把透视材质写成实色。
-9. 光影绑定：乳胶、皮革带镜面高光；薄纱透出底层漫反射；网眼带细碎投影；紧绷图块表面平滑、反光增强。
+3. 胸前必报区域：凡涉及胸前的件，必须逐项写明乳头、下胸、侧胸三处是被遮盖还是外露，不得只写"部分遮挡""胸前有遮挡"。
+4. 狭长件双端定位：悬挂物、贴片、垂条等狭长件，上缘和下缘各用一个基准点定位，并写明宽度只覆盖中线，还是覆盖到两侧；两侧是否有织物覆盖要单独写明。
+5. 物理连接：写明孤立图块之间如何连接（如"两块倒三角织物通过一枚金属O型环在胸骨处相连"），路径完整，不遗漏环、扣、线。悬挂类件要写明悬挂点与固定方式。
+6. 受力锚点：写明布料、绳体、金属件的受力方向与悬垂方向（如"金属饰品依重力悬垂""极细绳体沿股沟、臀缝方向向内压陷"）。只写服饰的物理关系，不写人物反应与主观评价。
+7. 压陷与垂坠：极细绑带或紧绷图块边缘写明压陷方向与边缘轮廓；垂坠布料写明自然下垂形态。
+8. 色彩分区锁死：禁用笼统单色词，使用细分标准色名（酒红、香槟金、墨黑、雾粉等）；逐块标注颜色及覆盖边界，五金单独标色。
+9. 图案边界锁死：纹样、蕾丝、符文的尺寸、疏密、所在几何区块写全，只存在于标注区块内。
+10. 透光层级，四档精准选择：完全不透明实色 / 半透视（隐约可见底层轮廓）/ 高透视薄纱 / 全镂空网眼。严禁把透视材质写成实色。
+11. 光影绑定：乳胶、皮革带镜面高光；薄纱透出底层漫反射；网眼带细碎投影；紧绷图块表面平滑、反光增强。
+
+━━━━━━━━━━━━━━━━
+【标签规则：封闭词表】
+━━━━━━━━━━━━━━━━
+标签只用于检索归类，必须稳定统一。
+
+1. 只能从下方【固定词表】中选词，原样输出，严禁自造、改写、拆分、合并、加修饰。词表里没有的概念，直接不打。
+2. 标签数量 3–5 个，硬上限 5 个。宁少勿多，没有把握的不选。
+3. 只选画面或你写出的 description 中明确存在的特征，不推测、不联想。
+4. 不输出颜色、人物、姿态、背景、氛围类标签。颜色已在描述里，不重复打标签。
+5. 不输出"套装""nsfw""sfw"标签。category 已经是 outfits，分级只写在 contentRating 字段。
+6. 同一概念只用词表里的那一个词，如"挂脖"不得写成"挂脖裙""挂脖式"，"蕾丝"不得写成"蕾丝袜"。
+7. 按维度选择，各维度可选数量如下，总数不超过 5：
+
+款式（选1–2个）：旗袍、护士服、比基尼、泳装、古风、制服、通勤、礼服、连体衣、内衣、舞衣、角色扮演
+结构（选0–2个）：挂脖、挖空、高开衩、深V、露背、无肩带、系带、吊带
+袜类（选0–1个）：过膝袜、丝袜、网袜、吊袜带、连裤袜
+材质（选0–1个）：蕾丝、薄纱、乳胶、皮革、网眼
+配饰（选0–1个）：流苏、金属饰品、符纸、发饰
+鞋（选0–1个）：高跟鞋、长靴
+
+8. 袜子的标签规则：
+   - 有袜子就优先打"袜类"标签，只选一个最贴合的，按袜长和材质判断。
+   - 结构维度里的"吊带"只指上身的肩带吊带款，不指吊袜带，两者不得混用。
+9. 有包含关系的标签只打范围更具体的那个。有"挂脖"就不再打"露背"，除非画面明确是露背设计。
+
+━━━━━━━━━━━━━━━━
+【内容分级规则：contentRating】
+━━━━━━━━━━━━━━━━
+1. 每次必须输出 contentRating，只能是 "nsfw" 或 "sfw"，全小写，不得写其他值，不得留空。
+2. 按整套穿搭判断：只要有一件满足下方 nsfw 条件，整套就是 "nsfw"。
+3. 依据是服饰本身的设计结构，按铁律A、B还原后再判断。不因姿势、外袍临时滑落、叠穿遮挡而改变结果。
+4. 满足以下任意一条，判为 "nsfw"：
+   a. 乳头没有被不透明布料完整覆盖：外露；或仅被半透视、高透视薄纱、全镂空网眼覆盖；或仅被纸符、贴片、细绳、微型图块遮住一部分。
+   b. 耻骨、臀缝没有被不透明布料完整覆盖：外露；或仅被极细绳体、微型图块、高透视薄纱、全镂空网眼覆盖。
+   c. 下胸（乳头高度以下、胸下缘以上）直接外露，或侧胸被挖空、开口而大面积外露。
+5. 以上都不满足，判为 "sfw"。即乳头、耻骨、臀缝均被不透明布料完整覆盖，且没有下胸外露。常规款的深V、高开衩、露背、短裙、吊袜带，只要不触发第4条，仍为 "sfw"。
+6. 比基尼、泳装、内衣：不透明布料完整覆盖乳头、耻骨、臀缝的常规覆盖款为 "sfw"；细绳款、微型款按第4条判断。
+7. 拿不准时判为 "nsfw"。
+8. 分级结果只写在 contentRating 字段。description 与 tags 里不出现 nsfw、sfw 字样，也不因为分级给常规件添加任何暴露相关描述。
 
 ━━━━━━━━━━━━━━━━
 【字数规则】
@@ -269,6 +323,7 @@ const DEFAULT_DESCRIPTION_PROMPTS = {
 - 简单件（T恤、袜子、短裙）：60–100字
 - 结构复杂的常规件（大衣、连衣裙、西装）：120–200字
 - 特殊剪裁件：200–300字，必须覆盖几何形状、连接路径、遮挡与留白、透光等级
+- 配饰：合计60–150字，只写位置、形状、颜色、固定方式
 - 总述一句 + 层叠连接关系，合计约30–60字
 - 整段总长控制在400–900字，写完即止，严禁为凑字数添加画面中没有的细节。
 
@@ -277,6 +332,7 @@ const DEFAULT_DESCRIPTION_PROMPTS = {
 ━━━━━━━━━━━━━━━━
 - 纯客观物理描述，无抒情，无头尾总结，无评价与感受句（如"非常性感""显得很修身""搭配和谐"）。
 - 用最容易听懂的服装结构词，拒绝生僻工业术语。同一类结构每次使用同一个词，不换说法。
+- 位置词统一使用铁律A第1条的基准点，同一个位置每次使用同一个词。
 - 禁止描写人物长相、姿态、背景环境、手持道具，禁止主观氛围评价。
 - 看不到的部分不写"看不到"，按铁律C补全。
 - 套装模式下，输出永远是单个JSON对象。看到多件服饰不是拆分的理由，而是合并描述的理由。
@@ -284,13 +340,14 @@ const DEFAULT_DESCRIPTION_PROMPTS = {
 ━━━━━━━━━━━━━━━━
 【输出格式】
 ━━━━━━━━━━━━━━━━
-严格配合系统追加的最终输出格式，仅输出合法 JSON 对象，不含 markdown 代码块、\`\`\`json 标记或任何额外解释。若系统要求的格式是数组，则数组内也只放一个元素。
+严格配合系统追加的最终输出格式，仅输出合法 JSON 对象，不含 markdown 代码块、\`\`\`json 标记或任何额外解释。若系统要求的格式是数组，则数组内也只放一个元素。无论系统追加什么格式，tags 都只能来自【标签规则】的固定词表，contentRating 都只能是 "nsfw" 或 "sfw"。
 
 {
 "name": "套装名称（8字以内，概括整体，如：衬衫铅笔裙套装）",
 "description": "按上述规则写成的一段描述，件与件以【品类】标签分隔",
 "category": "outfits",
-"tags": ["套装", "再列2–4个各件关键词"]
+"tags": ["从固定词表中选3–5个"],
+"contentRating": "nsfw 或 sfw，按【内容分级规则】判定"
 }
 
 category 固定为 outfits，只写id，不写中文，不得使用其他值。
@@ -299,19 +356,19 @@ category 固定为 outfits，只写id，不写中文，不得使用其他值。
 【示例（仅供学习写法与密度，不要照抄内容）】
 ━━━━━━━━━━━━━━━━
 
-示例1（常规套装）：
+示例1（常规套装，有独立吊带，不触发任何 nsfw 条件）：
 {
-"name":"衬衫铅笔裙套装","description":"四件组合的通勤风套装，由上至下依次为：【上装】米白色长袖衬衫，常规偏松廓形，小翻领，肩线自然，袖笼宽松，袖长垂至手腕，前中单排扣，面料为半透视薄质，隐约可见内层轮廓，下摆扎入裙腰，后片廓形与前片一致。【下装】炭灰色高腰一步铅笔裙，修身，腰头位于自然腰线，宽度适中，一条黑色细皮带压在衬衫之外，裙长止于膝盖附近，后中开衩，后中隐形拉链固定。【袜】黑色过膝高筒袜，紧身贴合，袜口位于大腿中上部，宽幅蕾丝边呈波浪形，袜身带点纹蕾丝，袜口处有吊带夹扣，吊带自裙摆下方向上连接。【鞋】黑色尖头细跟浅口高跟鞋，鞋面低开口仅覆盖脚背前段，后跟为细圆柱形高跟。","category":"outfits","tags":["套装","衬衫","铅笔裙","吊带袜"]
+"name":"衬衫铅笔裙套装","description":"四件组合的通勤风套装，由上至下依次为：【上装】米白色长袖衬衫，常规偏松廓形，小翻领，肩线自然，袖笼宽松，袖长垂至手腕，前中单排扣，面料为半透视薄质，隐约可见内层轮廓，下摆扎入裙腰，后片廓形与前片一致。【下装】炭灰色高腰一步铅笔裙，修身，腰头位于自然腰线，宽度适中，一条黑色细皮带压在衬衫之外，裙长止于膝盖附近，后中开衩，后中隐形拉链固定。【袜】黑色过膝高筒袜，紧身贴合，袜口位于大腿中上部，宽幅蕾丝边呈波浪形，袜身带点纹蕾丝，袜口处有吊带夹扣，吊带自裙摆下方向上连接。【鞋】黑色尖头细跟浅口高跟鞋，鞋面低开口仅覆盖脚背前段，后跟为细圆柱形高跟。","category":"outfits","tags":["通勤","过膝袜","吊袜带","高跟鞋"],"contentRating":"sfw"
 }
 
-示例2（含特殊剪裁件的套装）：
+示例2（含特殊剪裁件，下胸外露，触发第4条c）：
 {
-"name":"挖空挂脖裙套装","description":"三件组合，由上至下依次为：【上装】挂脖式连体短裙，金色圆环连接颈带与三角胸片上缘。胸前为两片小三角织物，仅盖住胸部上半部，三角片正下方做半圆形挖空，下胸区域直接外露。胸下围横向抓褶收拢，细带环绕固定。下摆为一片式前裙摆，仅遮挡小腹与腿间，两侧无侧缝，超高开衩直达腰际，胯骨与大腿外侧外露。后背由颈后搭扣固定，上背开口不深于正面，腰线以下后片完整。面料为高弹氨纶，细密闪粉，微高光泽，完全不透明，酒红色，金属圆环与搭扣为金色。【袜】黑色过膝袜，紧身贴合，袜口位于大腿中上部，罗纹袜口，哑光。【鞋】黑色细跟短靴，靴口止于脚踝，侧边拉链固定。","category":"outfits","tags":["套装","挂脖裙","镂空","过膝袜"]
+"name":"挖空挂脖裙套装","description":"三件组合，由上至下依次为：【上装】挂脖式连体短裙，金色圆环连接颈带与三角胸片上缘。胸前为两片小三角织物，上缘位于锁骨下方，覆盖乳头及乳头高度以上的胸部上半部；乳头高度以下的下胸与两侧侧胸直接外露，三角片正下方做半圆形挖空。胸下缘横向抓褶收拢，细带环绕固定。下摆为一片式前裙摆，仅遮挡肚脐以下至股沟，两侧无侧缝，超高开衩直达自然腰线，髋线与大腿外侧外露。后背由颈后搭扣固定，上背开口不深于正面，自然腰线以下后片完整。面料为高弹氨纶，细密闪粉，微高光泽，完全不透明，酒红色，金属圆环与搭扣为金色。【袜】黑色过膝袜，紧身贴合，袜口位于大腿中上部，罗纹袜口，哑光。【鞋】黑色细跟短靴，靴口止于脚踝，侧边拉链固定。","category":"outfits","tags":["连体衣","挂脖","挖空","高开衩","过膝袜"],"contentRating":"nsfw"
 }`,
-    // 默认单品直接从参考图选取主体，使用独立的九类分类规则。
+    // 单品识图只取参考图中的主体，分类、标签和分级都按这件服饰判断。
     item: `你是一位同时精通常规服装版型与异形特殊服饰结构的穿搭还原师。你能对照参考图，逆向推导服装的【原始标准静态结构】，写出客观、精准、可1:1复刻的结构化描述。描述要同时适合小说剧情自然调用和直接转图片生成提示词。
 
-本提示词专用于【单品】：只描述画面中最主体的一件服饰。若画面里同时出现其他服饰，忽略它们，不描述，不合并。
+本提示词专用于【单品】：只描述画面中最主体的一件服饰。若画面里同时出现其他服饰，忽略它们，不描述，不合并，也不为它们打标签。
 
 ━━━━━━━━━━━━━━━━
 【第零步：先分流，再描述】
@@ -319,25 +376,34 @@ category 固定为 outfits，只写id，不写中文，不得使用其他值。
 先判断该单品属于哪一类，再选择对应写法：
 
 - 常规款：没有刻意挖空、开裆、极简布料、绑带结构的普通服装。按【常规款写法】描述。禁止给常规款添加任何暴露、遮挡范围、性感相关的描述。
-- 特殊剪裁款：在胸部、下胸、胯部、裆部等处有刻意挖空、剪裁缺口、敞开设计，或由极简布料、细绳、金属链构成的服饰。按【特殊剪裁款写法】描述，并启用其中的几何拆解与部位联动规则。
+- 特殊剪裁款：在胸部、下胸、胯部、裆部等处有刻意挖空、剪裁缺口、敞开设计，或由极简布料、细绳、金属链、纸符、窄条构成的服饰。按【特殊剪裁款写法】描述。
+
+另外两个字段同时确定：
+- tags 只能从后文【标签规则】的固定词表中选，不得自造。
+- contentRating 只能是 "nsfw" 或 "sfw"，判定方法见后文【内容分级规则】。
 
 ━━━━━━━━━━━━━━━━
 【铁律A：去体型还原（所有款式）】
 ━━━━━━━━━━━━━━━━
 你描述的是"衣服本身"，不是"衣服穿在某个人身上的效果"。描述必须换人也成立。
 
-1. 位置只用通用解剖基准点或衣服自身结构点定位：锁骨、胸骨、乳头、胸线、肋缘、肚脐、自然腰线、髋线、耻骨、股沟、大腿中部、膝盖、脚踝、袖笼、侧缝。禁止写厘米数，禁止写"刚好""勉强""被撑开""刚遮住"。
+1. 位置只用通用解剖基准点或衣服自身结构点定位：锁骨、胸骨上端、胸骨下端、乳头高度、胸下缘、肋缘、肚脐、自然腰线、髋线、耻骨、股沟、大腿中部、膝盖、脚踝、袖笼、侧缝。
+   - "乳头高度"指乳头所在的水平线；"胸下缘"指胸部下缘与躯干交界处。
+   - 不单独使用"胸线"一词，必须改写为"乳头高度"或"胸下缘"。
+   - 这些基准点只用于定位，不用于描述形态、大小或质感。
+   - 禁止写厘米数，禁止写"刚好""勉强""被撑开""刚遮住"。
 2. 松紧只用版型词表达：超宽松 / 宽松 / 常规 / 修身 / 紧身贴合。判断依据是剪裁余量（袖笼、侧缝、下摆的宽度），不是衣服在这个人身上的紧绷程度。
 3. 弹力面料因身材产生的拉伸纹、绷紧感、撑开感，一律忽略，按"自然放松状态"描述。
 4. 衣长、领口深度、开衩高度，一律换算成基准点位置，不要按这个人的身高或胸围写。
-5. 禁止出现任何与人相关的词：胸型、身材大小、腰臀比例、肉感、勒痕、挤压、皮肤、流汗、表情神态。
-6. 特殊款的"受力与压陷"只描述布料、绳体、金属件的受力方向与压陷方向，属于结构设计，不描述个人身体的具体反应。
+5. 禁止出现任何与人相关的词：胸型、乳房、身材大小、腰臀比例、肉感、勒痕、挤压、皮肤、流汗、表情神态。
+6. 特殊款的受力与压陷，只描述布料、绳体、金属件的受力方向与压陷方向，属于结构设计，不描述个人身体的具体反应。
 
 ━━━━━━━━━━━━━━━━
 【铁律B：去形变还原（所有款式）】
 ━━━━━━━━━━━━━━━━
 1. 过滤动作折痕：人物弯腰、坐姿、挤压造成的临时折痕、偏移，不得写成衣服的设计。
 2. 还原对称版型：衣服原本对称，仅因姿势扭转显得不对称时，按对称结构描述。
+3. 过滤叠穿造成的临时遮挡：该单品被其他服饰盖住的部分，按它自身的完整结构推导，不要写成"被遮住所以没有"。
 
 ━━━━━━━━━━━━━━━━
 【铁律C：背面与固定结构，证据优先】
@@ -357,6 +423,7 @@ category 固定为 outfits，只写id，不写中文，不得使用其他值。
 4. 画面中手持、垂落、来源不明的细绳或带子，不得默认视为该单品的结构，除非能看到它与单品相连。
 5. 背面颜色、面料、花纹默认与正面延续，不新增正面没有的绳子、五金和装饰。
 6. 背面只写1–2句：怎么固定，后背遮到哪里。
+7. 单品本身是头饰、颈饰、耳环、眼罩等配饰时，不适用背面推导，只写能确认的固定方式与位置。
 
 ━━━━━━━━━━━━━━━━
 【常规款写法】
@@ -368,27 +435,27 @@ category 固定为 outfits，只写id，不写中文，不得使用其他值。
 ━━━━━━━━━━━━━━━━
 【特殊剪裁款写法：几何图块与物理连线】
 ━━━━━━━━━━━━━━━━
-最高要求：100%直白还原真实的布料遮挡范围、剪裁缺口与裸露部位。不得保守化，不得用晦涩词汇绕圈，不得把挖空、细绳款脑补成完整胸罩或内裤，不得自行增加布料面积或改变露出度。
+最高要求：100%直白还原真实的布料遮挡范围、剪裁缺口与外露区域。不得保守化，不得用晦涩词汇绕圈，不得把挖空、细绳款脑补成完整胸罩或内裤，不得自行增加布料面积或改变露出度。
 
-1. 去制式化几何拆解：不使用"上衣""内衣""裤子"等传统品类名。把服饰视为"几何图块"加"连接线"，逐块写明形状（等腰三角形、水滴形、半月形、不规则多边形）、面积或宽度（微型、两指宽长条、极细线）、以及解剖学绝对坐标（如"从胸骨正中垂直向下延伸至肚脐""精准覆盖乳头并向两侧收束"）。
-2. 绝对露出度：写"布料遮住了哪里，留白了哪里"。必须明确指出未遮盖区域（如"乳房上、下、两侧全部外露""耻骨至大腿根部无遮挡""侧腰大面积留白"）。
-3. 物理连接：写明孤立图块之间如何连接（如"两块倒三角织物通过一枚金属O型环在胸骨处相连"），连接路径完整，不遗漏环、扣、线。
-4. 部位联动与受力锚点：对乳头、乳晕、股沟等敏感部位，明确写出受力锚点与遮挡逻辑。
-   示范：微型织物仅覆盖乳头与乳晕，周边乳房完全外露；金属饰品以两侧乳尖为支点，依重力悬垂；极细绳体沿股沟、臀缝向内压陷。
-   只写服饰与部位的物理关系，不写人物反应与主观评价。
-5. 压陷与垂坠：极细绑带或紧绷图块边缘写明压陷方向与边缘轮廓（压陷、边缘凹陷）；垂坠布料写明自然下垂形态。
-6. 色彩分区锁死：禁用笼统单色词，使用细分标准色名（酒红、香槟金、墨黑、雾粉等）；逐块标注布料和线条的颜色及覆盖边界，五金单独标色；严禁跨区域混色。
-7. 图案边界锁死：纹样、蕾丝的尺寸、疏密、所在几何区块要写全，纹样只存在于标注区块内，不得扩散。
-8. 透光层级：从"完全不透明实色""半透视（隐约可见底层轮廓）""高透视薄纱""全镂空网眼"四档中精准选择，并写明透视面料下被覆盖部位轮廓的显露程度。严禁把透视材质写成实色。
-9. 光影绑定：乳胶、皮革带镜面高光；薄纱透出底层漫反射；网眼带细碎投影；紧绷图块表面平滑无褶皱、反光增强，仅边缘受力点有轻微拉扯纹理。
-10. 写作顺序融合为一段：图块与胸部 → 胸下围与腰部（有才写）→ 下摆与胯部 → 连接线路径 → 后背与固定（必写，守铁律C）→ 面料、透光与光影 → 色彩分区与五金配饰。
+1. 去制式化几何拆解：不使用"上衣""内衣""裤子"等传统品类名。把服饰视为"几何图块"加"连接线"，逐块写明形状（三角形、水滴形、半月形、长方形、不规则多边形）、面积或宽度（微型、两指宽长条、极细线）、解剖基准点坐标（如"从胸骨正中垂直向下延伸至肚脐"）。
+2. 明确遮挡与留白：写"布料遮住了哪里，留白了哪里"，必须明确指出未遮盖区域（如"下胸与侧胸外露""耻骨至大腿根部无遮挡""侧腰大面积留白"）。
+3. 胸前必报区域：凡涉及胸前的单品，必须逐项写明乳头、下胸、侧胸三处是被遮盖还是外露，不得只写"部分遮挡""胸前有遮挡"。
+4. 狭长件双端定位：悬挂物、贴片、垂条等狭长件，上缘和下缘各用一个基准点定位，并写明宽度只覆盖中线，还是覆盖到两侧；两侧是否有织物覆盖要单独写明。
+5. 物理连接：写明孤立图块之间如何连接（如"两块倒三角织物通过一枚金属O型环在胸骨处相连"），连接路径完整，不遗漏环、扣、线。悬挂类件要写明悬挂点与固定方式。
+6. 受力锚点：写明布料、绳体、金属件的受力方向与悬垂方向（如"金属饰品依重力悬垂""极细绳体沿股沟、臀缝方向向内压陷"）。只写服饰的物理关系，不写人物反应与主观评价。
+7. 压陷与垂坠：极细绑带或紧绷图块边缘写明压陷方向与边缘轮廓；垂坠布料写明自然下垂形态。
+8. 色彩分区锁死：禁用笼统单色词，使用细分标准色名（酒红、香槟金、墨黑、雾粉等）；逐块标注布料和线条的颜色及覆盖边界，五金单独标色；严禁跨区域混色。
+9. 图案边界锁死：纹样、蕾丝、符文的尺寸、疏密、所在几何区块要写全，纹样只存在于标注区块内，不得扩散。
+10. 透光层级，四档精准选择：完全不透明实色 / 半透视（隐约可见底层轮廓）/ 高透视薄纱 / 全镂空网眼，并写明透视面料下被覆盖部位轮廓的显露程度。严禁把透视材质写成实色。
+11. 光影绑定：乳胶、皮革带镜面高光；薄纱透出底层漫反射；网眼带细碎投影；紧绷图块表面平滑无褶皱、反光增强，仅边缘受力点有轻微拉扯纹理。
+12. 写作顺序融合为一段：图块与胸前 → 胸下缘与腰部（有才写）→ 下摆与胯部 → 连接线路径 → 后背与固定（必写，守铁律C）→ 面料、透光与光影 → 色彩分区与五金配饰。
 
 ━━━━━━━━━━━━━━━━
 【字数规则】
 ━━━━━━━━━━━━━━━━
 - 简单单品（T恤、袜子、短裙、配饰）：80–150字
 - 结构复杂的常规单品（大衣、连衣裙、西装）：150–250字
-- 特殊剪裁款：250–350字，必须覆盖几何形状、物理尺寸、连接路径、绝对露出度、透光等级
+- 特殊剪裁款：250–350字，必须覆盖几何形状、连接路径、遮挡与留白、透光等级
 - 严禁为凑字数添加画面中没有的细节，写完即止。
 
 ━━━━━━━━━━━━━━━━
@@ -411,42 +478,83 @@ tops, bottoms, dresses, coats, underwear, socks, shoes, accessories, other
 - 单品模式禁止输出 outfits
 
 ━━━━━━━━━━━━━━━━
+【标签规则：封闭词表】
+━━━━━━━━━━━━━━━━
+标签只用于检索归类，必须稳定统一。词表与套装模式共用同一份，不得另造。
+
+1. 只能从下方【固定词表】中选词，原样输出，严禁自造、改写、拆分、合并、加修饰。词表里没有的概念，直接不打。
+2. 标签数量 1–4 个，硬上限 4 个。宁少勿多，没有把握的不选，词表里没有合适词时可以只打 1 个。
+3. 只选该单品本身画面或你写出的 description 中明确存在的特征，不推测、不联想。
+4. 不输出颜色、版型（宽松、修身等）、人物、姿态、背景、氛围类标签。颜色和版型已在描述里，不重复打标签。
+5. 不输出"套装""单品""nsfw""sfw"标签。category 已经是单品分类，分级只写在 contentRating 字段。
+6. 同一概念只用词表里的那一个词，如"挂脖"不得写成"挂脖裙""挂脖式"，"蕾丝"不得写成"蕾丝袜"。
+7. 按维度选择，各维度可选数量如下，总数不超过 4：
+
+品类（选0–1个）：T恤、衬衫、半身裙、连衣裙、裤装、外套
+款式（选0–2个）：旗袍、护士服、比基尼、泳装、古风、制服、通勤、礼服、连体衣、内衣、舞衣、角色扮演
+结构（选0–2个）：挂脖、挖空、高开衩、深V、露背、无肩带、系带、吊带
+袜类（选0–1个）：过膝袜、丝袜、网袜、吊袜带、连裤袜
+材质（选0–1个）：蕾丝、薄纱、乳胶、皮革、网眼
+配饰（选0–1个）：流苏、金属饰品、符纸、发饰
+鞋（选0–1个）：高跟鞋、长靴
+
+8. 单品是袜子时，只从"袜类"里选一个最贴合的，按袜长和结构判断。结构维度里的"吊带"只指上身的肩带吊带款，不指吊袜带，两者不得混用。
+9. 有包含关系的标签只打范围更具体的那个。有"挂脖"就不再打"露背"，除非画面明确是露背设计。
+
+━━━━━━━━━━━━━━━━
+【内容分级规则：contentRating】
+━━━━━━━━━━━━━━━━
+1. 每次必须输出 contentRating，只能是 "nsfw" 或 "sfw"，全小写，不得写其他值，不得留空。
+2. 依据是该单品本身的设计结构，按铁律A、B还原后再判断。不因姿势、被其他服饰盖住或临时滑落而改变结果。
+3. 只判断该单品设计上要遮盖的部位。上装类看乳头与下胸，下装类看耻骨与臀缝，连体类两处都看；袜、鞋、头饰、颈饰等不涉及这些部位的单品，不触发任何 nsfw 条件。
+4. 满足以下任意一条，判为 "nsfw"：
+   a. 乳头没有被不透明布料完整覆盖：外露；或仅被半透视、高透视薄纱、全镂空网眼覆盖；或仅被纸符、贴片、细绳、微型图块遮住一部分。
+   b. 耻骨、臀缝没有被不透明布料完整覆盖：外露（含开裆设计）；或仅被极细绳体、微型图块、高透视薄纱、全镂空网眼覆盖。
+   c. 下胸（乳头高度以下、胸下缘以上）直接外露，或侧胸被挖空、开口而大面积外露。
+5. 以上都不满足，判为 "sfw"。常规款的深V、高开衩、露背、短裙，只要不触发第4条，仍为 "sfw"。
+6. 比基尼、泳装、内衣：不透明布料完整覆盖乳头、耻骨、臀缝的常规覆盖款为 "sfw"；细绳款、微型款按第4条判断。
+7. 拿不准时判为 "nsfw"。
+8. 分级结果只写在 contentRating 字段。description 与 tags 里不出现 nsfw、sfw 字样，也不因为分级给常规款添加任何暴露相关描述。
+
+━━━━━━━━━━━━━━━━
 【语言与禁忌】
 ━━━━━━━━━━━━━━━━
 - 纯客观物理描述，无抒情，无头尾总结，无评价与感受句（如"非常性感""显得很修身"）。
 - 风格：客观、直白、精准、画面感强。用最容易听懂的服装结构词，拒绝生僻工业术语。同一类结构每次使用同一个词，不换说法。
+- 位置词统一使用铁律A第1条的基准点，同一个位置每次使用同一个词。
 - 禁止描写人物长相、姿态、背景环境、手持道具，禁止主观色情氛围评价。
 - 看不到的部分不写"看不到"，按铁律C补全。
 
 ━━━━━━━━━━━━━━━━
 【输出格式】
 ━━━━━━━━━━━━━━━━
-严格配合系统追加的最终输出格式，仅输出合法 JSON 对象，不含 markdown 代码块、\`\`\`json 标记或任何额外解释：
+严格配合系统追加的最终输出格式，仅输出合法 JSON 对象，不含 markdown 代码块、\`\`\`json 标记或任何额外解释。无论系统追加什么格式，tags 都只能来自【标签规则】的固定词表，contentRating 都只能是 "nsfw" 或 "sfw"。
 
 {
 "name": "穿搭名称（6字以内，直观准确）",
 "description": "按上述规则写成的一段描述",
 "category": "从上述9个id中选1个",
-"tags": ["标签1", "标签2"]
+"tags": ["从固定词表中选1–4个"],
+"contentRating": "nsfw 或 sfw，按【内容分级规则】判定"
 }
 
 ━━━━━━━━━━━━━━━━
 【示例（仅供学习写法与密度，不要照抄内容）】
 ━━━━━━━━━━━━━━━━
 
-示例1（常规款）：
+示例1（常规款，上装）：
 {
-"name":"白色宽松圆领T恤","description":"H型直筒廓形的短袖圆领T恤，版型宽松。圆领口为罗纹包边，落肩，袖口自然松开，袖长止于上臂中部。衣长止于髋线附近，下摆平直微弧，套头穿着，无门襟。面料为中等厚度纯棉平纹针织，表面哑光，纯白色。正面无印花无口袋，后片廓形与前片一致，领后为同款罗纹包边。","category":"tops","tags":["T恤","宽松","基础款"]
+"name":"白色宽松圆领T恤","description":"H型直筒廓形的短袖圆领T恤，版型宽松。圆领口为罗纹包边，落肩，袖口自然松开，袖长止于上臂中部。衣长止于髋线附近，下摆平直微弧，套头穿着，无门襟。面料为中等厚度纯棉平纹针织，表面哑光，纯白色。正面无印花无口袋，后片廓形与前片一致，领后为同款罗纹包边。","category":"tops","tags":["T恤"],"contentRating":"sfw"
 }
 
 示例2（常规款，下装）：
 {
-"name":"黑色高腰阔腿裤","description":"阔腿廓形的长裤，版型宽松。腰头位于自然腰线以上，宽腰头，前中为隐形拉链加一粒扣固定，腰头两侧有松紧收拢。前片左右各有一道正烫线，裤腿从髋线向下直线展开，裤长垂至脚踝。侧边有斜插袋，后片有两个装饰性假袋盖。面料为垂坠感较强的哑光西装布，颜色为纯黑。","category":"bottoms","tags":["阔腿裤","高腰","通勤"]
+"name":"黑色高腰阔腿裤","description":"阔腿廓形的长裤，版型宽松。腰头位于自然腰线以上，宽腰头，前中为隐形拉链加一粒扣固定，腰头两侧有松紧收拢。前片左右各有一道正烫线，裤腿从髋线向下直线展开，裤长垂至脚踝。侧边有斜插袋，后片有两个装饰性假袋盖。面料为垂坠感较强的哑光西装布，颜色为纯黑。","category":"bottoms","tags":["裤装","通勤"],"contentRating":"sfw"
 }
 
-示例3（特殊剪裁款）：
+示例3（特殊剪裁款，下胸外露，触发第4条c）：
 {
-"name":"挖空露乳挂脖裙","description":"挂脖式短裙，金色圆环连接颈带与三角胸片上缘。胸前为两片小三角胸罩轮廓，仅盖住乳房上半部，三角片正下方对应乳头与乳晕的位置做了半圆形挖空，乳头、乳晕及下胸区域直接裸露。胸下围横向抓褶收拢，并由细带环绕固定。下身为一片式前裙摆，仅遮挡小腹与腿间，两侧无侧缝，超高开衩直达腰际，胯骨与大腿外侧完全暴露。后背由颈后搭扣固定，上背开口不深于正面，腰线以下后片完整，宽度与正面一致。面料为高弹氨纶，表面带细密闪粉，微高光泽。主色为酒红色，金属圆环与搭扣为金色，配金色圆形耳环。","category":"dresses","tags":["挂脖裙","镂空","金色圆环"]
+"name":"挖空挂脖裙","description":"挂脖式短裙，金色圆环连接颈带与三角胸片上缘。胸前为两片小三角织物，上缘位于锁骨下方，覆盖乳头及乳头高度以上的胸部上半部；乳头高度以下的下胸与两侧侧胸直接外露，三角片正下方做半圆形挖空。胸下缘横向抓褶收拢，细带环绕固定。下摆为一片式前裙摆，仅遮挡肚脐以下至股沟，两侧无侧缝，超高开衩直达自然腰线，髋线与大腿外侧外露。后背由颈后搭扣固定，上背开口不深于正面，自然腰线以下后片完整，宽度与正面一致。面料为高弹氨纶，表面带细密闪粉，微高光泽，完全不透明。主色为酒红色，金属圆环与搭扣为金色，配金色圆形耳环。","category":"dresses","tags":["连衣裙","挂脖","挖空","高开衩"],"contentRating":"nsfw"
 }`,
 };
 // 精确识别两代原始默认值，升级时保留用户实际编辑过的内容。
@@ -5932,6 +6040,18 @@ function activateWardrobeLibrary(id, libraries = wardrobeLibraries, removedId) {
         delete libraryData[removedId];
         replaceVariables({ ...variables, ...update, wardrobe_library_data: libraryData }, { type: 'script' });
     } else insertOrAssignVariables(update, { type: 'script' });
+    showWardrobeLibrary(id, data, libraries);
+}
+
+/**
+ * 展示已存档的衣柜，手动切换与保存后归档共用筛选、详情和移动端状态的刷新流程。
+ * @param {string} id 已保存的当前衣柜标识。
+ * @param {Object} data 由入口校验或移动流程组装的服装与标签。
+ * @param {Map<string, string>} [libraries] 已保存的衣柜目录。
+ * @param {string} [selectedId] 归档后要打开的服装标识；省略时按原有优先级选择。
+ * @returns {void} 更新当前衣柜和详情。
+ */
+function showWardrobeLibrary(id, data, libraries = wardrobeLibraries, selectedId) {
     stopDescriptionRequest();
     stopOutfitRequest();
     closeImageImport();
@@ -5949,34 +6069,38 @@ function activateWardrobeLibrary(id, libraries = wardrobeLibraries, removedId) {
     garmentSearch = '';
     panel.querySelector('.tw-search input').value = '';
     loadGarments(data);
+    if (selectedId !== undefined) selectedGarmentId = selectedId;
+    namedWearerLocation = getEditorNamedWearerLocation();
     renderWardrobeLibraries();
     updateCategory('all');
     renderGarmentDetails();
-    setMobileDetails(false);
+    setMobileDetails(selectedId !== undefined);
     setLibraryStatus('');
     setGarmentStatus('');
 }
 
 /**
- * 将勾选服装与搭配成员移动到另一衣柜，图片复用原文件，同名标签复用目标分组。
- * @param {string} targetId 菜单选定的目标衣柜标识。
+ * 将服装与搭配成员移动到另一衣柜，可同时提交详情编辑并打开目标服装。
+ * @param {string} targetId 由菜单或手写分级选定的目标衣柜标识。
  * @param {Set<string>} [ids] 已校验的服装及搭配成员。
- * @returns {void} 两个分区一次保存成功后才更新当前界面，失败保留存档、多选与详情。
+ * @param {{items: Map<string, WardrobeItem>, groups: Map<string, string>, selectedId: string}} [edit] 待提交的服装表、标签和需打开的服装标识；服装表会移除已归档的记录。
+ * @returns {WardrobeItem|undefined} 随编辑移走并重新选中的服装；手动移动不返回记录。
  */
-function moveGarmentsToLibrary(targetId, ids = getGarmentMoveIds(targetId)) {
+function moveGarmentsToLibrary(targetId, ids = getGarmentMoveIds(targetId), edit) {
     if (!ids.size) return;
     const targetSaved = getLibraryVariables(targetId);
     const target = parseWardrobeData({ items: targetSaved.wardrobe_items ?? [], groups: targetSaved.wardrobe_groups ?? [] });
-    const remaining = new Map(garments);
+    const remaining = edit?.items ?? new Map(garments);
+    const sourceGroups = edit?.groups ?? garmentGroups;
     const itemIds = new Map();
     const groupIds = new Map();
     // 目标可含相同 ID 或同名标签；先建索引再映射，成本随移动记录和标签数线性增长。
     const groupNames = new Map(Array.from(target.groups, ([id, name]) => [name, id]));
     for (const id of ids) {
         itemIds.set(id, target.items.has(id) ? window.parent.crypto.randomUUID() : id);
-        for (const groupId of garments.get(id).groupIds) {
+        for (const groupId of remaining.get(id).groupIds) {
             if (groupIds.has(groupId)) continue;
-            const name = garmentGroups.get(groupId);
+            const name = sourceGroups.get(groupId);
             const mapped = groupNames.get(name) ?? (target.groups.has(groupId) ? window.parent.crypto.randomUUID() : groupId);
             groupIds.set(groupId, mapped);
             groupNames.set(name, mapped);
@@ -5987,7 +6111,7 @@ function moveGarmentsToLibrary(targetId, ids = getGarmentMoveIds(targetId)) {
         }
     }
     for (const id of ids) {
-        const item = garments.get(id);
+        const item = remaining.get(id);
         const mapped = itemIds.get(id);
         target.items.set(mapped, { ...item, id: mapped, groupIds: item.groupIds.map(groupId => groupIds.get(groupId)),
             ...(item.componentIds ? { componentIds: item.componentIds.map(memberId => itemIds.get(memberId)) } : {}) });
@@ -6004,7 +6128,15 @@ function moveGarmentsToLibrary(targetId, ids = getGarmentMoveIds(targetId)) {
         if (id === 'default-1') Object.assign(update, patch);
         else update.wardrobe_library_data[id] = { ...saved.wardrobe_library_data?.[id], ...patch };
     }
+    if (edit) update.wardrobe_active_library = targetId;
     insertOrAssignVariables(update, { type: 'script' });
+    if (edit) {
+        // 使用映射后的 ID 打开刚保存的服装，即使目标衣柜原先已有同 ID 的记录。
+        const moved = target.items.get(itemIds.get(edit.selectedId));
+        showWardrobeLibrary(targetId, target, wardrobeLibraries, moved.id);
+        setGarmentStatus(`已保存并移到“${wardrobeLibraries.get(targetId)}”`);
+        return moved;
+    }
     stopDescriptionRequest();
     const movedSelected = ids.has(selectedGarmentId);
     garments = remaining;
@@ -6020,12 +6152,12 @@ function moveGarmentsToLibrary(targetId, ids = getGarmentMoveIds(targetId)) {
 /**
  * 在移动入口验证目标与进行中的操作，展开搭配成员，并阻止原衣柜留下悬空搭配。
  * @param {string} targetId 待验证的目标衣柜标识。
- * @returns {Set<string>} 勾选服装及其成员的去重集合；无法整体移动时抛出具体原因。
+ * @param {Set<string>} [ids] 待移动的服装标识，会原地加入搭配成员；默认使用多选中的服装。
+ * @returns {Set<string>} 待移动服装及其成员的去重集合；无法整体移动时抛出具体原因。
  */
-function getGarmentMoveIds(targetId) {
+function getGarmentMoveIds(targetId, ids = new Set(getCheckedGarments().map(item => item.id))) {
     if (!wardrobeLibraries.has(targetId) || targetId === activeLibraryId) throw new Error('请选择其他衣柜作为移动目标。');
     if (importingGarments || replacingImage) throw new Error('请等待当前导入或图片替换完成后再移动服装。');
-    const ids = new Set(getCheckedGarments().map(item => item.id));
     for (const id of ids) for (const memberId of garments.get(id).componentIds ?? []) ids.add(memberId);
     for (const item of garments.values()) {
         if (!ids.has(item.id) && item.componentIds?.some(id => ids.has(id))) {
@@ -7254,7 +7386,8 @@ async function handleGarmentAction(event) {
         const action = event.currentTarget.dataset.action;
         if (action === 'export-all') openWardrobeExport();
         else if (action === 'export-one') {
-            if (saveSelectedGarment()) await exportGarments([selectedGarmentId]);
+            const saved = saveSelectedGarment();
+            if (saved) await exportGarments([saved.id]);
         } else if (action === 'delete-one') await deleteGarments(new Set([selectedGarmentId]));
         else if (action === 'remove-image') {
             const item = garments.get(selectedGarmentId);
@@ -7265,11 +7398,12 @@ async function handleGarmentAction(event) {
             if (!await askConfirm('删除图片', '删除这件服装的正面和背面图片？名称和描述会保留。', { confirmText: '删除图片', danger: true })) return;
             const saved = saveSelectedGarment();
             if (!saved) return;
+            // 保存描述可能已移动服装并重新分配 ID，删图必须使用保存后的记录。
             const next = new Map(garments);
-            next.set(item.id, { ...saved, image: '', backImage: '' });
-            validateAppliedGarmentChanges(new Set([item.id]), next);
-            commitGarments(next, item.id);
-            void deleteGarmentImages(IMAGE_FIELDS.map(field => item[field]));
+            next.set(saved.id, { ...saved, image: '', backImage: '' });
+            validateAppliedGarmentChanges(new Set([saved.id]), next);
+            commitGarments(next, saved.id);
+            void deleteGarmentImages(IMAGE_FIELDS.map(field => saved[field]));
             setLibraryStatus('图片已删除，名称和描述已保留');
         }
     } catch (error) {
@@ -9314,8 +9448,9 @@ async function requestGarmentDescription(item, promptMode, config, request, gene
     const prompt = descriptionPrompts[promptMode];
     const imageSides = IMAGE_FIELDS.filter(field => item[field]).map(field => IMAGE_SIDE_LABELS[field]).join('、');
     // 最终格式优先服从 AI 开关，并按内置提示词的识图范围给出分类选项。
-    const isDefaultOutfit = promptMode === 'outfit' && prompt === DEFAULT_DESCRIPTION_PROMPTS.outfit;
-    const isDefaultItem = promptMode === 'item' && prompt === DEFAULT_DESCRIPTION_PROMPTS.item;
+    const isDefaultPrompt = prompt === DEFAULT_DESCRIPTION_PROMPTS[promptMode];
+    const isDefaultOutfit = isDefaultPrompt && promptMode === 'outfit';
+    const isDefaultItem = isDefaultPrompt && promptMode === 'item';
     const categoryChoices = CATEGORIES.slice(1).filter(([id]) => !isDefaultItem || id !== 'outfits');
     const categoryRule = isDefaultItem
         ? '按画面中最主体的一件服饰的结构判断，无法归类时使用 other。'
@@ -9323,15 +9458,21 @@ async function requestGarmentDescription(item, promptMode, config, request, gene
     const categoryFormat = isDefaultOutfit
         ? 'category 为一个服装分类标识，固定为 outfits，即使图中只有一件服饰。'
         : `category 为一个服装分类标识，只能从 ${JSON.stringify(categoryChoices.map(([id, label]) => ({ id, name: label })))} 中选择 id。${categoryRule}`;
-    const tagFormat = isDefaultOutfit
-        ? '首项固定为“套装”，再列 2–4 个各件关键词。'
-        : '可同时包含场景、季节、风格，例如 ["居家","夏季"]，没有适用标签时返回 []。';
+    // 默认提示词已列出固定词表，只有自定义提示词需要附加衣柜现有标签。
+    let tagFormat = 'AI 标签已关闭，不判断或生成标签，不返回 tags 字段，也不使用旧版 category 字段返回标签。';
+    if (options.tags) {
+        tagFormat = isDefaultPrompt
+            ? `tags 为标签名称数组，从【标签规则】的固定词表中原样选择 ${isDefaultOutfit ? '3–5 个符合画面的标签' : '1–4 个符合主体单品的标签'}。`
+            : `tags 为标签名称数组，可同时包含场景、季节、风格，例如 ["居家","夏季"]，没有适用标签时返回 []。现有标签：${JSON.stringify(Array.from(garmentGroups.values()))}。根据图片判断服装适合归入哪些标签，优先选择合适的已有标签并原样返回名称；仅在没有合适的已有标签时提议简短的新标签名称。不要为已有标签另造近义名称，避免重复或相互矛盾的标签。`;
+        tagFormat += '所有新标签由用户确认后才能创建。';
+    }
+    const ratingFormat = isDefaultPrompt ? 'contentRating 为必填字段，按【内容分级规则】返回 "nsfw" 或 "sfw"。' : '';
     const reply = await loggedGenerateRaw({
         generation_id: generationId,
         // 宿主支持图片数组；单图保留原格式，双图按正面、背面顺序识别。
         image: images.length === 1 ? images[0] : images,
         // 仅替换一次变量，服装名中的模板标记保留为普通文本，不带入聊天历史或角色提示。
-        user_input: `${prompt.replace(DESCRIPTION_VARIABLES, (_match, name) => values[name])}\n\n参考图顺序：${imageSides}，均对应同一条衣柜记录。\n\n最终输出格式（此处要求优先）：仅返回一个 JSON 对象，不要使用代码块。name、description 为非空字符串。${options.category ? categoryFormat : 'AI 分类已关闭，不判断服装分类，不返回 category 字段。'}${options.tags ? `tags 为标签名称数组，${tagFormat}现有标签：${JSON.stringify(Array.from(garmentGroups.values()))}。${isDefaultOutfit ? '除固定的“套装”外，' : ''}根据图片判断服装适合归入哪些标签，优先选择合适的已有标签并原样返回名称；仅在没有合适的已有标签时提议简短的新标签名称。所有新标签由用户确认后才能创建，不要为已有标签另造近义名称，避免重复或相互矛盾的标签。` : 'AI 标签已关闭，不判断或生成标签，不返回 tags 字段，也不使用旧版 category 字段返回标签。'}`,
+        user_input: `${prompt.replace(DESCRIPTION_VARIABLES, (_match, name) => values[name])}\n\n参考图顺序：${imageSides}，均对应同一条衣柜记录。\n\n最终输出格式（此处要求优先）：仅返回一个 JSON 对象，不要使用代码块。name、description 为非空字符串。${options.category ? categoryFormat : 'AI 分类已关闭，不判断服装分类，不返回 category 字段。'}${tagFormat}${ratingFormat}`,
         ordered_prompts: ['user_input'],
         max_chat_history: 0,
         should_stream: false,
@@ -9342,10 +9483,10 @@ async function requestGarmentDescription(item, promptMode, config, request, gene
 }
 
 /**
- * 在描述入口解析名称、描述及已开启的分类、标签，模型回复兼容旧版 category 标签字段及纯文本。
+ * 在描述入口解析名称、描述及已开启的分类、标签和分级，模型回复兼容旧版 category 标签字段及纯文本。
  * @param {unknown} reply 模型返回或手动粘贴的原始文本。
- * @param {{category: boolean, tags: boolean, legacyCategoryTags?: boolean}} options 分类与标签选项；手动粘贴关闭旧版 category 标签兼容，避免将“未指定”建成标签。
- * @returns {{name?: string, description: string, category?: string, tags?: string[]}} 分类统一为内置标识，标签统一为去重数组；纯文本仅提供描述。
+ * @param {{category: boolean, tags: boolean, legacyCategoryTags?: boolean, contentRating?: boolean}} options 解析选项；手动粘贴启用分级并关闭旧版分类标签兼容。
+ * @returns {{name?: string, description: string, category?: string, tags?: string[], contentRating?: 'sfw'|'nsfw'}} 已校验的服装字段；纯文本仅提供描述。
  */
 function parseGarmentDescriptionReply(reply, options = { category: true, tags: true }) {
     if (typeof reply !== 'string' || !reply.trim()) throw new Error('接口未返回服装描述。');
@@ -9378,9 +9519,14 @@ function parseGarmentDescriptionReply(reply, options = { category: true, tags: t
     if (options.tags && data.tags !== undefined && (!Array.isArray(data.tags) || data.tags.some(label => typeof label !== 'string' || !label.trim()))) {
         throw new Error('描述中的 tags 需要是标签名称数组，请检查后重试。');
     }
+    // 仅手动粘贴可按分级移动，识图回复中的额外字段不能改变衣柜归属。
+    const contentRating = options.contentRating ? data.contentRating : undefined;
+    if (contentRating !== undefined && !RATED_WARDROBE_LIBRARIES.has(contentRating)) {
+        throw new Error('描述中的 contentRating 需要填写 "sfw" 或 "nsfw"。');
+    }
     const tags = options.tags && (legacyTags !== undefined || data.tags !== undefined) ? Array.from(new Set((legacyTags ?? []).concat(data.tags ?? []).map(label => label.trim()))) : undefined;
     // 在入口丢弃关闭项，即使模型仍返回这些字段，也不会进入保存及新标签确认流程。
-    return { name: data.name.trim(), description: data.description.trim(), category: options.category ? category : undefined, tags };
+    return { name: data.name.trim(), description: data.description.trim(), category: options.category ? category : undefined, tags, contentRating };
 }
 
 /**
@@ -9485,7 +9631,7 @@ function stopDescriptionRequest() {
 }
 
 /**
- * 保存名称、分类、分级、描述和专属角色；粘贴 JSON 时拆分字段并追加标签。
+ * 保存服装详情；手写 JSON 指定分级时将编辑和归档作为一次操作。
  * 正在应用的服装仍检查修改后是否满足发送要求，校验和存储成功后才更新编辑框。
  * @returns {WardrobeItem|undefined} 保存后的服装，失败时为空。
  */
@@ -9500,7 +9646,7 @@ function saveSelectedGarment() {
         const text = description.value.trim();
         // 手动粘贴不依赖 AI 开关；完整校验后才建标签，格式错误或保存失败时保留原 JSON 草稿。
         const parsed = text.startsWith('{') || text.startsWith('[') || text.startsWith('```')
-            ? parseGarmentDescriptionReply(text, { category: true, tags: true, legacyCategoryTags: false }) : undefined;
+            ? parseGarmentDescriptionReply(text, { category: true, tags: true, legacyCategoryTags: false, contentRating: true }) : undefined;
         // JSON 可提供名称；普通文本仍使用信息页的必填名称校验。
         if (!parsed?.name && !name.value) {
             panel.querySelector('[data-detail="info"]').click();
@@ -9525,11 +9671,18 @@ function saveSelectedGarment() {
         // 保留即时保存的手动标签；空 tags 不清空原归属，未知分类沿用信息页的选择。
         const updated = { ...item, name: parsed?.name ?? name.value,
             category: parsed?.category ?? panel.querySelector('[name="garment_category"]').value,
-            groupIds: Array.from(groupIds), contentRating: panel.querySelector('[name="garment_content_rating"]').value,
+            groupIds: Array.from(groupIds),
+            contentRating: parsed?.contentRating ?? panel.querySelector('[name="garment_content_rating"]').value,
             ...readGarmentDescriptionDraft(item, parsed?.description ?? text), ...namedWearerUpdate };
         const next = new Map(garments);
         next.set(item.id, updated);
-        validateAppliedGarmentChanges(new Set([item.id]), next);
+        const editedIds = new Set([item.id]);
+        validateAppliedGarmentChanges(editedIds, next);
+        const targetId = RATED_WARDROBE_LIBRARIES.get(parsed?.contentRating);
+        if (targetId && targetId !== activeLibraryId) {
+            const moveIds = getGarmentMoveIds(targetId, editedIds);
+            return moveGarmentsToLibrary(targetId, moveIds, { items: next, groups, selectedId: item.id });
+        }
         commitGarments(next, item.id, groups);
         // 写入成功后才去除 JSON 包装，供保存、应用及单件导出共用同一正文。
         description.value = getGarmentDescription(updated);
