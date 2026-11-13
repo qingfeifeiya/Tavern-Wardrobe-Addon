@@ -10000,14 +10000,14 @@ async function selectOutfitsForTurn(turn, selections, current, names, settings, 
     if (!response.ok) throw new Error(`选装接口返回 HTTP ${response.status}。`);
     const result = await response.json();
     if (signal.aborted) return;
-    // 仅记录服务商返回的用量字段，便于区分缓存未命中的输入和包含思考的输出。
+    // 将服务商返回的用量映射为中文日志字段，方便区分缓存输入与输出中的推理用量。
     const usage = result?.usage;
     if (usage) recordWardrobeLog('api', '独立选装 Token 用量', {
-        prompt_tokens: usage.prompt_tokens,
-        prompt_cache_hit_tokens: usage.prompt_cache_hit_tokens ?? usage.prompt_tokens_details?.cached_tokens,
-        prompt_cache_miss_tokens: usage.prompt_cache_miss_tokens,
-        completion_tokens: usage.completion_tokens,
-        reasoning_tokens: usage.completion_tokens_details?.reasoning_tokens,
+        输入总量: usage.prompt_tokens,
+        输入缓存命中: usage.prompt_cache_hit_tokens ?? usage.prompt_tokens_details?.cached_tokens,
+        输入缓存未命中: usage.prompt_cache_miss_tokens,
+        输出总量: usage.completion_tokens,
+        输出中的推理用量: usage.completion_tokens_details?.reasoning_tokens,
     });
     const reply = readOutfitReply(result);
     let data;

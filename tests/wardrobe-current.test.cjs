@@ -717,9 +717,9 @@ async function checkIsolatedOutfits() {
     assert.equal(received[0].stop, undefined);
     const usageLog = api.wardrobeLogs.findLast(entry => entry.message === '独立选装 Token 用量');
     assert.deepEqual(JSON.parse(usageLog.details), [{
-        prompt_tokens: 1000, prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 1000,
-        completion_tokens: 160, reasoning_tokens: 140,
-    }], '用量日志保留真实的零命中与思考 Token 数');
+        输入总量: 1000, 输入缓存命中: 0, 输入缓存未命中: 1000,
+        输出总量: 160, 输出中的推理用量: 140,
+    }], '用量日志使用中文字段并保留真实的零命中与推理用量');
     assert.equal(request.stream, true);
     assert.equal(request.json_schema.name, 'main_only');
     assert.match(request.messages[0].content, /主模型设定[\s\S]*红衣独有描述/);
