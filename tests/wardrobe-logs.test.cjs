@@ -56,7 +56,14 @@ function createHarness() {
     const downloads = [];
     const requests = [];
     const replies = { value: 'OK' };
-    const wardrobeImage = { currentSrc: '/user/images/tavern_wardrobe/broken.png' };
+    const wardrobeImage = Object.assign(new LogNode(), { currentSrc: '/user/images/tavern_wardrobe/broken.png' });
+    const testRoot = {
+        /** 模拟 DOM 参数检查；接收事件目标，只有衣柜图片属于根节点。 */
+        contains(node) {
+            if (node !== null && !(node instanceof LogNode)) throw new TypeError('contains 的参数必须是 Node');
+            return node === wardrobeImage;
+        },
+    };
     parent.document = {
         createElement: () => new LogNode(),
         createDocumentFragment: () => Object.assign(new LogNode(), { fragment: true }),
@@ -66,7 +73,7 @@ function createHarness() {
     parent.navigator.clipboard = { writeText: async text => { parent.copied = text; } };
     parent.fetch = async (...args) => { requests.push(args); return replies.value; };
     const sandbox = {
-        window, console: window.console, testDialog: dialog, testRoot: { contains: node => node === wardrobeImage },
+        window, console: window.console, testDialog: dialog, testRoot,
         generateRaw: async config => { requests.push(config); if (replies.error) throw replies.error; return replies.value; },
         getModelList: async config => { requests.push(config); return ['vision']; },
         testDownload: (data, filename) => downloads.push({ data: JSON.parse(JSON.stringify(data)), filename }),
@@ -82,7 +89,7 @@ globalThis.api = { installWardrobeLogging, stopWardrobeLogging, recordWardrobeLo
 return;
 `;
     vm.runInNewContext(source.replace('// 等待宿主文档就绪', hooks + '\n// 等待宿主文档就绪'), sandbox);
-    return { api: sandbox.api, window, parent, elements, dialog, downloads, requests, replies, tasks, wardrobeImage };
+    return { api: sandbox.api, window, parent, elements, dialog, downloads, requests, replies, tasks, wardrobeImage, testRoot };
 }
 
 test('日志采集、API 成败、脱敏、筛选复制导出、容量与卸载清理', async () => {
@@ -102,17 +109,20 @@ test('日志采集、API 成败、脱敏、筛选复制导出、容量与卸载�
     h.parent.console.error('其他脚本错误');
     for (const listener of h.parent.listeners.get('unhandledrejection') ?? []) listener({ reason: new Error('无关 Promise') });
     for (const listener of h.parent.listeners.get('error')) {
-        listener({ target: { currentSrc: '/user/images/unrelated.png' } });
-        listener({ target: h.parent, message: '酒馆全局异常', filename: 'other-extension.js', error: new Error('无关异常') });
+        const unrelatedImage = Object.assign(new LogNode(), { currentSrc: h.wardrobeImage.currentSrc });
+        // 父窗口自己的脚本异常以 Window 为目标，DOM 的 contains 收到它时会抛错。
+        listener({ target: h.parent, composedPath: () => [h.parent], message: '酒馆全局异常', filename: 'other-extension.js', error: new Error('无关异常') });
         // 即使地址相同，其他界面的图片也不属于衣柜，不按路径猜测归属。
-        listener({ target: { currentSrc: h.wardrobeImage.currentSrc } });
+        listener({ target: unrelatedImage, composedPath: () => [unrelatedImage, h.parent.document, h.parent] });
     }
     assert.equal(h.api.logs.length, beforeUnrelated, '酒馆控制台、全局异常、Promise 和外部资源均不进入衣柜日志');
     assert.equal(h.parent.console.warn, originalWarn, '不接管父窗口控制台');
     const crash = new Error('现场异常 saved-secret');
     for (const listener of h.window.listeners.get('error')) listener({ message: '运行失败', error: crash, filename: 'wardrobe.js', lineno: 23, colno: 4 });
     for (const listener of h.window.listeners.get('unhandledrejection')) listener({ reason: crash });
-    for (const listener of h.parent.listeners.get('error')) listener({ target: h.wardrobeImage });
+    for (const listener of h.parent.listeners.get('error')) {
+        listener({ target: h.wardrobeImage, composedPath: () => [h.wardrobeImage, h.testRoot, h.parent.document, h.parent] });
+    }
     assert.equal(h.window.calls[0].args[0], '识图准备', '原控制台仍收到调用');
     assert.ok(h.api.logs.some(entry => entry.level === 'debug' && entry.details.includes('识图准备')));
     assert.ok(h.api.logs.some(entry => entry.level === 'warn'));

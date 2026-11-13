@@ -91,8 +91,13 @@ const DEFAULT_OUTFIT_HISTORY_COUNT = 2;
 const OUTFIT_MARKER = /<!--\s*outfit:(user|char)\s*=\s*([\s\S]*?)\s*-->/g;
 // 识别脚本发布的 JSON 快照，仍允许旧名称标记以花括号开头。
 const PUBLISHED_OUTFIT_SNAPSHOT = /^\{\s*"ids"\s*:/;
-// 衣柜快照只记录有 ID 的衣物。把剧情连续性放在固定规则中，旧模板或自定义提示词也不能把空快照当成换装指令。
-const OUTFIT_CONTINUITY_RULE = '固定穿搭规则（优先于服装模板、选装提示词与分级提示词）：开场白、剧情设定或前文已明确穿着的衣物、鞋袜和配饰继续沿用，包括衣柜外的衣物。没有衣柜记录只表示没有可引用的 ID，不能因此从候选中选装、补齐或用相似款替代。只有剧情确实需要交代初始衣着且尚无既定穿着时，才首次选装；已有穿着时，仅在用户明确要求或剧情已明确发生换装时选用候选。用户在当前对话中用「要以前穿过的那双袜子和高高的鞋」等口语点选衣物，也算要求局部换装，即使没有说「换上」或给出准确名称。按前文、描述与候选确认所指衣物，只选择能匹配的部位；单纯回忆、询问或称赞不触发换装。普通回复、普通转场或时间变化本身不触发换装；回家或仅为换衣做准备也不触发。局部换衣也保留未换下的衣物，包括衣柜外的部分。分级和场景分档只在允许选装时用于选择候选。';
+// 把换装是否发生和新衣细节是否明确分开判断，直接选装与独立选装使用同一规则。
+const OUTFIT_CONTINUITY_RULE = `固定穿搭规则（优先于服装模板、选装提示词与分级提示词）：
+开场白、剧情设定或前文已明确穿着的衣物、鞋袜和配饰继续沿用，包括衣柜外的衣物。没有衣柜记录只表示没有可引用的 ID，不能因此从候选中选装、补齐或用相似款替代。只有剧情确实需要交代初始衣着且尚无既定穿着时，才首次选装。
+已有穿着时，用户要求本轮换衣，或剧情明确写出角色换上了新衣，就执行换装。前文已经反映在当前穿着里的换装不重复执行。「换上一身完好的衣服」已明确发生整身换装。没有指定款式或名称时，按角色、场景和标签从该角色已分配的候选中选合适的一身；本轮明确已损坏或已换下的衣物不继续穿着。用户用「要以前穿过的那双袜子和高高的鞋」等口语点选衣物，也算要求局部换装。按前文和候选资料确认所指部位，保留其余未换下的衣物，包括衣柜外的部分。
+看衣柜、讨论接下来穿什么、挑选备用衣服或计划之后换衣时，继续沿用当前穿着。普通回复、转场或时间变化本身不触发换装；回家或仅为换衣做准备也不触发。单纯回忆、询问或称赞不触发换装。分级和场景分档只在允许选装时用于选择候选。`;
+// 两种记录格式都用空数组表示确实已无衣柜穿着，避免把尚未决定穿什么写成脱掉了旧衣。
+const OUTFIT_CLEAR_RULE = '只有剧情明确原先记录的衣柜服装已全部换下，且当前没有穿上任何衣柜候选时，才写空数组。仅讨论、尚未决定或无法确认穿着变化时，保留当前记录。';
 // 占位与自检约束候选选用和记录修正，避免为满足部位规则而改写剧情中已经穿着的衣物。
 const DEFAULT_OUTFIT_PROMPT = `“当前实际穿着”只列出衣柜已记录的部分，剧情中已明确穿着的衣柜外衣物仍然有效。服装模板、候选清单与参考图仅供选装，未选用的资料不得混入当前穿着描写。
 
@@ -119,8 +124,9 @@ const DEFAULT_OUTFIT_PROMPT = `“当前实际穿着”只列出衣柜已记录�
 3. 是否有独立单品与套装同部位？如有，删除该独立单品 ID。通过后再输出。`;
 // 复用提示词指纹识别原样保存的旧默认值，避免升级覆盖用户自行编辑的内容。
 const LEGACY_OUTFIT_PROMPT_FINGERPRINT = 0x06d5f917cc08aa03n;
-// 旧版可能把默认分级提示词原样写入存档，只升级精确匹配的文本，保留用户改过的内容。
+// 旧版及设置备份可能保存默认分级提示词全文，只升级已知默认值，保留用户修改。
 const PREVIOUS_CONTENT_RATING_PROMPT = '内容分级用于说明服装性质：SFW 表示日常／非色情服装，NSFW 表示色情／成人服装，未标注表示尚未判断。NSFW 标记不代表当前剧情允许色情内容或要求进入色情情节，也不直接禁止外穿；是否选用由角色设定、世界观与剧情场景决定。';
+const LEGACY_CONTENT_RATING_PROMPT_FINGERPRINT = 0x186df63abc667dban;
 // 原文作为可编辑的分级提示词，是否允许换衣由先发送的固定穿搭规则决定。
 const DEFAULT_CONTENT_RATING_PROMPT = `服装内容分级（说明服装性质，并按场景倾向选装）：
 SFW 表示日常／非色情服装，NSFW 表示色情／成人服装，未标注表示尚未判断。
@@ -151,7 +157,7 @@ C 档：私密或亲密场景
 未标注不等于 SFW 或 NSFW。先按描述自行判断：开档、大面积透视、胸部或私处外露、情趣用途按 NSFW 处理；其余按 SFW 处理。判断只用于选装，不补造标签，不在输出中写出判断结果。
 
 四、保持整身
-已有当前穿着时保持整身，只在明确换衣、回家准备、时间跳转等合理机会换装。场景从 A 档转入 B、C 档时，可以借换装机会调整；普通转场不换。
+是否换装由固定穿搭规则判断。需要换装时，按换装时所在场景挑选适合的候选。
 
 五、选装前自检
 1. 当前场景属于 A、B、C 哪一档？
@@ -990,8 +996,11 @@ const PANEL_HTML = `
                             <button type="button" data-action="save-preset">保存预设</button>
                             <button type="button" data-action="apply-preset" disabled>应用预设</button>
                             <button type="button" data-action="delete-preset" disabled>删除预设</button>
+                            <button type="button" data-action="import-preset">${icon('plus')}导入预设</button>
+                            <button type="button" data-action="export-preset" disabled>${icon('download')}导出预设</button>
                         </div>
                         <p class="tw-template-status tw-preset-status" role="status" aria-live="polite"></p>
+                        <input class="tw-preset-import" type="file" accept="application/json,.json" hidden>
                     </div>
                 </section>
                 <section id="tw-settings-data" data-settings-content="data" aria-labelledby="tw-settings-data-title" hidden>
@@ -4807,10 +4816,14 @@ function installWardrobeLogging() {
     }
     /** 接收脚本窗口内未处理的 Promise 拒绝并保留原始原因；无返回值。 */
     function logUnhandledRejection(event) { recordWardrobeLog('error', '衣柜脚本：未处理的 Promise 异常', event.reason); }
-    /** 只接收衣柜根节点内的资源错误；忽略酒馆和其他脚本的全局异常，无返回值。 */
+    /**
+     * 只记录事件路径经过衣柜根节点的资源错误。
+     * @param {Event} event 父窗口捕获的错误事件，目标可能是窗口或资源节点。
+     * @returns {void} 无返回值。
+     */
     function logWardrobeResourceError(event) {
-        // 衣柜图片挂载在父文档，不能停掉父窗口监听；按实际节点归属过滤，避免无关资源刷屏。
-        if (root?.contains(event.target)) logWindowError(event);
+        // 父窗口的脚本错误以 Window 为目标，不能传给 Node.contains；事件路径可直接判断资源归属。
+        if (root && event.composedPath().includes(root)) logWindowError(event);
     }
     window.addEventListener('error', logWindowError, true);
     window.addEventListener('unhandledrejection', logUnhandledRejection);
@@ -4887,12 +4900,13 @@ function loggedGetModelList(config) {
 
 /**
  * 记录衣柜 HTTP 请求的地址、方法、状态及耗时，省略包含聊天、图片或密钥的请求参数。
- * @param {string} url 图片或接口地址。
+ * @param {string|URL} url 图片或接口地址，使用脚本窗口时传入已解析的绝对地址。
  * @param {RequestInit} [options] 原始请求参数。
+ * @param {Window} [requestWindow=window.parent] 发出请求的窗口，普通资源沿用酒馆窗口。
  * @returns {Promise<Response>} 未消费的原始响应。
  */
-function wardrobeFetch(url, options) {
-    return traceWardrobeRequest('fetch', { url, method: options?.method ?? 'GET' }, () => window.parent.fetch(url, options));
+function wardrobeFetch(url, options, requestWindow = window.parent) {
+    return traceWardrobeRequest('fetch', { url: String(url), method: options?.method ?? 'GET' }, () => requestWindow.fetch(url, options));
 }
 
 /**
@@ -5509,6 +5523,7 @@ function initializeWardrobe() {
     for (const button of settingsPanel.querySelectorAll('#tw-settings-presets [data-action]')) {
         button.addEventListener('click', handleWardrobePreset);
     }
+    settingsPanel.querySelector('.tw-preset-import').addEventListener('change', importWardrobePreset);
     settingsPanel.querySelector('[data-action="export-data"]').addEventListener('click', handleWardrobeData);
     settingsPanel.querySelector('[data-action="import-data"]').addEventListener('click', handleWardrobeData);
     settingsPanel.querySelector('.tw-data-import').addEventListener('change', handleWardrobeData);
@@ -7205,13 +7220,13 @@ async function exportGarments(ids, includeEmptyGroups = false, options = {}) {
     for (const item of items) for (const field of IMAGE_FIELDS) item[field] = await loadImageDataUrl(item[field] || '');
     if (!root.isConnected) throw new Error('衣柜已卸载，导出已取消。');
     const backup = { format: 'tw-wardrobe', version: 1, groups, items };
-    const name = (libraryName ?? (items.length === 1 ? items[0].name : '衣柜')).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+    const name = libraryName ?? (items.length === 1 ? items[0].name : '衣柜');
     downloadWardrobeJson(backup, `${name}-${items.length}件.json`);
     setLibraryStatus(`已导出 ${items.length} 件服装`);
 }
 
 /**
- * 下载服装或设置备份共用的 JSON 文件，复用最近下载地址的释放流程。
+ * 下载衣柜 JSON，统一处理跨平台文件名与下载地址的释放。
  * @param {Object} data 调用方已明确选取字段的备份数据。
  * @param {string} filename 下载时显示的文件名。
  * @returns {void} 触发浏览器下载，不读取脚本变量或 API 配置。
@@ -7223,7 +7238,7 @@ function downloadWardrobeJson(data, filename) {
     exportUrl = window.parent.URL.createObjectURL(blob);
     const link = hostDocument.createElement('a');
     link.href = exportUrl;
-    link.download = filename;
+    link.download = filename.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
     link.hidden = true;
     hostDocument.body.append(link);
     try { link.click(); } finally { link.remove(); }
@@ -8376,10 +8391,12 @@ function parseOutfitSnapshot(value, allowed) {
  * @param {unknown} ids 外部返回的完整穿搭数组。
  * @param {Set<string>} allowed 当前角色已分配的服装。
  * @param {Map<string, WardrobeItem>} items 与候选清单对应的服装表。
+ * @param {boolean} [combine=true] 穿着快照合并搭配成员，备选可同时列出搭配和单品。
  * @returns {Set<string>|null} 合法的整身穿搭，无效时为空值。
  */
-function validateOutfitIds(ids, allowed, items = garments) {
-    return Array.isArray(ids) && ids.every(id => allowed.has(id)) ? compactOutfitIds(ids, items) : null;
+function validateOutfitIds(ids, allowed, items = garments, combine = true) {
+    if (!Array.isArray(ids) || !ids.every(id => allowed.has(id))) return null;
+    return combine ? compactOutfitIds(ids, items) : new Set(ids);
 }
 
 /**
@@ -8415,17 +8432,17 @@ function resolveCurrentOutfits(selections, { excludeLast = false, beforeIndex } 
         if (!waiting.size) break;
         const message = chat[index];
         if (!message || message.is_system) continue;
-        if (message.is_user) {
-            // 与酒馆助手的楼层变量 API 使用同一个当前回复页，直接取衣柜键以免克隆其他插件变量。
-            const snapshot = outfitKey && message.variables?.[message.swipe_id ?? 0]?.[outfitKey];
-            if (!snapshot) continue;
+        // 独立接口的结果存在用户楼层，正文确认换上的衣服存在对应 AI 回复页。只读取当前页上的衣柜键。
+        const snapshot = outfitKey && message.variables?.[message.swipe_id ?? 0]?.[outfitKey];
+        if (snapshot) {
             for (const wearer of waiting) {
                 const outfit = validateOutfitIds(snapshot[wearer], selections[wearer]);
                 if (!outfit) continue;
                 resolved[wearer] = outfit;
                 waiting.delete(wearer);
             }
-        } else if (typeof message.mes === 'string' && message.mes.includes('outfit:')) {
+        }
+        if (!message.is_user && waiting.size && typeof message.mes === 'string' && message.mes.includes('outfit:')) {
             // 同一楼层每个角色取最后一个有效标记；独立模式的附描述标记只供其他插件读取。
             const found = new Map();
             for (const [, wearer, value] of message.mes.matchAll(OUTFIT_MARKER)) {
@@ -8528,7 +8545,7 @@ function buildMarkerNote(selections, names) {
     const switchable = WEARERS.filter(wearer => selections[wearer].size > 0);
     if (!switchable.length) return '';
     const who = switchable.map(wearer => `${wearer} 指 ${names[wearer]}`).join('，');
-    return `（换装记录：首次选用衣柜服装、实际换装使衣柜内的穿着发生变化或仅修正重复项时，在回复最末尾为每个受影响角色单独另起一行写 HTML 注释。格式：${switchable.map(wearer => `<!-- outfit:${wearer}=["候选ID1","候选ID2"] -->`).join('；')}；${who}。数组列出当前仍穿着的全部候选 ID，包含局部换装时未换下的候选；衣柜外的衣物只保留在剧情中。原有衣柜服装已全部换下时写空数组。输出前按选装提示词核对 ID，保存的搭配以自身 ID 代表全部成员，另列实际补充的独立单品。沿用剧情既有穿着且衣柜记录没有变化时省略注释。）`;
+    return `（换装记录：首次选用衣柜服装、实际换装使衣柜内的穿着发生变化或仅修正重复项时，在回复最末尾为每个受影响角色单独另起一行写 HTML 注释。格式：${switchable.map(wearer => `<!-- outfit:${wearer}=["候选ID1","候选ID2"] -->`).join('；')}；${who}。数组列出当前仍穿着的全部候选 ID，包含局部换装时未换下的候选；衣柜外的衣物只保留在剧情中。${OUTFIT_CLEAR_RULE}输出前按选装提示词核对 ID，保存的搭配以自身 ID 代表全部成员，另列实际补充的独立单品。沿用剧情既有穿着且衣柜记录没有变化时省略注释。）`;
 }
 
 /**
@@ -9671,9 +9688,10 @@ function buildNamedWardrobeContent(settings, excludeLast = false, contextFloor) 
  * @param {{user: string, char: string}} names 当前聊天的用户与角色名称。
  * @param {{single: string, wardrobe: string}} imageTemplates 已保存的单条与衣柜图片模板。
  * @param {Set<string>} currentIds 已解析的当前整身记录，不改变候选范围和资料完整性。
+ * @param {string[]} [currentSections] 独立选装的当前穿着段落，传入时把每轮状态写到此处，供候选资料复用缓存。
  * @returns {Object[]} 该角色的模板文本与真实图片内容块，未选择时为空数组。
  */
-function buildWearerContent(items, wearer, settings, templates, names, imageTemplates = wardrobeTemplates.image, currentIds = new Set()) {
+function buildWearerContent(items, wearer, settings, templates, names, imageTemplates = wardrobeTemplates.image, currentIds = new Set(), currentSections) {
     if (!items.length) return [];
     const sendContentRating = settings.send_content_rating !== false;
     const field = items.length === 1 ? 'single' : 'wardrobe';
@@ -9727,9 +9745,12 @@ function buildWearerContent(items, wearer, settings, templates, names, imageTemp
         outfits: outfits.join('\n\n'), count: String(items.length),
     };
     // 归属说明独立于可编辑模板，文字和图片模式均明确边界；共享只由两边清单同时列出表达。
-    const texts = [`【${wearer === 'user' ? 'USER' : 'Char'}（${names[wearer]}）的服装】以下服装文字及紧随其后的图片仅供该角色使用。另一角色只能使用其自身服装清单中明确列出的服装，不得将本清单中未分配给对方的服装转给对方，也不得根据性别自动共享。`];
+    const heading = `【${wearer === 'user' ? 'USER' : 'Char'}（${names[wearer]}）的服装】`;
+    const texts = [`${heading}以下服装文字及紧随其后的图片仅供该角色使用。另一角色只能使用其自身服装清单中明确列出的服装，不得将本清单中未分配给对方的服装转给对方，也不得根据性别自动共享。`];
     // 剧情已写明的衣物可能没有候选 ID，空集合只说明衣柜没有记录。
-    texts.push(current.length ? `当前实际穿着（衣柜已记录的部分）：\n${current.join('\n')}` : '当前实际穿着：没有衣柜穿着记录，请沿用剧情中已明确的衣着。');
+    const currentText = current.length ? `当前实际穿着（衣柜已记录的部分）：\n${current.join('\n')}` : '当前实际穿着：没有衣柜穿着记录，请沿用剧情中已明确的衣着。';
+    if (currentSections) currentSections.push(`${heading}${currentText}`);
+    else texts.push(currentText);
     texts.push(`可选衣柜（每个编号是一条候选，不代表完整一身；保存的搭配保留全部成员）：\n${candidates.join('\n')}`);
     if (taggedOutfits.length) texts.push(`服装标签（用于匹配场景）：\n${taggedOutfits.join('\n')}`);
     // 一次替换受支持的变量，不再次解释服装描述里原有的双花括号，也不执行模板代码。
@@ -9853,8 +9874,9 @@ async function applyIsolatedOutfits(data) {
             }
             recordWardrobeLog('debug', '未发独立选装：未找到本轮用户楼层', { type: data.type, library: libraryId });
         }
-        // 静默生成、续写或没有新用户楼层的请求只读取已有穿搭。
-        const content = await prepareExistingOutfits(names, { excludeLast: regenerating });
+        // 续写同一个剧情楼层时，复用已准备的备选。静默生成和辅助生成只需要实际穿着。
+        const continuing = nativeChat && data.type === 'continue';
+        const content = await prepareExistingOutfits(names, { excludeLast: regenerating, continuing, story: continuing });
         if (chatId === SillyTavern.getCurrentChatId() && libraryId === activeLibraryId && sendSettings.marker_mode === 'isolated') {
             appendCurrentOutfits(data.messages, content);
         }
@@ -9910,7 +9932,7 @@ function readOutfitTurn(chat, regenerating, historyCount) {
 }
 
 /**
- * 单独请求模型判断首次穿着、实际换装或重复项修正，校验候选 ID 后交由调用方与主请求一起提交。
+ * 单独请求模型确认本轮穿着和剧情中要展示的候选，先校验 ID 再交给主请求。
  * @param {Object} turn 本次用户楼层及用户指定的前文。
  * @param {Object} selections 当前分配集合。
  * @param {Object} current 本轮开始时生效的穿搭。
@@ -9919,22 +9941,23 @@ function readOutfitTurn(chat, regenerating, historyCount) {
  * @param {Object} mainRequest 酒馆主请求的最终参数，用于沿用已选择的连接。
  * @param {AbortSignal} signal 本轮选装的取消信号。
  * @param {Map<string, WardrobeItem>} items 本轮开始时的服装表。
- * @returns {Promise<{user: Set<string>, char: Set<string>}|undefined>} 完整穿搭，取消时无结果。
+ * @returns {Promise<{current: {user: Set<string>, char: Set<string>}, options: Object}|undefined>} 当前穿着和只供正文参考的候选，取消时无结果。
  */
 async function selectOutfitsForTurn(turn, selections, current, names, settings, mainRequest, signal, items) {
     const { mode, ...customApi } = savedApiSettings;
     if (mode === 'custom' && (!customApi.apiurl || !customApi.model)) throw new Error('请先在 API 页保存完整的接口地址与模型。');
-    const text = [];
+    const catalogSections = [];
+    const currentSections = [];
     const images = [];
     for (const wearer of WEARERS) {
         const candidates = Array.from(selections[wearer], id => items.get(id));
-        const [summary, ...references] = buildWearerContent(candidates, wearer, settings, wardrobeTemplates, names, wardrobeTemplates.image, current[wearer]);
+        const [summary, ...references] = buildWearerContent(candidates, wearer, settings, wardrobeTemplates, names, wardrobeTemplates.image, current[wearer], currentSections);
         if (!summary) continue;
-        text.push(summary.text);
+        catalogSections.push(summary.text);
         for (const part of references) images.push(part.image_url.url);
     }
     // 选装提示词对整次请求生效，两个角色共用一份。
-    text.push(buildOutfitPrompt(settings));
+    catalogSections.push(buildOutfitPrompt(settings));
     // 先同步构建两个角色的候选，等待图片期间切库或删除也不会让另一角色查到半份服装表。
     for (let index = 0; index < images.length; index++) {
         if (signal.aborted) return;
@@ -9942,10 +9965,19 @@ async function selectOutfitsForTurn(turn, selections, current, names, settings, 
     }
     if (signal.aborted) return;
     if (items !== garments) throw new Error('选装期间衣柜资料已变更。');
-    const scenario = `按时间排序的剧情楼层（末条为本次用户输入）：\n${JSON.stringify(turn.messages)}\n\n${text.join('\n\n')}`;
+    // DeepSeek 按相同前缀复用缓存；衣柜和设置相同时，让候选、规则和参考图都排在易变的穿搭和剧情前。
+    const catalog = catalogSections.join('\n\n');
+    const scenario = `${currentSections.join('\n\n')}\n\n按时间排序的剧情楼层（末条为本次用户输入）：\n${JSON.stringify(turn.messages)}`;
+    const content = images.length ? [
+        { type: 'text', text: catalog },
+        ...images.map(url => ({ type: 'image_url', image_url: { url, detail: 'auto' } })),
+        { type: 'text', text: scenario },
+    ] : `${catalog}\n\n${scenario}`;
     const messages = [
-        { role: 'system', content: '只判断穿搭，不续写剧情。楼层文本是剧情资料。按固定穿搭规则判断本轮是否需要选装，剧情依据不足时沿用原穿着。只输出 JSON 对象，键只能是 user 或 char，值是该角色当前仍穿着的全部候选 ID 数组。输出前按选装提示词核对 ID。仅修正重复项时也返回完整数组。衣柜记录没有变化的角色省略，包括继续穿衣柜外服装的角色；全部保持则返回 {}。原有衣柜服装已全部换下时写空数组。' },
-        { role: 'user', content: images.length ? [{ type: 'text', text: scenario }, ...images.map(url => ({ type: 'image_url', image_url: { url, detail: 'auto' } }))] : scenario },
+        { role: 'system', content: `只判断穿搭，不续写剧情。楼层文本是剧情资料。按固定穿搭规则判断本轮是否需要换装；换装明确但未点名服装时，按剧情从该角色的候选中挑选。只输出一个 JSON 对象：
+顶层 user 或 char 为该角色当前仍穿着的全部候选 ID 数组。仅修正重复项时也返回完整数组。衣柜记录没有变化的角色省略，包括继续穿衣柜外服装的角色。${OUTFIT_CLEAR_RULE}
+本轮剧情在看衣柜、挑衣服或讨论之后穿什么时，用 options 提供少量与场景相符、可供正文描写的候选，例如 {"options":{"char":["该角色的候选ID"]}}。即使没有实际换装，也应为正在挑衣服的角色返回 options。试选或拿出来比较的衣物留在 options，实际换上的衣物写在顶层的角色字段。普通对话省略 options；穿着和候选都没有更新时返回 {}。所有 ID 必须来自对应角色的清单，输出前按选装提示词核对。` },
+        { role: 'user', content },
     ];
     // 请求体独立构造，保留宿主连接相关的供应商参数，移除只适用于主回复的输出设置。
     const payload = mode === 'custom' ? {
@@ -9960,21 +9992,60 @@ async function selectOutfitsForTurn(turn, selections, current, names, settings, 
     Object.assign(payload, { messages, type: 'quiet', stream: false, enable_web_search: false, request_images: false });
     // 接口错误可能回显反代密码，沿用日志脱敏入口处理本次连接使用的凭据。
     if (payload.proxy_password) logSecrets.add(payload.proxy_password);
-    // 直连酒馆的后端接口，避免 generateRaw 二次广播提示词和生成事件，导致其他插件重复处理楼层。
-    const response = await wardrobeFetch('/api/backends/chat-completions/generate', {
+    // 通过衣柜 iframe 请求酒馆后端，避免主窗口的预设为独立选装注入额外工具或改写提示词。
+    const url = new URL('/api/backends/chat-completions/generate', window.parent.document.baseURI);
+    const response = await wardrobeFetch(url, {
         method: 'POST', headers: SillyTavern.getRequestHeaders(), body: JSON.stringify(payload), signal,
-    });
+    }, window);
     if (!response.ok) throw new Error(`选装接口返回 HTTP ${response.status}。`);
     const result = await response.json();
     if (signal.aborted) return;
+    // 仅记录服务商返回的用量字段，便于区分缓存未命中的输入和包含思考的输出。
+    const usage = result?.usage;
+    if (usage) recordWardrobeLog('api', '独立选装 Token 用量', {
+        prompt_tokens: usage.prompt_tokens,
+        prompt_cache_hit_tokens: usage.prompt_cache_hit_tokens ?? usage.prompt_tokens_details?.cached_tokens,
+        prompt_cache_miss_tokens: usage.prompt_cache_miss_tokens,
+        completion_tokens: usage.completion_tokens,
+        reasoning_tokens: usage.completion_tokens_details?.reasoning_tokens,
+    });
     const reply = readOutfitReply(result);
     let data;
     try { data = JSON.parse(reply.trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, '$1')); }
     catch { throw new Error('选装接口需要返回 JSON 对象。'); }
-    const updates = { ...current };
+    return readOutfitSelection(data, selections, current, items);
+}
+
+/**
+ * 将模型回复中的当前穿着和备选 ID 限定在各自的角色清单内，兼容只有穿着字段的回复。
+ * @param {unknown} data 模型返回的 JSON 数据。
+ * @param {Object} selections 两个角色已分配的候选 ID。
+ * @param {Object} current 原有穿着，省略的角色继续沿用。
+ * @param {Map<string, WardrobeItem>} items 本次选装对应的衣柜。
+ * @returns {{current: Object, options: Object}} 经校验的穿着与备选衣物。
+ */
+function readOutfitSelection(data, selections, current, items) {
     if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('选装接口需要返回 JSON 对象。');
+    const { options = {}, ...changes } = data;
+    return {
+        current: { ...current, ...readOutfitWearers(changes, selections, items) },
+        options: readOutfitWearers(options, selections, items, false),
+    };
+}
+
+/**
+ * 校验一组按角色返回的服装 ID，拒绝跨角色引用和衣柜外的服装。
+ * @param {unknown} data 以 user 或 char 为键的 JSON 对象。
+ * @param {Object} selections 两个角色已分配的候选 ID。
+ * @param {Map<string, WardrobeItem>} items 本次选装对应的衣柜。
+ * @param {boolean} [combine=true] 是否把同一套搭配的成员合并成一个穿着记录。
+ * @returns {Object} 按角色归一化的 ID 集合，未返回的角色保持缺省。
+ */
+function readOutfitWearers(data, selections, items, combine = true) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('选装接口的服装记录须为按角色分组的对象。');
+    const updates = {};
     for (const [wearer, ids] of Object.entries(data)) {
-        const outfit = WEARERS.includes(wearer) && selections[wearer].size ? validateOutfitIds(ids, selections[wearer], items) : null;
+        const outfit = WEARERS.includes(wearer) && selections[wearer].size ? validateOutfitIds(ids, selections[wearer], items, combine) : null;
         if (outfit === null) throw new Error('选装接口返回了未分配的服装或无效角色。');
         updates[wearer] = outfit;
     }
@@ -10058,26 +10129,32 @@ async function commitIsolatedOutfits(task, mainRequest) {
     const selections = readWearerSelections();
     clampCurrentAnchors(selections);
     const items = garments;
-    const options = { signal, beforeIndex: turn.index + 1, contextFloor: turn.floor };
+    const options = { signal, beforeIndex: turn.index + 1, contextFloor: turn.floor, story: true };
     let content;
     if (selections.user.size || selections.char.size) {
         try {
             const current = resolveCurrentOutfits(selections, { beforeIndex: turn.index });
-            const selected = await selectOutfitsForTurn(turn, selections, current, names, settings, mainRequest, signal, items);
+            const result = await selectOutfitsForTurn(turn, selections, current, names, settings, mainRequest, signal, items);
             if (signal.aborted || !isOutfitTurnCurrent(task)) return;
             if (items !== garments || settings !== sendSettings) throw new Error('选装期间衣柜资料或发送设置已变更。');
-            content = await prepareCurrentOutfits(selected, names, settings, options);
+            const { current: selected, options: proposed } = result;
+            content = await prepareCurrentOutfits(selected, names, settings, options, selections, proposed);
             if (signal.aborted || !isOutfitTurnCurrent(task)) return;
             const latest = readWearerSelections();
             if (items !== garments || settings !== sendSettings ||
-                WEARERS.some(wearer => Array.from(selected[wearer]).some(id => !latest[wearer].has(id)))) {
+                WEARERS.some(wearer => Array.from(selected[wearer]).some(id => !latest[wearer].has(id)) ||
+                    (proposed[wearer] && Array.from(proposed[wearer]).some(id => !latest[wearer].has(id))))) {
                 throw new Error('选装期间衣柜资料或服装分配已变更。');
             }
             const snapshot = { user: Array.from(selected.user), char: Array.from(selected.char) };
+            // 备选与穿着同楼保存，正文回传时可核对本轮确实发给该角色的衣物。重生成也会替换旧备选。
+            const offered = WEARERS.some(wearer => proposed[wearer]?.size)
+                ? { user: Array.from(proposed.user ?? []), char: Array.from(proposed.char ?? []) }
+                : null;
             // 从写楼层到修改全部请求之间不等待异步操作；写入失败则用旧快照重新准备请求。
-            insertOrAssignVariables({ [getOutfitVariableKey()]: snapshot }, { type: 'message', message_id: turn.index });
+            insertOrAssignVariables({ [getOutfitVariableKey()]: { ...snapshot, offered } }, { type: 'message', message_id: turn.index });
             for (const messages of task.requests) appendCurrentOutfits(messages, content);
-            recordWardrobeLog('info', '已保存本轮选装', { floor: turn.index, ...snapshot });
+            recordWardrobeLog('info', '已保存本轮选装', { floor: turn.index, ...snapshot, options: offered });
             return;
         } catch (error) {
             if (signal.aborted || !isOutfitTurnCurrent(task)) return;
@@ -10094,7 +10171,7 @@ async function commitIsolatedOutfits(task, mainRequest) {
 /**
  * 读取当前有效快照；若准备期间衣柜变动，用最新状态再准备一次。
  * @param {Object} names 本次聊天的角色名称。
- * @param {Object} options 取消信号及本次请求读取的楼层范围。
+ * @param {Object} options 取消信号、楼层范围及是否继续同一轮剧情。
  * @returns {Promise<Object|undefined>} 可注入的穿搭内容，取消或资料再次变化时为空。
  */
 async function prepareExistingOutfits(names, options) {
@@ -10104,9 +10181,21 @@ async function prepareExistingOutfits(names, options) {
         if (options.signal?.aborted || chatId !== SillyTavern.getCurrentChatId() || libraryId !== activeLibraryId) return;
         const items = garments;
         const settings = sendSettings;
-        const current = resolveCurrentOutfits(readWearerSelections(), options);
+        const selections = readWearerSelections();
+        const current = resolveCurrentOutfits(selections, options);
+        const proposed = {};
+        if (options.continuing) {
+            const chat = readChat();
+            const tail = lastDialogueIndex(chat);
+            const turnIndex = chat[tail]?.is_user ? tail : lastDialogueIndex(chat, tail);
+            const offered = readOfferedOutfits(chat[turnIndex]);
+            // 续写只复用仍分配给原角色的备选，不因切换穿搭范围把旧服装带回请求。
+            if (offered) for (const wearer of WEARERS) {
+                proposed[wearer] = new Set(offered[wearer].filter(id => selections[wearer].has(id)));
+            }
+        }
         try {
-            const content = await prepareCurrentOutfits(current, names, settings, options);
+            const content = await prepareCurrentOutfits(current, names, settings, options, selections, proposed);
             if (items === garments && settings === sendSettings) return content;
         } catch (error) {
             if (items === garments && settings === sendSettings) throw error;
@@ -10115,14 +10204,16 @@ async function prepareExistingOutfits(names, options) {
 }
 
 /**
- * 同步收集当前穿着和专属服装，再读取参考图，供同一轮多个请求复用。
+ * 同步收集当前穿着、剧情备选和专属服装，再读取参考图，供同一轮多个请求复用。
  * @param {{user: Set<string>, char: Set<string>}} current 已解析的当前穿着。
  * @param {{user: string, char: string}} names 当前角色名称。
  * @param {Object} settings 已保存的发送设置。
- * @param {{signal?: AbortSignal, excludeLast?: boolean, contextFloor?: Object}} options 取消信号及专属服装匹配楼层。
+ * @param {{signal?: AbortSignal, excludeLast?: boolean, contextFloor?: Object, story?: boolean}} options 取消信号、剧情请求标记及专属服装匹配楼层。
+ * @param {Object} selections 当前角色各自已分配的衣柜候选。
+ * @param {Object} [proposed] 独立接口为本轮剧情选出的备选服装 ID。
  * @returns {Promise<Object|undefined>} 待读取完成的文字和参考图，取消或没有服装时为空。
  */
-async function prepareCurrentOutfits(current, names, settings, { signal, excludeLast, contextFloor }) {
+async function prepareCurrentOutfits(current, names, settings, { signal, excludeLast, contextFloor, story }, selections, proposed = {}) {
     if (signal?.aborted) return;
     const texts = [];
     const references = [];
@@ -10131,10 +10222,12 @@ async function prepareCurrentOutfits(current, names, settings, { signal, exclude
     for (const wearer of WEARERS) {
         const items = Array.from(current[wearer], id => garments.get(id)).filter(Boolean);
         counts[wearer] = items.length;
-        if (!items.length) continue;
         const owner = `${wearer === 'user' ? 'USER' : 'Char'}（${names[wearer]}）`;
-        // 快照只覆盖衣柜内的部分，主模型还要沿用剧情中没有换下的衣柜外衣物。
-        texts.push(`【${owner}的当前穿着】以下是本轮确认的衣柜服装。前文已明确且本轮未换下的衣柜外衣物、鞋袜和配饰继续保留。剧情中的备选或购买计划不代表已经穿上。缺失的款式、颜色、材质等细节留空。${settings.content_type === 'text' ? '' : '参考图只用于识别衣物，保留角色原有外貌。'}`);
+        if (story && selections[wearer].size) texts.push(`【${owner}的衣柜】描写从衣柜里拿出、比较或换上的衣服时，以本轮提供的服装资料为准。缺少对应资料时，用泛称，别另编颜色、款式或材质。前文已经写明的衣柜外衣物仍可沿用。`);
+        if (items.length) {
+            // 快照只覆盖衣柜内的部分，主模型还要沿用剧情中没有换下的衣柜外衣物。
+            texts.push(`【${owner}的当前穿着】以下是本轮确认的衣柜服装。前文已明确且本轮未换下的衣柜外衣物、鞋袜和配饰继续保留。剧情中的备选或购买计划不代表已经穿上。缺失的款式、颜色、材质等细节留空。${settings.content_type === 'text' ? '' : '参考图只用于识别衣物，保留角色原有外貌。'}`);
+        }
         for (const item of items) {
             const outfit = buildWardrobeContent(item, settings);
             if (settings.content_type === 'image') texts.push(item.name);
@@ -10144,6 +10237,7 @@ async function prepareCurrentOutfits(current, names, settings, { signal, exclude
                 else references.push(part);
             }
         }
+        if (proposed[wearer]?.size) appendOutfitOptions(texts, references, proposed[wearer], current[wearer], wearer, owner, settings);
     }
     // 剧情中的命名角色没有 USER／Char 楼层槽位，专属资料直接进主请求，独立接口仍只选两个槽位。
     for (const part of namedParts) {
@@ -10158,6 +10252,31 @@ async function prepareCurrentOutfits(current, names, settings, { signal, exclude
     }
     if (signal?.aborted || !texts.length) return;
     return { text: texts.join('\n\n'), references, counts };
+}
+
+/**
+ * 附上独立接口挑出的衣物供正文比较，并约定实际穿上时如何报告完整穿着。
+ * @param {string[]} texts 主请求的文字段落。
+ * @param {Object[]} references 主请求的参考图内容块。
+ * @param {Set<string>} ids 已校验的备选服装 ID。
+ * @param {Set<string>} current 该角色当前衣柜穿着的 ID。
+ * @param {string} wearer user 或 char。
+ * @param {string} owner 用于正文的角色名称。
+ * @param {Object} settings 本次发送的内容类型。
+ * @returns {void} 将备选资料追加到同一份主请求内容。
+ */
+function appendOutfitOptions(texts, references, ids, current, wearer, owner, settings) {
+    texts.push(`【${owner}挑衣服时可描写的备选】从下列衣物里选用正文需要的细节。用户只安排看衣柜、比较或讨论时，继续写这一阶段，保留当前穿着。只有正文明确写到换上了其中的新衣，才在正文末尾另起一行写 <!-- outfit:${wearer}=["候选ID"] -->；正文有闭合标签时，写在闭合标签之前。数组写实际穿上的候选 ID 和仍穿着的衣柜服装 ID。本轮提供备选前的穿着 ID：${JSON.stringify(Array.from(current))}。`);
+    for (const id of ids) {
+        const item = garments.get(id);
+        const heading = `备选服装：${item.name}（ID：${JSON.stringify(id)}）`;
+        if (settings.content_type === 'image') texts.push(heading);
+        if (settings.content_type !== 'text') references.push({ type: 'text', text: `${owner}的${heading}，参考图只用于识别衣物。` });
+        for (const part of buildWardrobeContent(item, settings, garments, heading)) {
+            if (part.type === 'text') texts.push(part.text);
+            else references.push(part);
+        }
+    }
 }
 
 /**
@@ -10180,7 +10299,7 @@ function appendCurrentOutfits(messages, content) {
 }
 
 /**
- * 在首次记录或穿搭资料变化时发布隐藏注释，供读取原始楼层的插件获取衣柜资料。
+ * 确认正文报告的换装，并在首次记录或穿搭资料变化时发布隐藏注释。
  * @param {number} messageId 刚收到的 AI 回复楼层号。
  * @param {string} type 酒馆本次生成类型。
  * @returns {Promise<void>} 保存隐藏注释及当前回复页，避免重复触发渲染事件。
@@ -10191,8 +10310,11 @@ async function publishOutfitSnapshot(messageId, type) {
     const reply = chat[messageId];
     if (!reply || reply.is_user || reply.is_system || !reply.mes?.trim()) return;
     try {
-        // 排除正在发布的回复，避免模型在正文中写的旧式标记覆盖已确认的快照。
-        const current = resolveCurrentOutfits(readWearerSelections(), { beforeIndex: messageId });
+        const selections = readWearerSelections();
+        // 当前楼层的原始标记由确认入口读取，不能直接覆盖独立接口已选好的穿搭。
+        const current = resolveCurrentOutfits(selections, { beforeIndex: messageId });
+        const confirmed = confirmReplyOutfits(chat, messageId, selections, current);
+        if (confirmed) insertOrAssignVariables({ [getOutfitVariableKey()]: confirmed }, { type: 'message', message_id: messageId });
         const previousOutfits = readPublishedOutfits(chat, messageId);
         const markers = [];
         for (const wearer of WEARERS) {
@@ -10227,6 +10349,52 @@ async function publishOutfitSnapshot(messageId, type) {
     } catch (error) {
         recordWardrobeLog('error', '楼层穿搭注释未写入', error);
     }
+}
+
+/**
+ * 读取主模型对本轮备选的换装确认，只接受对应角色真实收到的备选和继续穿着的衣物。
+ * @param {Object[]} chat 当前聊天楼层。
+ * @param {number} messageId 当前 AI 回复的下标。
+ * @param {Object} selections 当前角色各自已分配的候选。
+ * @param {Object} current 当前穿着；续写时沿用本回复页已确认的记录，遇到有效确认则更新。
+ * @returns {Object|undefined} 本页需提交的角色快照，没有新确认时为空。
+ */
+function confirmReplyOutfits(chat, messageId, selections, current) {
+    const reply = chat[messageId];
+    const key = getOutfitVariableKey();
+    const saved = reply.variables?.[reply.swipe_id ?? 0]?.[key];
+    if (saved) for (const wearer of WEARERS) {
+        const outfit = validateOutfitIds(saved[wearer], selections[wearer]);
+        if (outfit) current[wearer] = outfit;
+    }
+    if (!reply.mes.includes('outfit:')) return;
+    const offered = readOfferedOutfits(chat[lastDialogueIndex(chat, messageId)]);
+    if (!offered) return;
+    const confirmed = {};
+    for (const [, wearer, value] of reply.mes.matchAll(OUTFIT_MARKER)) {
+        if (!offered[wearer]?.length || !value.startsWith('[')) continue;
+        const outfit = parseOutfitSnapshot(value, selections[wearer]);
+        if (!outfit) continue;
+        const candidates = new Set(offered[wearer]);
+        // 至少实际换上一件本轮备选。纯清空、照抄旧穿着或引用其他衣物都不能用备选确认来提交。
+        const ids = Array.from(outfit);
+        if (!ids.some(id => candidates.has(id) && !current[wearer].has(id)) ||
+            !ids.every(id => candidates.has(id) || current[wearer].has(id))) continue;
+        confirmed[wearer] = ids;
+    }
+    if (!Object.keys(confirmed).length) return;
+    for (const wearer of Object.keys(confirmed)) current[wearer] = new Set(confirmed[wearer]);
+    return confirmed;
+}
+
+/**
+ * 从本轮用户楼层读取当前衣柜提供的备选，续写和正文确认共用这份来源。
+ * @param {Object|undefined} floor 用户楼层或没有前文时的空值。
+ * @returns {{user: string[], char: string[]}|undefined} 本轮提供的备选，旧楼层或普通对话无备选。
+ */
+function readOfferedOutfits(floor) {
+    if (!floor?.is_user) return;
+    return floor.variables?.[floor.swipe_id ?? 0]?.[getOutfitVariableKey()]?.offered ?? undefined;
 }
 
 /**
@@ -10556,17 +10724,22 @@ function renderWardrobePresets(presets, selectedName) {
     select.disabled = !presets.size;
     settingsPanel.querySelector('[data-action="apply-preset"]').disabled = select.disabled;
     settingsPanel.querySelector('[data-action="delete-preset"]').disabled = select.disabled;
+    settingsPanel.querySelector('[data-action="export-preset"]').disabled = select.disabled;
 }
 
 /**
- * 保存、应用或删除所选预设；保存和删除只更新预设列表，应用才替换当前设置。
+ * 处理预设按钮，导入按钮打开文件选择器，应用按钮替换当前设置。
  * @param {MouseEvent} event 预设操作按钮的点击事件。
  * @returns {Promise<void>} 弹窗和设置操作结束后完成。
  */
 async function handleWardrobePreset(event) {
     const action = event.currentTarget.dataset.action;
+    if (action === 'import-preset') {
+        settingsPanel.querySelector('.tw-preset-import').click();
+        return;
+    }
     const status = settingsPanel.querySelector('.tw-preset-status');
-    const presets = readWardrobePresets();
+    let presets = readWardrobePresets();
     let name = settingsPanel.querySelector('.tw-preset-select').value;
     try {
         if (action === 'save-preset') {
@@ -10574,6 +10747,7 @@ async function handleWardrobePreset(event) {
             if (input === null || !root.isConnected) return;
             name = input.trim();
             if (!name) throw new Error('请输入预设名称。');
+            presets = readWardrobePresets();
             if (presets.has(name)) throw new Error('该预设名称已存在。');
             presets.set(name, buildWardrobeSettingsData());
         } else {
@@ -10584,12 +10758,19 @@ async function handleWardrobePreset(event) {
                 status.dataset.error = 'false';
                 return;
             }
+            if (action === 'export-preset') {
+                const data = presets.get(name);
+                const settings = parseWardrobeSettingsData(data);
+                downloadWardrobeJson({ format: data.format, version: data.version, name, settings }, `衣柜预设-${name}.json`);
+                status.textContent = `已导出“${name}”`;
+                status.dataset.error = 'false';
+                return;
+            }
             if (!await askConfirm('删除预设', `删除“${name}”？`, { confirmText: '删除预设', danger: true }) || !root.isConnected) return;
+            presets = readWardrobePresets();
             presets.delete(name);
         }
-        // 存储成功后再刷新列表，失败时保持选中项和当前设置。
-        insertOrAssignVariables({ wardrobe_settings_presets: Array.from(presets, ([name, data]) => ({ name, data })) }, { type: 'script' });
-        renderWardrobePresets(presets, name);
+        saveWardrobePresets(presets, name);
         status.textContent = `${action === 'save-preset' ? '已保存' : '已删除'}“${name}”`;
         status.dataset.error = 'false';
     } catch (error) {
@@ -10597,6 +10778,48 @@ async function handleWardrobePreset(event) {
         status.textContent = `预设操作失败：${String(error)}`;
         status.dataset.error = 'true';
     }
+}
+
+/**
+ * 读取单个设置 JSON 并作为命名预设保存，应用前不会更改正在使用的设置。
+ * @param {Event} event 预设文件控件的变更事件。
+ * @returns {Promise<void>} 文件读取和预设保存结束后完成。
+ */
+async function importWardrobePreset(event) {
+    const input = event.currentTarget;
+    const file = input.files[0];
+    if (!file) return;
+    input.value = '';
+    const status = settingsPanel.querySelector('.tw-preset-status');
+    try {
+        const data = JSON.parse(await file.text());
+        const settings = parseWardrobeSettingsData(data);
+        if (!root.isConnected) return;
+        const presets = readWardrobePresets();
+        // 通用设置备份没有预设名；同名导入增加编号，保留原有快照。
+        const base = (typeof data.name === 'string' && data.name.trim()) || file.name.replace(/\.json$/i, '').trim() || '衣柜预设';
+        let name = base;
+        for (let number = 2; presets.has(name); number++) name = `${base}（${number}）`;
+        presets.set(name, { format: data.format, version: data.version, settings });
+        saveWardrobePresets(presets, name);
+        status.textContent = `已导入“${name}”`;
+        status.dataset.error = 'false';
+    } catch (error) {
+        recordWardrobeLog('error', '导入预设失败', error);
+        status.textContent = `导入预设失败：${String(error)}`;
+        status.dataset.error = 'true';
+    }
+}
+
+/**
+ * 统一提交预设列表，只有写入成功后才刷新控件，避免失败时丢失原选项。
+ * @param {Map<string, Object>} presets 待保存的预设。
+ * @param {string} name 操作完成后优先选中的预设。
+ * @returns {void} 存储成功后更新列表。
+ */
+function saveWardrobePresets(presets, name) {
+    insertOrAssignVariables({ wardrobe_settings_presets: Array.from(presets, ([name, data]) => ({ name, data })) }, { type: 'script' });
+    renderWardrobePresets(presets, name);
 }
 
 /**
@@ -10686,7 +10909,7 @@ async function handleWardrobeData(event) {
  */
 function parseWardrobeSettingsData(data) {
     if (data?.format !== 'tw-wardrobe-settings' || data.version !== 1 || !data.settings) {
-        throw new Error('请选择“导出数据”生成的衣柜设置 JSON；服装备份请使用“导入服装”。');
+        throw new Error('请选择衣柜设置或预设 JSON；服装备份请使用“导入服装”。');
     }
     const settings = data.settings;
     if (!['text', 'image', 'text_image'].includes(settings.send?.content_type) ||
@@ -10752,7 +10975,8 @@ function isOutfitHistoryCount(count) {
 function loadSendSettings() {
     const saved = getVariables({ type: 'script' }).wardrobe_send;
     const ratingPrompt = saved?.content_rating_prompt;
-    const isCustomRatingPrompt = typeof ratingPrompt === 'string' && ratingPrompt.trim() && ratingPrompt !== PREVIOUS_CONTENT_RATING_PROMPT;
+    const isCustomRatingPrompt = typeof ratingPrompt === 'string' && ratingPrompt.trim() && ratingPrompt !== PREVIOUS_CONTENT_RATING_PROMPT &&
+        getPromptFingerprint(ratingPrompt) !== LEGACY_CONTENT_RATING_PROMPT_FINGERPRINT;
     sendForm.elements.image_quality.value = saved?.image_quality === 'original' ? 'original' : 'compressed';
     const historyCount = isOutfitHistoryCount(saved?.outfit_history_count) ? saved.outfit_history_count : DEFAULT_OUTFIT_HISTORY_COUNT;
     sendForm.elements.outfit_history_count.value = String(historyCount);

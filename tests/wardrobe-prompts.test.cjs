@@ -45,9 +45,15 @@ const presetSelect = {
     replaceChildren(...options) { this.options = options; },
 };
 const presetStatus = { textContent: '', dataset: {} };
-const presetButtons = new Map(['save-preset', 'apply-preset', 'delete-preset'].map(action => [action, { dataset: { action }, disabled: false }]));
+const presetInput = {
+    files: [], value: '',
+    /** 模拟打开预设文件选择器；无参数，无返回值。 */
+    click() { this.opened = true; },
+};
+const presetButtons = new Map(['save-preset', 'apply-preset', 'delete-preset', 'import-preset', 'export-preset'].map(action => [action, { dataset: { action }, disabled: false }]));
 forms.set('.tw-preset-select', presetSelect);
 forms.set('.tw-preset-status', presetStatus);
+forms.set('.tw-preset-import', presetInput);
 for (const [action, button] of presetButtons) forms.set(`[data-action="${action}"]`, button);
 const downloads = [];
 const downloadBlobs = new Map();
@@ -157,7 +163,7 @@ globalThis.api = { loadWardrobeTemplates, saveWardrobeTemplate, loadDescriptionP
     loadGarments() { loadGarments(); setDetailsDirty(false); },
     setDetailsDirty, generateGarmentDescription, generateMissingGarmentDescriptions, stopDescriptionRequest, saveSelectedGarment, buildWearerContent,
     handleWardrobeData, parseWardrobeSettingsData, loadSendSettings, loadOutfitSettings, saveOutfitSettings,
-    handleWardrobePreset, readWardrobePresets, renderWardrobePresets,
+    handleWardrobePreset, importWardrobePreset, readWardrobePresets, renderWardrobePresets,
     restorePromptDefaults, saveRatingSettings, saveSendSettings, promptDefaults: PROMPT_FORM_DEFAULTS,
     settingsMarkup: PANEL_HTML,
     filterMissing: ids => { currentCategory = 'missing-description'; visibleGarmentIds = new Set(ids); },
@@ -388,6 +394,15 @@ async function main() {
     saved.wardrobe_send = { content_rating_prompt: '内容分级用于说明服装性质：SFW 表示日常／非色情服装，NSFW 表示色情／成人服装，未标注表示尚未判断。NSFW 标记不代表当前剧情允许色情内容或要求进入色情情节，也不直接禁止外穿；是否选用由角色设定、世界观与剧情场景决定。' };
     api.loadSendSettings();
     assert.equal(ratingForm.elements.prompt.value, api.promptDefaults.rating.prompt, '原样保存的旧分级默认词升级到新版');
+    // 旧备份含有上一版默认全文，验证恢复后不再把回家或时间跳转当成换装时机。
+    const oldRatingPrompt = api.promptDefaults.rating.prompt.replace(
+        '是否换装由固定穿搭规则判断。需要换装时，按换装时所在场景挑选适合的候选。',
+        '已有当前穿着时保持整身，只在明确换衣、回家准备、时间跳转等合理机会换装。场景从 A 档转入 B、C 档时，可以借换装机会调整；普通转场不换。',
+    );
+    assert.notEqual(oldRatingPrompt, api.promptDefaults.rating.prompt);
+    saved.wardrobe_send.content_rating_prompt = oldRatingPrompt;
+    api.loadSendSettings();
+    assert.equal(ratingForm.elements.prompt.value, api.promptDefaults.rating.prompt, '上一版完整默认分级提示也会升级');
     api.loadOutfitSettings();
     assert.match(outfitForm.elements.prompt.value, /套装优先，单品按缺项补充/, '旧存档显示默认选装规则');
     outfitForm.elements.prompt.value = '已保存的选装提示词';
@@ -566,7 +581,7 @@ function checkPromptDefaults() {
 }
 
 /**
- * 验证多个本地预设的保存、重读、应用和删除，并检查设置及 API 的隔离。
+ * 验证预设保存、文件往返、同名导入、应用和删除，并检查设置及 API 的隔离。
  * @returns {Promise<void>} 预设操作和失败保留的断言完成后结束。
  */
 async function checkWardrobePresets() {
@@ -574,6 +589,9 @@ async function checkWardrobePresets() {
     const click = action => api.handleWardrobePreset({ currentTarget: presetButtons.get(action) });
     api.renderWardrobePresets(api.readWardrobePresets());
     assert.equal(presetButtons.get('apply-preset').disabled, true);
+    assert.equal(presetButtons.get('export-preset').disabled, true);
+    await click('import-preset');
+    assert.equal(presetInput.opened, true, '空列表也能打开导入');
     outfitForm.elements.prompt.value = '没有保存的编辑草稿';
     sandbox.testPresetName = '  剧情版  ';
     await click('save-preset');
@@ -626,6 +644,45 @@ async function checkWardrobePresets() {
     await click('delete-preset');
     assert.deepEqual(saved.wardrobe_settings_presets, []);
     assert.equal(presetButtons.get('delete-preset').disabled, true);
+    assert.equal(presetButtons.get('export-preset').disabled, true);
+
+    /** 模拟选择本地预设文件；参数为文件名及原文，返回导入操作。 */
+    const importPreset = (name, content) => {
+        presetInput.value = name;
+        presetInput.files = [{ name, text: async () => content }];
+        return api.importWardrobePreset({ currentTarget: presetInput });
+    };
+    // 普通设置备份沿用文件名，导入只保存预设；额外字段在入口剔除。
+    next.settings.send.api_key = 'preset-test-key';
+    await importPreset('分享版.JSON', JSON.stringify(next));
+    assert.equal(presetInput.value, '');
+    assert.equal(presetSelect.value, '分享版');
+    assert.equal(presetButtons.get('export-preset').disabled, false);
+    assert.equal(outfitForm.elements.prompt.value, story.data.settings.outfit_prompt, '导入后等待手动应用');
+    await click('export-preset');
+    const { name: filename, href } = downloads.at(-1);
+    assert.equal(filename, '衣柜预设-分享版.json');
+    const exported = await downloadBlobs.get(href).text();
+    const backup = JSON.parse(exported);
+    assert.equal(backup.name, '分享版');
+    assert.equal(backup.settings.outfit_prompt, next.settings.outfit_prompt, '导出选中的快照');
+    assert.doesNotMatch(exported, /api_key|preset-test-key|wardrobe_api/);
+    await importPreset('改过的文件名.json', exported);
+    assert.deepEqual(presetSelect.options.map(option => option.value), ['分享版', '分享版（2）']);
+    assert.equal(presetSelect.value, '分享版（2）');
+
+    const previous = JSON.stringify(saved.wardrobe_settings_presets);
+    await importPreset('错误.json', '{}');
+    assert.match(presetStatus.textContent, /导入预设失败/);
+    writesFail = true;
+    try { await importPreset(filename, exported); } finally { writesFail = false; }
+    assert.match(presetStatus.textContent, /存储失败/);
+    assert.equal(presetSelect.value, '分享版（2）');
+    assert.equal(JSON.stringify(saved.wardrobe_settings_presets), previous);
+    await click('apply-preset');
+    assert.equal(outfitForm.elements.prompt.value, next.settings.outfit_prompt);
+    assert.equal(JSON.stringify(saved.wardrobe_api), connection);
+    assert.equal(JSON.stringify(saved.wardrobe_items), clothes);
 }
 
 /**
