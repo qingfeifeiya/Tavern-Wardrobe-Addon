@@ -876,7 +876,7 @@ async function checkOutfitOverlap() {
     const direct = { chat: [{ role: 'user', content: chat[0].mes }] };
     await api.injectWardrobeContent(direct);
     const directPrompt = direct.chat[0].content;
-    assert.match(directPrompt, /套装优先，单品按缺项补充[\s\S]*套装缺鞋时可以补鞋/);
+    assert.match(directPrompt, /分件可混搭，整套按缺项补充[\s\S]*套装缺鞋时可以补鞋/);
     assert.match(directPrompt, /连衣裙同时占上装和下装[\s\S]*上装、下装、腿袜和鞋是否各自至多一个来源/);
     assert.match(directPrompt, /候选合适或部位空缺都不触发选装[\s\S]*只删重复 ID[\s\S]*不新增 ID/);
     assert.ok(directPrompt.includes(`\n\n${outfitForm.elements.prompt.value}\n\n（换装记录：`), '直接模式原样发送编辑框中的默认提示词');
@@ -901,8 +901,8 @@ async function checkOutfitOverlap() {
     assert.match(instructions.content, /仅修正重复项时也返回完整数组/);
     assert.match(instructions.content, /输出前按选装提示词核对/);
     assert.ok(candidates.content.includes(`\n\n${outfitForm.elements.prompt.value}\n\n`), '独立选装原样发送编辑框中的默认提示词');
-    assert.match(candidates.content, /套装优先，单品按缺项补充[\s\S]*套装缺鞋时可以补鞋/);
-    assert.match(candidates.content, /套装已占用的部位锁定[\s\S]*五、输出前自检（必须执行）[\s\S]*上装、下装、腿袜和鞋是否各自至多一个来源/);
+    assert.match(candidates.content, /分件可混搭，整套按缺项补充[\s\S]*套装缺鞋时可以补鞋/);
+    assert.match(candidates.content, /整套已占用的部位锁定[\s\S]*五、输出前自检（必须执行）[\s\S]*上装、下装、腿袜和鞋是否各自至多一个来源/);
     for (const item of [suit, socks, shoes]) assert.ok(candidates.content.includes(item.description), '选装仍可看到全部候选资料');
     assert.deepEqual(Array.from(api.readEffectiveSelections().current.char), corrected);
     assert.match(request.messages[0].content, /黑蕾丝深V长裙/);
@@ -922,12 +922,96 @@ async function checkOutfitOverlap() {
     api.markOutfitChatPrompt({ prompt: changed.messages }, false);
     await api.applyIsolatedOutfits(changed);
     assert.ok(received[1].messages[1].content.includes(`\n\n${customPrompt}\n\n`), '独立选装原样使用已保存的自定义提示词');
-    assert.doesNotMatch(received[1].messages[1].content, /套装优先，单品按缺项补充/, '自定义提示词替换默认规则');
+    assert.doesNotMatch(received[1].messages[1].content, /分件可混搭，整套按缺项补充/, '自定义提示词替换默认规则');
+    assert.match(received[1].messages[1].content, /可拆套装同时列出整套 ID 和分件 ID/, '自定义提示词仍收到分件记录协议');
     assert.deepEqual(Array.from(api.readEffectiveSelections().current.char), supplemented, '套装没有鞋时允许补充独立鞋');
     assert.match(changed.messages[0].content, /不含鞋的套装[\s\S]*尖头漆皮高跟鞋/);
 }
 
-test('套装优先提示、重复鞋袜快照修正及缺鞋补充', checkOutfitOverlap);
+test('整套穿着的重复鞋袜快照修正及缺鞋补充', checkOutfitOverlap);
+
+/**
+ * 验证两套存量描述可以跨套选件，局部换装后沿用实际穿着及对应参考图。
+ * @returns {Promise<void>} 完成直接模式、独立接口和回复确认的验证后结束。
+ */
+async function checkSplitOutfits() {
+    reset();
+    const redImage = 'data:image/png;base64,YQ==';
+    const berryImage = 'data:image/png;base64,Yg==';
+    const redSuit = { ...pants, id: 'red-suit', name: '红衬衫套装', category: 'outfits', image: redImage,
+        description: '原套总述。\n【上装】红色缎面衬衫。\n【下装】黑色铅笔裙。\n【配饰】金色耳饰。\n【袜】深色丝袜。\n【鞋】黑色尖头高跟鞋。' };
+    const berrySuit = { ...redSuit, id: 'berry-suit', name: '莓红短裙套装', image: berryImage,
+        description: '另一套总述。【上装】白色短上装。【下装】莓红色短裙。【袜子】浅米色丝袜。【鞋子】墨黑浅口鞋。' };
+    const redTop = 'part:tops:1:red-suit';
+    const redShoes = 'part:shoes:1:red-suit';
+    const berrySkirt = 'part:bottoms:1:berry-suit';
+    const berrySocks = 'part:socks:1:berry-suit';
+    const mixed = [redTop, berrySkirt, berrySocks, redShoes];
+    saved.wardrobe_items = [redSuit, berrySuit];
+    saved.wardrobe_selections = { user: [berrySuit.id], char: [redSuit.id, berrySuit.id], current: { char: redSuit.id } };
+    api.loadGarments();
+
+    chat = [{ is_user: true, mes: '换成红衬衫、莓红短裙和浅米色丝袜，鞋保持原样。' }];
+    const direct = { chat: [{ role: 'user', content: chat[0].mes }] };
+    await api.injectWardrobeContent(direct);
+    const catalog = direct.chat[0].content.map(part => part.text).join('\n');
+    for (const id of mixed) assert.ok(catalog.includes(JSON.stringify(id)), '两个来源的分件都列在候选中');
+    assert.equal(api.parseOutfitSnapshot(JSON.stringify([redTop]), new Set([berrySuit.id])), null, '分件沿用来源套装的角色归属');
+    const tagged = { mes: `<!-- outfit:char=${JSON.stringify(mixed)} -->` };
+    chat.push(tagged);
+    assert.deepEqual(Array.from(api.readEffectiveSelections().current.char), mixed, '直接模式保存并恢复混搭');
+    assert.deepEqual(Array.from(api.parseOutfitSnapshot(JSON.stringify([redSuit.id, redTop]), new Set([redSuit.id, berrySuit.id]))),
+        [redSuit.id], '整套和自己的分件重复出现时合并为整套');
+    chat.pop();
+
+    sendForm.elements.marker_mode.value = 'isolated';
+    sendForm.elements.content_type.value = 'both';
+    sendForm.elements.image_quality.value = 'original';
+    api.saveSendSettings({ preventDefault() {} });
+    api.setApiConnection({ mode: 'host' });
+    sandbox.SillyTavern.getRequestHeaders = () => ({ 'Content-Type': 'application/json' });
+    let reply = { char: mixed };
+    /** 按当前用例返回模型选装结果；参数为模拟请求，无需读取请求即可返回响应。 */
+    sandbox.window.fetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(reply) } }] }));
+    /** 驱动一次正常聊天发送；无参数，返回完成注入后的主请求。 */
+    async function sendTurn() {
+        const request = { messages: [{ role: 'user', content: chat.at(-1).mes }] };
+        api.markOutfitChatPrompt({ prompt: request.messages }, false);
+        await api.applyIsolatedOutfits(request);
+        return request;
+    }
+    const { messages } = await sendTurn();
+    const text = messages[0].content;
+    assert.match(text, /【上装】红色缎面衬衫。[\s\S]*【下装】莓红色短裙。[\s\S]*【袜子】浅米色丝袜。[\s\S]*【鞋】黑色尖头高跟鞋。/);
+    assert.doesNotMatch(text, /总述|黑色铅笔裙|金色耳饰|深色丝袜|白色短上装|墨黑浅口鞋/);
+    const references = messages[1].content;
+    assert.deepEqual(Array.from(references.filter(part => part.type === 'image_url'), part => part.image_url.url), [redImage, berryImage], '同套分件共用一张参考图');
+    assert.match(references[0].text, /仅看图中对应的【上装】[\s\S]*仅看图中对应的【鞋】/);
+    const body = '她把衬衫系进莓红色短裙里。';
+    const mixedReply = { mes: body, swipes: [body], swipe_id: 0 };
+    chat.push(mixedReply);
+    await api.publishOutfitSnapshot(chat.length - 1, 'normal');
+    const [, snapshot] = mixedReply.mes.match(/<!-- outfit:char=(.*?) -->/);
+    assert.equal(JSON.parse(snapshot).items[berrySkirt].description, '【下装】莓红色短裙。');
+    assert.deepEqual(Array.from(api.readEffectiveSelections().current.char), mixed);
+    assert.ok(api.readEffectiveSelections().worn.char.has(redSuit.id), '衣柜卡片能检测到来源套装正部分穿着');
+
+    // 先恢复整套，再由正文确认只换裙子；其余分件必须仍可引用。
+    chat.push({ is_user: true, mes: '恢复红衬衫原套，之后看看莓红短裙。' });
+    reply = { char: [redSuit.id], options: { char: [berrySkirt] } };
+    const offered = await sendTurn();
+    assert.match(offered.messages[0].content, /局部换装时，以其余仍穿着的分件 ID 代替整套 ID/);
+    const changed = [redTop, berrySkirt, 'part:socks:1:red-suit', redShoes, 'part:accessories:1:red-suit'];
+    const swap = `她换上了莓红短裙。\n<!-- outfit:char=${JSON.stringify(changed)} -->`;
+    chat.push({ mes: swap, swipes: [swap], swipe_id: 0 });
+    await api.publishOutfitSnapshot(chat.length - 1, 'normal');
+    assert.deepEqual(Array.from(api.readEffectiveSelections().current.char), changed, '保留整套中没换下的各件');
+    api.applyGarments([berrySuit.id], 'char', true);
+    assert.deepEqual(Array.from(api.readEffectiveSelections().current.char), changed.filter(id => id !== berrySkirt), '取消来源套装的分配只清掉它的分件');
+    assert.equal(saved.wardrobe_items.length, 2, '分件没有复制为衣柜条目');
+}
+
+test('现有套装按标签拆件并支持跨套混搭和局部换装', checkSplitOutfits);
 
 /**
  * 控制主请求读图的时机，覆盖同轮并发、重生成取消、换库、删除和存档失败。
