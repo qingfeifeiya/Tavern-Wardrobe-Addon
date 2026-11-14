@@ -111,7 +111,7 @@ function createHost(saved) {
     return { api: sandbox.api, controls, downloads, deleted, state };
 }
 
-test('大分类保留旧衣柜，隔离导入、标签、穿搭、发送、导出和删除，并恢复上次入口', async () => {
+test('大分类独立保存和导出，聊天汇总各柜当前范围的已应用服装', async () => {
     const mine = { id: 'mine', name: '我的外套', category: 'coats', description: '我的独有描述', image: '', groupIds: ['mine-tag'] };
     const saved = { wardrobe_items: [mine], wardrobe_groups: [{ id: 'mine-tag', name: '我的标签' }], wardrobe_send: { content_type: 'text' } };
     const { api, controls, downloads } = createHost(saved);
@@ -136,10 +136,16 @@ test('大分类保留旧衣柜，隔离导入、标签、穿搭、发送、导�
     api.selectSelectionScope({ currentTarget: { value: 'chat' } });
     assert.equal(api.readWearerSelections().char.size, 0);
     api.applyGarments([id], 'char');
+    const custom = { ...mine, name: '旅行帽', description: '旅行独有描述', groupIds: [] };
+    saved.wardrobe_libraries.push({ id: 'trip', name: '旅行' });
+    saved.wardrobe_library_data.trip = { wardrobe_items: [custom], wardrobe_selections: { char: [custom.id] } };
+    api.loadWardrobeLibraries();
     const event = { chat: [{ role: 'user', content: '你好' }], dryRun: false };
     await api.injectWardrobeContent(event);
     assert.match(JSON.stringify(event.chat), /外部独有描述/);
-    assert.doesNotMatch(JSON.stringify(event.chat), /我的独有描述/);
+    assert.match(JSON.stringify(event.chat), /我的独有描述/);
+    assert.match(event.chat[0].content, /旅行独有描述/);
+    assert.match(event.chat[0].content, /我的外套：我的标签[\s\S]*他人的裙子：外部标签/);
     await api.exportGarments(api.state().garments.keys(), true);
     const backup = JSON.parse(await downloads[0].blob.text());
     assert.equal(backup.items.length, 1);
@@ -151,6 +157,9 @@ test('大分类保留旧衣柜，隔离导入、标签、穿搭、发送、导�
     api.activateWardrobeLibrary('default-1');
     assert.equal(api.readWearerSelections().char.has('mine'), true);
     assert.equal(api.state().garmentGroups.get('mine-tag'), '我的标签');
+    const switched = { chat: [{ role: 'user', content: '你好' }], dryRun: false };
+    await api.injectWardrobeContent(switched);
+    assert.deepEqual(switched.chat, event.chat, '打开不同衣柜时同一聊天发送相同内容');
     api.activateWardrobeLibrary('default-2');
     assert.equal(api.state().garments.get(id).favorite, true);
     assert.equal(api.readWearerSelections().char.has(id), true);
@@ -160,7 +169,7 @@ test('大分类保留旧衣柜，隔离导入、标签、穿搭、发送、导�
     await api.deleteGarments(new Set([id]));
     assert.equal(api.readWearerSelections().char.size, 0);
     assert.deepEqual(saved.wardrobe_items.map(item => item.id), ['mine']);
-    assert.equal(controls.get('.tw-library-tabs').children.length, 2);
+    assert.equal(controls.get('.tw-library-tabs').children.length, 3);
 });
 
 test('手动新建的无图服装只写入当前衣柜，取消和保存失败保留原详情', async () => {

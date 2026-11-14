@@ -127,6 +127,7 @@ const names = { user: '玩家', char: '角色' };
  */
 function reset() {
     for (const key of Object.keys(saved)) delete saved[key];
+    api.setLibrary('default-1');
     chat = [];
     chatId = 'chat-a';
     saved.wardrobe_items = structuredClone([blue, red, pants, combination]);
@@ -142,6 +143,86 @@ function reset() {
     api.loadSendSettings();
     api.loadOutfitSettings();
 }
+
+/**
+ * 验证同 ID、同标签键的多衣柜可以共同发送，并按原分区保存跨柜穿搭与备选。
+ * @returns {Promise<void>} 直接发送和独立选装的断言通过后结束。
+ */
+async function checkCrossLibraryOutfits() {
+    reset();
+    const inner = { ...blue, name: '针织上衣', description: '针织上衣描述', category: 'tops' };
+    const skirt = { ...pants, name: '百褶裙', description: '百褶裙描述' };
+    const look = { ...combination, name: '街头搭配', componentIds: [inner.id, skirt.id] };
+    const spare = { ...red, name: '旅行鞋', description: '旅行鞋描述', category: 'shoes' };
+    const named = { ...red, id: 'named', name: '围巾', namedWearersByWorld: { '[]': ['小林'] } };
+    saved.wardrobe_library_data = { 'default-2': {
+        wardrobe_items: [inner, skirt, look, spare, named],
+        wardrobe_groups: [{ id: 'summer', name: '街头' }],
+        wardrobe_selections: { user: [inner.id, look.id, spare.id, named.id], current: { user: [inner.id] } },
+    } };
+    const turn = { is_user: true, mes: '小林拿起衣服，玩家挑选鞋子。' };
+    chat = [turn];
+    const nsfwBlue = 'wardrobe:["default-2","blue"]';
+    const nsfwRed = 'wardrobe:["default-2","red"]';
+    const direct = { chat: [{ role: 'user', content: turn.mes }] };
+    await api.injectWardrobeContent(direct);
+    const userBlock = direct.chat[0].content.find(part => part.text?.startsWith('【USER')).text;
+    assert.match(currentText(userBlock), /蓝外套[\s\S]*针织上衣/);
+    assert.match(userBlock, /蓝外套：夏季[\s\S]*针织上衣：街头/);
+    assert.match(userBlock, /街头搭配[\s\S]*成员同时穿着：针织上衣[\s\S]*百褶裙/);
+    assert.ok(direct.chat[0].content.some(part => part.text?.includes('【小林的专属服装】围巾')));
+    assert.doesNotMatch(userBlock, /长裤独有描述/, '同 ID 的搭配成员不串到 SFW');
+
+    // 完整快照保留 SFW 外套并移除另一衣柜的上衣，数组里的 ID 不能按原始 ID 混用。
+    chat.unshift({ mes: '<!-- outfit:user={"ids":["blue"]} -->' });
+    const followup = { chat: [{ role: 'user', content: turn.mes }] };
+    await api.injectWardrobeContent(followup);
+    const followupOutfit = currentText(followup.chat[0].content.find(part => part.text?.startsWith('【USER')).text);
+    assert.match(followupOutfit, /蓝外套/);
+    assert.doesNotMatch(followupOutfit, /针织上衣/);
+    api.setLibrary('default-2');
+    api.loadGarments();
+    assert.equal(api.readEffectiveSelections().current.user.size, 0, '另一柜列表同样读取完整快照');
+
+    sendForm.elements.marker_mode.value = 'isolated';
+    sendForm.elements.content_type.value = 'text_image';
+    api.saveSendSettings({ preventDefault() {} });
+    api.setApiConnection({ mode: 'host' });
+    const requests = [];
+    sandbox.SillyTavern.getRequestHeaders = () => ({});
+    /** 返回一套跨柜穿着和同轮备选，并记录发给选装接口的候选。 */
+    sandbox.window.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        const content = JSON.stringify({ user: ['blue', nsfwBlue], options: { user: [nsfwRed] } });
+        return new Response(JSON.stringify({ choices: [{ message: { content } }] }));
+    };
+    const request = { messages: [{ role: 'user', content: turn.mes }] };
+    const writesBefore = messageVariableWrites;
+    api.markOutfitChatPrompt({ prompt: request.messages }, false);
+    await api.applyIsolatedOutfits(request);
+    assert.equal(requests.length, 1, '同一请求只调用一次独立选装');
+    const candidates = requests[0].messages[1].content;
+    assert.match(candidates[0].text, /蓝外套[\s\S]*针织上衣/);
+    assert.equal(candidates.filter(part => part.type === 'image_url').length, 6, '同 ID 的跨柜图片独立，搭配复用柜内成员图');
+    assert.match(request.messages[0].content, /当前服装：蓝外套[\s\S]*当前服装：针织上衣[\s\S]*备选服装：旅行鞋/);
+    assert.equal(messageVariableWrites, writesBefore + 1);
+    const sfwKey = 'wardrobe_outfit:wardrobe-test:default-1';
+    const nsfwKey = 'wardrobe_outfit:wardrobe-test:default-2';
+    assert.deepEqual(turn.variables[0][sfwKey].user, ['blue']);
+    assert.deepEqual(turn.variables[0][nsfwKey], { user: ['blue'], char: [], offered: { user: ['red'], char: [] } });
+
+    const message = `换好鞋了。<!-- outfit:user=${JSON.stringify(['blue', nsfwBlue, nsfwRed])} -->`;
+    const reply = { mes: message, swipe_id: 0, swipes: [message] };
+    chat.push(reply);
+    await api.publishOutfitSnapshot(2, 'normal');
+    assert.deepEqual(reply.variables[0][sfwKey].user, ['blue']);
+    assert.deepEqual(reply.variables[0][nsfwKey].user, ['blue', 'red']);
+    const [, snapshot] = reply.mes.match(/<!-- outfit:user=(.*?) -->/);
+    assert.deepEqual(JSON.parse(snapshot).ids, ['blue', nsfwBlue, nsfwRed]);
+    assert.deepEqual(Array.from(api.readEffectiveSelections().current.user), ['blue', 'red']);
+}
+
+test('合并 SFW 与 NSFW 图文和同 ID 服装，跨柜换装按原分区保存', checkCrossLibraryOutfits);
 
 /**
  * 验证选择读写清理、手动锚点、历史标记和实际注入，以及搭配成员和多标签兼容。
@@ -334,7 +415,7 @@ async function checkCurrentOutfits() {
 
     // 明确约束注入顺序，防止后续合并把当前解析移到历史剥离之前或提前附说明。
     const injection = source.slice(source.indexOf('async function injectWardrobeContent('), source.indexOf('function loadWardrobeTemplates('));
-    const positions = ['isRegeneratingLastReply(', 'stripOutfitMarkers(', 'resolveCurrentOutfits(', 'buildWearerContent(', 'buildMarkerNote('].map(name => injection.indexOf(name));
+    const positions = ['isRegeneratingLastReply(', 'stripOutfitMarkers(', 'resolveCatalogOutfits(', 'buildWearerContent(', 'buildMarkerNote('].map(name => injection.indexOf(name));
     assert.ok(positions.every((position, index) => position >= 0 && (index === 0 || position > positions[index - 1])), '注入顺序符合完整补丁');
 }
 
